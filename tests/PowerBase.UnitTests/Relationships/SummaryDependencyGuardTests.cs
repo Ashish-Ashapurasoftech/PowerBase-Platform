@@ -40,12 +40,12 @@ public class SummaryDependencyGuardTests
     public async Task Change_that_breaks_a_summary_is_blocked_and_lists_it()
     {
         _fieldRepo.ListByTableAsync(ClientTableId, Arg.Any<CancellationToken>())
-            .Returns(new List<AppField> { Summary(30, "Sum of Amount", "Sum"), Summary(31, "Max of Amount", "Max") });
+            .Returns(new List<AppField> { Summary(30, "Avg of Amount", "Avg"), Summary(31, "Avg of Hours", "Avg") });
 
         var act = () => Run("Reference");
 
         var ex = (await act.Should().ThrowAsync<ConflictException>()).Which;
-        ex.Message.Should().Contain("Client › Sum of Amount (Sum)").And.Contain("Client › Max of Amount (Maximum)").And.Contain("2 summary field(s)");
+        ex.Message.Should().Contain("Client › Avg of Amount (Average)").And.Contain("Client › Avg of Hours (Average)").And.Contain("2 summary field(s)");
     }
 
     [Fact]
@@ -56,6 +56,15 @@ public class SummaryDependencyGuardTests
             .Returns(new List<AppField> { Summary(30, "Sum of Amount", "Sum"), Summary(31, "Max of Amount", "Max") });
 
         await FluentActions.Invoking(() => Run("Currency")).Should().NotThrowAsync();
+    }
+
+    [Fact]
+    public async Task Sum_min_and_max_are_allowed_on_a_reference_as_its_record_id()
+    {
+        _fieldRepo.ListByTableAsync(ClientTableId, Arg.Any<CancellationToken>())
+            .Returns(new List<AppField> { Summary(30, "Sum of Amount", "Sum"), Summary(31, "Max of Amount", "Max"), Summary(37, "Min of Amount", "Min") });
+
+        await FluentActions.Invoking(() => Run("Reference")).Should().NotThrowAsync();
     }
 
     [Fact]
@@ -85,7 +94,7 @@ public class SummaryDependencyGuardTests
     public async Task Lowercase_function_name_from_an_old_import_is_still_checked()
     {
         _fieldRepo.ListByTableAsync(ClientTableId, Arg.Any<CancellationToken>())
-            .Returns(new List<AppField> { Summary(30, "Sum of Amount", "sum") });
+            .Returns(new List<AppField> { Summary(30, "Avg of Amount", "avg") });
 
         await FluentActions.Invoking(() => Run("Reference")).Should().ThrowAsync<ConflictException>();
     }

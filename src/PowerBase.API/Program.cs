@@ -282,6 +282,7 @@ builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineReco
         sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<PowerBase.Application.Common.Configurations.PipelineExecutionOptions>>()));
 builder.Services.AddSingleton<IAzureSearchService, PowerBase.Infrastructure.Services.AzureSearchService>();
 builder.Services.AddScoped<PowerBase.Application.Records.RecordWriteService>();
+builder.Services.AddScoped<PowerBase.Application.Records.ISnapshotCaptureService, PowerBase.Application.Records.SnapshotCaptureService>();
 builder.Services.AddScoped<PowerBase.Application.Records.FileRecordWriteService>();
 builder.Services.AddScoped<PowerBase.Application.Records.IRecordWriteService>(sp => sp.GetRequiredService<PowerBase.Application.Records.FileRecordWriteService>());
 builder.Services.AddScoped<PowerBase.Application.Records.IFileRecordWriteService>(sp => sp.GetRequiredService<PowerBase.Application.Records.FileRecordWriteService>());
@@ -600,6 +601,8 @@ builder.Services.AddScoped<PowerBase.Application.Records.Queries.SearchGlobalRec
 builder.Services.AddScoped<PowerBase.Application.Search.Commands.BackfillSearchIndex.BackfillSearchIndexCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Search.Commands.SanitizeEncryptedData.SanitizeEncryptedDataCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Records.Queries.GetDistinctFieldValues.GetDistinctFieldValuesQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Fields.Queries.SharedValues.ListSharedFieldsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Fields.Queries.SharedValues.GetSharedFieldValuesQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.CreateRelationship.CreateRelationshipCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.DeleteRelationship.DeleteRelationshipCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.AddLookupFields.AddLookupFieldsCommandHandler>();
@@ -625,6 +628,10 @@ builder.Services.AddScoped<PowerBase.Application.Reports.Commands.DeleteReportRe
 builder.Services.AddScoped<PowerBase.Application.Reports.DeleteJobs.IRecordDeleteJobRepository, PowerBase.Infrastructure.Repositories.RecordDeleteJobRepository>();
 builder.Services.AddScoped<PowerBase.Application.Reports.DeleteJobs.RecordDeleteJobProcessor>();
 builder.Services.AddHostedService<PowerBase.API.Workers.RecordDeleteJobWorker>();
+builder.Services.AddScoped<PowerBase.Application.Fields.SnapshotJobs.IFieldSnapshotJobRepository, PowerBase.Infrastructure.Repositories.FieldSnapshotJobRepository>();
+builder.Services.AddScoped<PowerBase.Application.Fields.SnapshotJobs.FieldSnapshotJobProcessor>();
+builder.Services.AddScoped<PowerBase.Application.Fields.SnapshotJobs.FieldSnapshotJobService>();
+builder.Services.AddHostedService<PowerBase.API.Workers.FieldSnapshotJobWorker>();
 builder.Services.AddScoped<DeleteReportCommandHandler>();
 builder.Services.AddScoped<SetDefaultReportCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Reports.Commands.UpdateReportFormOverrides.UpdateReportFormOverridesCommandHandler>();

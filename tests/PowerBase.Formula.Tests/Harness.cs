@@ -43,6 +43,14 @@ internal sealed class Bed
         return this;
     }
 
+    public Bed AddressField(string name, object? value)
+    {
+        _schema.AddAddress(name);
+        _schema.TryResolve(name, out var f);
+        _values[f.Fid] = value;
+        return this;
+    }
+
     public FormulaValue Eval(string expr, EvaluationOptions? opt = null)
     {
         var compiled = Engine.Compile(expr, _schema);

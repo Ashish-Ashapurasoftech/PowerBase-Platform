@@ -83,11 +83,14 @@ public sealed class ImportChunkWriter
     private readonly List<AppField> _required;
     private readonly List<AppField> _unique;
     private readonly Dictionary<int, ImportFieldFormat> _formats;
+    private readonly PowerBase.Application.Records.ISnapshotCaptureService? _snapshots;
 
     public ImportChunkWriter(ImportPlan plan, IImportDataStore store, IRecordRepository records, ImportDataRuleGate? gate,
-        FormulaEngine engine, long userId, ImportPassMode mode, ImportDuplicateTracker tracker, string? tableLabel = null, IReferenceOriginalFields? originals = null)
+        FormulaEngine engine, long userId, ImportPassMode mode, ImportDuplicateTracker tracker, string? tableLabel = null, IReferenceOriginalFields? originals = null,
+        PowerBase.Application.Records.ISnapshotCaptureService? snapshots = null)
     {
         _originals = originals;
+        _snapshots = snapshots;
         _tableLabel = tableLabel;
         _plan = plan; _store = store; _records = records; _gate = gate; _engine = engine; _userId = userId; _mode = mode; _tracker = tracker;
         _isMerge = plan.ImportType == ImportTypes.Merge;
@@ -237,6 +240,10 @@ public sealed class ImportChunkWriter
             }, feedback);
             insertedRows = await WriteAsync(inserts, async batch =>
             {
+                // Snapshot fields of the new records take their source value now, once.
+                if (_snapshots is not null)
+                    await _snapshots.ApplyOnCreateAsync(_plan.Destination, _plan.DestinationFields,
+                        batch.Select(r => (IDictionary<long, object?>)r.Values).ToList(), ct);
                 var ids = await _store.InsertAsync(_plan.Destination, WriteFields,
                     batch.Select(r => (IReadOnlyDictionary<long, object?>)r.Values).ToList(), _userId, ct);
                 for (var i = 0; i < batch.Count && i < ids.Count; i++) batch[i].InsertedId = ids[i];

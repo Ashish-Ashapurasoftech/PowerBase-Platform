@@ -152,6 +152,15 @@ public class RunReportQueryHandler
         // Totals/grouping that no longer fit a field whose type was changed are skipped (Change Type).
         PowerBase.Application.Fields.TypeConversion.ReportDefinitionTypeSanitizer.Apply(definition, allFields);
 
+        // The report's own formulas become virtual (reserved-Fid) fields, visible to every viewer, so the columns / filter /
+        // sort / group-by / aggregation code below treats them like any Formula field.
+        var reportFormulaFields = ReportFormulaFields.Build(definition.ReportFormulas, table.Id);
+        if (reportFormulaFields.Count > 0)
+        {
+            allFields = [.. allFields, .. reportFormulaFields];
+            access = ReportFormulaFields.WithVisible(access, reportFormulaFields);
+        }
+
         // Enforce the report's Dynamic Filter configuration server-side: when DynamicFilterType
         // is "Custom", only the fields the report designer picked may be used as a runtime
         // dynamic filter — previously this was a UI-only hint (any filterable field worked
@@ -297,6 +306,8 @@ public class RunReportQueryHandler
         if (!access.CanView) return null;
 
         var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
+        var reportFormulaFields = ReportFormulaFields.Build(definition.ReportFormulas, table.Id);
+        if (reportFormulaFields.Count > 0) allFields = [.. allFields, .. reportFormulaFields];
         var runtimeFilters = FilterRuntimeFiltersByDynamicFilterConfig(definition, query.RuntimeFilters);
         var tree = await BuildFilterTreeAsync(definition, query, table, allFields, ct);
         tree = MergeRuntimeFilters(tree, allFields, runtimeFilters);

@@ -1593,7 +1593,7 @@ public partial class PipelineEngine : IPipelineEngine
     private async Task ValidateNewBulkUpsertRowAsync(AppTable table, IReadOnlyList<AppField> fields, Dictionary<long, object?> row,
         IRecordRepository recordRepo, IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IDbTransaction? transaction, int rowNumber, CancellationToken ct)
     {
-        await PipelineCreateRecordRules.ApplyDefaultsAsync(fields, row, StepActingUserId, CurrentStepServices, ct);
+        await PipelineCreateRecordRules.ApplyDefaultsAsync(table, fields, row, StepActingUserId, CurrentStepServices, ct);
         try
         {
             await PipelineCreateRecordRules.ValidateAsync(table, fields, row, recordRepo, tableRepo, fieldRepo, CurrentStepServices, transaction, ct);
@@ -2018,7 +2018,7 @@ public partial class PipelineEngine : IPipelineEngine
                     var streamAiPlan = aiIndexRead
                         ? new PipelineAiSearchPlan(null, "the index was already read")
                         : workset.DiscoverySource == "Ai" || (workset.DiscoveredCount == 0 && workset.LastRecordId == 0)
-                            ? await PlanAiSearchAsync(table, fields, filterTree, ct)
+                            ? await PlanAiSearchAsync(table, fields, filterTree, recordRepo, ct, applyGates: workset.DiscoverySource != "Ai")
                             : new PipelineAiSearchPlan(null, "the search already started in SQL");
                     if (aiReadComplete && workset.DiscoveredCount > 0)
                     {
@@ -2235,7 +2235,7 @@ public partial class PipelineEngine : IPipelineEngine
             List<IReadOnlyDictionary<string, object?>> resultsList;
             var computedMerged = false;
             List<IReadOnlyDictionary<string, object?>>? aiSearchRows = null;
-            var aiPlan = await PlanAiSearchAsync(table, fields, filterTree, ct);
+            var aiPlan = await PlanAiSearchAsync(table, fields, filterTree, recordRepo, ct);
             if (aiPlan.UseAiSearch)
             {
                 try
@@ -2377,7 +2377,7 @@ public partial class PipelineEngine : IPipelineEngine
                 // Same rules as adding the record by hand: defaults, Required / Unique / format, Custom Data Rule. After the receipt check
                 // above, so a retry of a step that already wrote its record returns that result instead of reporting its own record as a duplicate.
                 LoopBatchProfile.Phase("receipt-check", ref phaseMark);
-                await PipelineCreateRecordRules.ApplyDefaultsAsync(fields, values, StepActingUserId, CurrentStepServices, ct);
+                await PipelineCreateRecordRules.ApplyDefaultsAsync(table, fields, values, StepActingUserId, CurrentStepServices, ct);
                 LoopBatchProfile.Phase("defaults", ref phaseMark);
                 await PipelineCreateRecordRules.ValidateAsync(table, fields, values, recordRepo, tableRepo, fieldRepo, CurrentStepServices, uow.Transaction, ct);
 
@@ -6310,6 +6310,16 @@ public partial class PipelineEngine : IPipelineEngine
             "is-not-empty" => "isNotEmpty",
             "is-true" => "eq",
             "is-false" => "eq",
+            // Spellings the validator and the in-memory evaluator accept (the Condition step's editor emits them) — without
+            // these a saved Search Records rule was passed on unmapped and silently matched every record.
+            "equals" or "=" => "eq",
+            "not-equals" or "<>" or "!=" => "ne",
+            ">" or "after" => "gt",
+            ">=" or "greater-than-or-equal" or "on-or-after" => "gte",
+            "<" or "before" => "lt",
+            "<=" or "less-than-or-equal" or "on-or-before" => "lte",
+            "is-blank" or "is-null" => "isEmpty",
+            "is-not-blank" or "is-not-null" => "isNotEmpty",
             _ => normalized
         };
     }

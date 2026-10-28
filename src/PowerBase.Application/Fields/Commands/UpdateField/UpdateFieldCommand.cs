@@ -16,4 +16,9 @@ public record UpdateFieldCommand(
     bool IsEncrypted,
     bool IsAutoFill,
     string? Settings,
-    string CommitMessage);
+    string CommitMessage,
+    int? SnapshotSourceFid = null,
+    bool SnapshotEditable = false,
+    /// <summary>Shared values; null leaves the stored flag unchanged (callers that predate the setting, e.g. imports).</summary>
+    bool? IsSharedValues = null,
+    bool InitializeSnapshotForExisting = false);

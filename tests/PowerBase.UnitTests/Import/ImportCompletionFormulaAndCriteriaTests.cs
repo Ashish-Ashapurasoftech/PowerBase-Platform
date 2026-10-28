@@ -51,20 +51,21 @@ public class ImportCompletionFormulaAndCriteriaTests
     }
 
     [Fact]
-    public void Translate_MultiBranchIf_BecomesNestedIf()
+    public void Translate_MultiBranchIf_IsSupportedAsWritten()
     {
+        // The engine reads Quickbase's If(c1, v1, c2, v2, ..., else) itself, so the formula is stored exactly as the author wrote it.
         var result = _sut.Translate("Text", "If([Qty]=1, \"a\", [Qty]=2, \"b\", \"c\")", Fields());
 
-        result.Status.Should().Be(FormulaTranslationStatus.Adjusted);
-        result.SettingsJson.Should().Contain("If([Qty]=1, \\u0022a\\u0022, If([Qty]=2");
+        result.Status.Should().Be(FormulaTranslationStatus.Clean);
+        result.SettingsJson.Should().Contain("If([Qty]=1, \\u0022a\\u0022, [Qty]=2");
     }
 
     [Fact]
-    public void Translate_MultiBranchIfWithoutElse_NestsWithBlankElse()
+    public void Translate_MultiBranchIfWithoutElse_IsSupportedAndBlankWhenNoConditionHolds()
     {
         var result = _sut.Translate("Text", "If([Qty]=1, \"a\", [Qty]=2, \"b\")", Fields());
 
-        result.Status.Should().Be(FormulaTranslationStatus.Adjusted);
+        result.Status.Should().Be(FormulaTranslationStatus.Clean);
     }
 
     [Fact]

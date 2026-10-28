@@ -404,7 +404,7 @@ public sealed class RelationalProjector : IRelationalProjector
             // Record ID#, is left alone.
             var criteriaFields = childFields;
             var criteriaLookupSources = lookupSources;
-            if (ReferenceKeys.StandIn(filter, s.TargetFid, childFieldsByFid, referenceKeys) is { } keys)
+            if (ReferenceKeys.StandIn(filter, s.TargetFid, childFieldsByFid, referenceKeys, function) is { } keys)
             {
                 filter = keys.Filter;
                 if (s.TargetFid is int keyTarget && keys.Moved.TryGetValue(keyTarget, out var standInTarget))

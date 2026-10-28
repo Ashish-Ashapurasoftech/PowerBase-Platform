@@ -136,7 +136,9 @@ public static class FormRuleServerValidator
         // condition compares against the whole set. Fetched only when some rule actually has a role
         // condition, so writes to tables without one pay nothing. (This used to compare against the
         // TENANT-level role name, which isn't what the rule builder's role picker lists.)
-        var needsRoles = rules.Any(r => !r.IsExpressionMode && r.Conditions.Any(c => c.ConditionKind == "role"));
+        var needsRoles = rules.Any(r => r.IsExpressionMode
+            ? r.ExpressionText?.Contains("UserRoles(", StringComparison.OrdinalIgnoreCase) == true
+            : r.Conditions.Any(c => c.ConditionKind == "role"));
         IReadOnlyList<string> userRoles = needsRoles
             ? await appUserRepo.GetUserAppRoleNamesAsync(table.AppId, currentUserId, ct)
             : Array.Empty<string>();
@@ -151,7 +153,7 @@ public static class FormRuleServerValidator
             bool met;
             if (rule.IsExpressionMode)
             {
-                met = await EvaluateExpressionConditionAsync(rule, table, fields, effectiveValues, tableRepo, fieldRepo, recordRepo, engine, ct);
+                met = await EvaluateExpressionConditionAsync(rule, table, fields, effectiveValues, tableRepo, fieldRepo, recordRepo, engine, userRoles, ct);
             }
             else
             {
@@ -788,6 +790,7 @@ public static class FormRuleServerValidator
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
         FormulaEngine engine,
+        IReadOnlyList<string> userRoles,
         CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(rule.ExpressionText)) return false;
@@ -799,7 +802,12 @@ public static class FormRuleServerValidator
 
         var crossTable = new CrossTableQueryContext(tableRepo, fieldRepo, recordRepo, table);
         var context = new CrossTableRecordContext(new StructuredValueContext(new ValuesRecordContext(effectiveValues), fields), crossTable);
-        var options = new EvaluationOptions { TableId = table.PublicId.ToString() };
+        // UserRoles() in a rule formula (an imported role condition) reads the current user's app roles.
+        var options = new EvaluationOptions
+        {
+            TableId = table.PublicId.ToString(),
+            CurrentUserRoles = () => userRoles.Select(name => new RoleRef(name, name)).ToList(),
+        };
 
         try { return engine.Evaluate(compiled, context, options).AsBool(); }
         catch (FormulaEvaluationException) { return false; }

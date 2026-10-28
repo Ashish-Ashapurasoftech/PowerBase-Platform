@@ -61,8 +61,15 @@ public class FormulaCanonicalizerTests
     [Fact]
     public void ToStored_does_not_convert_a_field_type_a_formula_cannot_read()
     {
+        var link = Field(20, "C_doc", "Document", "ReportLink");
+        For(link).ToStored("[Document]").Should().Be("[Document]");
+    }
+
+    [Fact]
+    public void ToStored_converts_a_file_field_because_formulas_now_read_it_as_its_file_name()
+    {
         var file = Field(20, "C_doc", "Document", "File");
-        For(file).ToStored("[Document]").Should().Be("[Document]");
+        For(file).ToStored("[Document]").Should().Be("[fid_20|Document]");
     }
 
     [Fact]

@@ -37,7 +37,8 @@ public class CreateRecordCommandHandler
         IFormRuleRepository formRuleRepo,
         IFormRepository formRepo,
         IAppUserRepository appUserRepo,
-        IReferenceRelinkService? relink = null)
+        IReferenceRelinkService? relink = null,
+        ISnapshotCaptureService? snapshots = null)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -50,7 +51,8 @@ public class CreateRecordCommandHandler
         _messagePublisher = messagePublisher;
         _relink = relink;
         _preparer = new RecordCreatePreparer(
-            tableRepo, fieldRepo, recordRepo, relRepo, enforcer, queryContext, userRepo, appRepo, engine, formRuleRepo, formRepo, appUserRepo);
+            tableRepo, fieldRepo, recordRepo, relRepo, enforcer, queryContext, userRepo, appRepo, engine, formRuleRepo, formRepo, appUserRepo,
+            snapshots: snapshots);
     }
 
     public async Task<RecordResult> HandleAsync(CreateRecordCommand command, CancellationToken ct = default)

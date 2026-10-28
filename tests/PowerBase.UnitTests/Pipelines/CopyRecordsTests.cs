@@ -531,6 +531,7 @@ public class CopyRecordsTests
     private static void IndexSource(Harness harness)
     {
         harness.SourceFields[0].IsSearchable = true;
+        harness.SourceFields[0].SearchSlot = "str_01";
         harness.SourceFields[0].IsFilterable = true;
         harness.AzureSearch.IsGridSearchEnabled.Returns(true);
         harness.AzureSearch.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
@@ -557,7 +558,7 @@ public class CopyRecordsTests
         await harness.Run("{6.EX.'none'}");
 
         harness.AzureSearch.Received(1).SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), harness.Source.Id,
-            Arg.Is<string>(odata => odata.Contains("search.ismatch('\"none\"', 'f_6', 'full', 'any')")), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+            Arg.Is<string>(odata => odata.Contains("search.ismatch('\"none\"', 'str_01', 'full', 'any')")), Arg.Any<string?>(), Arg.Any<CancellationToken>());
         await harness.AzureSearch.DidNotReceive().SearchRecordsByFilterAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
         Assert.NotNull(capturedFilter);
         Assert.Equal("in", IdRestriction(capturedFilter).Operator);
@@ -635,6 +636,67 @@ public class CopyRecordsTests
     }
 
     [Fact]
+    public async Task Copy_GridSearchEnabled_Contains_WithPatternOperatorsOn_AsksTheIndexForTheWordInsideAnyWord()
+    {
+        using var harness = new Harness();
+        IndexSource(harness);
+        harness.AiOptions.AiSearchPatternOperators = true;
+        harness.AzureSearch.SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), harness.Source.Id, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(_ => AiPages());
+
+        try { await harness.Run("{6.CT.'none'}"); } catch (Exception ex) when (ex is ValidationException or PipelineNonRetryableException) { }
+
+        harness.AzureSearch.Received(1).SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), harness.Source.Id,
+            Arg.Is<string>(odata => odata.Contains("search.ismatch('/.*none.*/', 'str_01', 'full', 'any')")), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Copy_GridSearchEnabled_ASmallSourceTable_IsReadFromSqlAndTheIndexIsNeverAsked()
+    {
+        using var harness = new Harness();
+        IndexSource(harness);
+        harness.AiOptions.AiSearchMinTableRows = 20000;
+        harness.Records.CountAsync(harness.Source, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>(), Arg.Any<IReadOnlySet<long>?>())
+            .Returns(Task.FromResult(500));
+
+        await harness.Run("{6.EX.'none'}");
+
+        harness.AzureSearch.DidNotReceive().SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Copy_GridSearchEnabled_AnIndexMissingRecords_IsReadFromSqlAndNotUsedToChooseTheSourceRecords()
+    {
+        using var harness = new Harness();
+        IndexSource(harness);
+        harness.AiOptions.AiSearchCountGuard = true;
+        harness.Records.CountAsync(harness.Source, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>(), Arg.Any<IReadOnlySet<long>?>())
+            .Returns(Task.FromResult(100000));
+        harness.AzureSearch.SearchRecordsPagedAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<int>(), Arg.Any<int>(),
+                Arg.Any<IReadOnlyList<string>?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(((IReadOnlyList<Guid>)new List<Guid>(), 90000L)));   // 10,000 documents missing
+
+        await harness.Run("{6.EX.'none'}");
+
+        harness.AzureSearch.DidNotReceive().SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+        harness.Search.Received(1).ReadCopySnapshotAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
+            Arg.Is<FilterGroup?>(f => f != null && !f.Nodes.Any(n => n.Condition != null && n.Condition.FieldId == 3)), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Copy_GridSearchEnabled_AFieldChangedLately_IsReadFromSql()
+    {
+        using var harness = new Harness();
+        IndexSource(harness);
+        harness.AiOptions.AiSearchFieldSettleHours = 24;
+        harness.SourceFields[0].ModifiedOn = DateTime.UtcNow.AddHours(-2);
+
+        await harness.Run("{6.EX.'none'}");
+
+        harness.AzureSearch.DidNotReceive().SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task Copy_GridSearchDisabled_NeverCallsAzureSearch()
     {
         using var harness = new Harness();
@@ -647,8 +709,7 @@ public class CopyRecordsTests
 
     [Theory]
     [InlineData("{6.CT.'none'}", "Text", true, true)]        // contains: the index cannot answer it exactly
-    [InlineData("{6.EX.'none'}", "Text", false, true)]       // not searchable
-    [InlineData("{6.EX.'none'}", "Text", true, false)]       // not filterable
+    [InlineData("{6.EX.'none'}", "Text", false, false)]      // not indexed (neither searchable nor filterable)
     [InlineData("{6.EX.'none'}", "Number", true, true)]      // numbers are compared as text in the index
     [InlineData("{6.EX.'none'}", "Formula_Text", true, true)]  // no column
     [InlineData("{6.EX.'none'}", "Lookup", true, true)]
@@ -1631,6 +1692,9 @@ public class CopyRecordsTests
         public IRecordWriteService Writes { get; } = Substitute.For<IRecordWriteService>();
         public IPipelineRecordSearchService Search { get; } = Substitute.For<IPipelineRecordSearchService>();
         public IAzureSearchService AzureSearch { get; } = Substitute.For<IAzureSearchService>();
+        /// <summary>The pipeline options the executor reads (the AI Search checks are off here; a test switches the one it covers on).</summary>
+        public PowerBase.Application.Common.Configurations.PipelineExecutionOptions AiOptions { get; } =
+            new() { AiSearchMinTableRows = 0, AiSearchCountGuard = false, AiSearchFieldSettleHours = 0, AiSearchLimitedReadMaxMatches = 1000, AiSearchGuardCacheSeconds = 0, AiSearchPatternOperators = false };
         public IAuditRepository Audit { get; } = Substitute.For<IAuditRepository>();
         public IAppTableRepository Tables { get; } = Substitute.For<IAppTableRepository>();
         public IPipelineTriggerInterceptor Interceptor { get; } = Substitute.For<IPipelineTriggerInterceptor>();
@@ -1715,7 +1779,9 @@ public class CopyRecordsTests
                 .AddSingleton(Substitute.For<IUserRepository>()).AddSingleton(Audit)
                 .AddSingleton(Substitute.For<IRelationshipRepository>())
                 .AddSingleton(relationalProjector).AddSingleton(formulaProjector).AddSingleton(AzureSearch)
-                .AddSingleton(Interceptor).AddSingleton(Publisher).AddSingleton(apps).AddSingleton<FormulaEngine>().BuildServiceProvider();
+                .AddSingleton(Interceptor).AddSingleton(Publisher).AddSingleton(apps).AddSingleton<FormulaEngine>()
+                .AddSingleton<Microsoft.Extensions.Options.IOptions<PowerBase.Application.Common.Configurations.PipelineExecutionOptions>>(Microsoft.Extensions.Options.Options.Create(AiOptions))
+                .BuildServiceProvider();
         }
         private async IAsyncEnumerable<IReadOnlyList<IReadOnlyDictionary<string, object?>>> Page()
         {

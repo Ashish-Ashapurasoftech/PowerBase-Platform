@@ -34,6 +34,23 @@ public class PipelineExecutionOptions
     /// also reads, from SQL, every record created or modified within this many seconds before it started, so a record the
     /// index has not caught up with yet is still found. 0 turns that off. It does not cover an index update that was lost.</summary>
     public int AiSearchIndexLagSeconds { get; set; } = 600;
+    /// <summary>Answer contains / starts with / ends with / wildcard conditions from Azure AI Search too (regular expressions over the
+    /// index's words, always confirmed in SQL). On by default: it was checked against the real search service (a scratch index loaded
+    /// with awkward text, hundreds of random conditions: nothing SQL matches was left out). Set false to read these conditions from SQL again.</summary>
+    public bool AiSearchPatternOperators { get; set; } = true;
+    /// <summary>A table with fewer records than this is searched in SQL: a scan is quick there, and the index (and its lag) is not needed. 0 = always use the index when it can answer.</summary>
+    public int AiSearchMinTableRows { get; set; } = 20000;
+    /// <summary>Before answering from the index, compare how many records it holds with how many the table has (allowing for the
+    /// records changed within <see cref="AiSearchIndexLagSeconds"/>). An index that holds fewer is missing records, so the search is read from SQL.</summary>
+    public bool AiSearchCountGuard { get; set; } = true;
+    /// <summary>A search that uses a field changed within this many hours (a field just switched on for search is still being copied into
+    /// the index) is read from SQL. 0 turns that off.</summary>
+    public int AiSearchFieldSettleHours { get; set; } = 24;
+    /// <summary>With a MaxResults, the index is used only when it finds at most this many candidates: they are all read, sorted by
+    /// record id and cut to MaxResults, so the same records come back as from SQL. More candidates are read from SQL, which stops at MaxResults.</summary>
+    public int AiSearchLimitedReadMaxMatches { get; set; } = 20000;
+    /// <summary>How long the table and index counts of the guards above are reused (seconds). 0 = never.</summary>
+    public int AiSearchGuardCacheSeconds { get; set; } = 30;
     /// <summary>Optional cap on the size of a Search Records output. 0 (the default) means unlimited.</summary>
     public int MaxStepOutputBytes { get; set; }
     public bool EnableLoopBatches { get; set; }

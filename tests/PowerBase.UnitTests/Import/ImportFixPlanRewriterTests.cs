@@ -23,6 +23,7 @@ public class ImportFixPlanRewriterTests
         new() { Name = "Clicked C", TypeCode = "DateTime", Fid = 13 },
         new() { Name = "Open", TypeCode = "Number", Fid = 14 },
         new() { Name = "Status", TypeCode = "Text", Fid = 15 },
+        new() { Name = "Done", TypeCode = "Boolean", Fid = 16 },
     ];
 
     private FormulaTranslationResult Translate(string type, string expression)
@@ -111,5 +112,109 @@ public class ImportFixPlanRewriterTests
         result.Status.Should().Be(FormulaTranslationStatus.Adjusted, string.Join("; ", result.Diagnostics));
         result.SettingsJson!.IndexOf("var text one", StringComparison.Ordinal).Should().BeGreaterThanOrEqualTo(0)
             .And.BeLessThan(result.SettingsJson.IndexOf("If(", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void NumberComparedWithACheckbox_CountsTrueAsOne()
+    {
+        var result = Translate("Bool", "[Qty] = true");
+
+        result.SettingsJson.Should().Contain("ToNumber(true)");
+    }
+
+    [Fact]
+    public void NumberInAnd_IsReadAsTrueWhenNotZero()
+    {
+        var result = Translate("Bool", "[Done] and [Qty]");
+
+        result.SettingsJson.Should().Contain("ToBool([Qty])");
+    }
+
+    [Fact]
+    public void TextResultWhereANumberIsRequired_IsReadAsANumber()
+    {
+        Translate("Number", "[Status]").SettingsJson.Should().Contain("ToNumber([Status])");
+    }
+
+    [Fact]
+    public void NumberResultWhereADurationIsRequired_IsReadAsHours()
+    {
+        var result = Translate("Duration", "[Qty]");
+
+        result.SettingsJson.Should().Contain("Hours([Qty])");
+        result.TypeCode.Should().Be("Formula_Duration");
+    }
+
+    [Fact]
+    public void NumberResultWhereADurationIsRequired_InsideAVar_OnlyTheResultIsConverted()
+    {
+        var result = Translate("Duration", """
+            var number q = [Qty] * 2;
+            $q
+            """);
+
+        result.SettingsJson.Should().Contain("Hours($q)").And.Contain("var number q");
+    }
+
+    [Fact]
+    public void TextAndUserBranches_TheTextBecomesAUser()
+    {
+        var result = Translate("User", "If([Status] = \"x\", ToUser(\"a@b.com\"), [Status])");
+
+        result.SettingsJson.Should().Contain("ToUser([Status])");
+        result.TypeCode.Should().Be("Formula_User");
+    }
+
+    [Fact]
+    public void TextResultWhereAUserIsRequired_BecomesAUser()
+    {
+        Translate("User", "[Status]").SettingsJson.Should().Contain("ToUser([Status])");
+    }
+
+    [Fact]
+    public void NumberAndTextBranches_AreJoinedAsText()
+    {
+        var result = Translate("Text", "If([Done], [Qty], [Status])");
+
+        result.SettingsJson.Should().Contain("ToText([Qty])");
+    }
+
+    [Fact]
+    public void LongConcatenationChain_IsFixedInOnePass()
+    {
+        var operands = string.Join(" & \"-\" & ", Enumerable.Repeat("[Qty]", 30));
+
+        var result = Translate("Text", operands);
+
+        result.Status.Should().Be(FormulaTranslationStatus.Adjusted);
+    }
+
+    [Fact]
+    public void NumberVariableGivenText_IsConvertedOnTheWayIn()
+    {
+        var result = Translate("Text", """
+            var number n = If([Status] != "", [Name], [Name]);
+            If($n > 0, "yes", "no")
+            """);
+
+        result.SettingsJson.Should().Contain("ToNumber(If(");
+    }
+
+    [Fact]
+    public void OneArgumentSplitOfAList_SplitsOnTheListDelimiter()
+    {
+        var result = Translate("Text", """
+            ToText(Split(List(" ; ", If([Done] = true, "A"), If([Qty] > 1, "B"))))
+            """);
+
+        result.SettingsJson.Should().Contain("\\u0022B\\u0022)), \\u0022 ; \\u0022))");
+    }
+
+    [Fact]
+    public void TextComparedWithTheCurrentUser_IsComparedWithTheUsersEmail()
+    {
+        var result = Translate("Bool", "[Name] = User()");
+
+        result.SettingsJson.Should().Contain("UserToEmail(User())");
     }
 }

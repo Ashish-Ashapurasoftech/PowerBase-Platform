@@ -1,6 +1,7 @@
 using PowerBase.Application.Reports.Validation;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
+using PowerBase.Domain.Enums;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Domain.FieldSettings;
 
@@ -65,6 +66,10 @@ public static class SummaryTargetValidator
         if (function == SummaryFunctions.CombinedText && SummaryComputedTargets.CombinedTextValueType(target, lookupSources) is not null)
             return null;
 
+        // Sum / Min / Max of a Reference — or of a lookup of one — read the Record ID# its column holds, a number whatever key is shown.
+        if (ReferenceKeys.ReadsRecordId(target, lookupSources, function))
+            return null;
+
         // A Lookup is summarized from the parent column it pulls down, so it's judged by that
         // field: it must still exist and have a column, and its type is the lookup's type.
         if (SummaryLookupSources.IsLookup(target))
@@ -84,7 +89,7 @@ public static class SummaryTargetValidator
 
         // A Reference whose parent shows a key field is summarized as that key (Combined Text of client names, not
         // Record IDs), so it's judged by the key's type (ReferenceKeys).
-        if (ReferenceKeys.KeyTypeCode(target, referenceKeys) is { } keyType)
+        if (ReferenceKeys.KeyTypeCode(target, referenceKeys, function) is { } keyType)
             return FindTypeProblem(function, fieldLabel, keyType, targetSubField);
 
         // Summary values are computed at read time and have no physical column to

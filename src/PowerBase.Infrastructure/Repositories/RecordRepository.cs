@@ -690,7 +690,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 (labelFields.Count > 0 ? labelFields[0] : null, (Action<ReferenceOption, string?>)((o, v) => o.Value1 = v)),
                 (labelFields.Count > 1 ? labelFields[1] : null, (Action<ReferenceOption, string?>)((o, v) => o.Value2 = v)),
                 (labelFields.Count > 2 ? labelFields[2] : null, (Action<ReferenceOption, string?>)((o, v) => o.Value3 = v)),
-                (primaryLabelField,                             (Action<ReferenceOption, string?>)((o, v) => o.Label = v)),
+                // Without a primary label field, Label was selected from the first physical label column (searchColExpr above).
+                (primaryLabelField ?? physicalLabelFields.FirstOrDefault(), (Action<ReferenceOption, string?>)((o, v) => o.Label = v)),
             };
             foreach (var (field, assign) in decryptCols)
             {
@@ -3292,7 +3293,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
     public async Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(
         AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default,
-        IReadOnlyCollection<long>? onlyRowIds = null)
+        IReadOnlyCollection<long>? onlyRowIds = null,
+        bool dropUndecryptable = false)
     {
         var col = field.IsSystem && !string.IsNullOrEmpty(field.PhysicalColumnName)
             ? field.PhysicalColumnName!
@@ -3322,7 +3324,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var encContext = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
-        bool requiresClientSideDistinct = encContext.IsActive && !field.IsSystem && field.IsEncrypted;
+        // An encrypted app stores every non-system, non-exempt field as ciphertext even when the field's own
+        // IsEncrypted flag is off, so the app flag counts too (the same rule every other read path uses).
+        bool requiresClientSideDistinct = encContext.IsActive
+            && Services.FieldEncryptionContext.StoresCiphertext(field, encContext.IsAppEncrypted);
 
         // One stored value maps to one dropdown option for every type except MultiSelect (a stored array holds
         // several options), so for those we can stop once limit + 1 distinct values are seen — enough to know
@@ -3351,7 +3356,17 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             await foreach (var v in connection.QueryUnbufferedAsync<string>(sql, parameters).WithCancellation(ct))
             {
                 if (string.IsNullOrWhiteSpace(v)) continue;
-                seen.Add(await encContext.DecryptValueAsync(v, ct));
+                if (dropUndecryptable)
+                {
+                    // DecryptValueAsync hands back the input on failure; here a value that is not decryptable
+                    // is left out rather than offered as ciphertext.
+                    try { seen.Add(await _encryptionService.DecryptDataAsync(v, encContext.WrappedDek!, QueryContext.TenantId, table.AppId, ct)); }
+                    catch (Exception ex) when (ex is not OperationCanceledException) { continue; }
+                }
+                else
+                {
+                    seen.Add(await encContext.DecryptValueAsync(v, ct));
+                }
                 if (canStopEarly && seen.Count > limit) break;
             }
             processedValues = seen.Where(v => !string.IsNullOrWhiteSpace(v));

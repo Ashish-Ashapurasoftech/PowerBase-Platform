@@ -9,11 +9,10 @@ internal static class LogicalFunctions
 {
     public static void Register(FunctionRegistry r)
     {
-        // The else branch is optional: If(cond, value) yields blank when the condition is false.
-        // Quickbase's If behaves this way and CheckIf already types a missing third argument as
-        // Null, so only the arity check stood in the way.
-        r.Add(Fn.Lazy("If", CheckIf, (t, _) =>
-            t[0]().AsBool() ? t[1]() : (t.Count > 2 ? t[2]() : FormulaValue.Null(FormulaType.Null))));
+        // If(condition, value) — and Quickbase's multi-branch form If(c1, v1, c2, v2, …, [else]). Conditions are tried in order and the first true
+        // one gives its value; a final odd argument is the else value, and without one the result is blank. A 3-argument call is the classic
+        // If(condition, then, else).
+        r.Add(Fn.Lazy("If", CheckIf, EvalIf));
 
         r.Add(Fn.Lazy("Case", CheckCase, EvalCase));
 
@@ -39,17 +38,39 @@ internal static class LogicalFunctions
 
     private static FormulaType CheckIf(IReadOnlyList<FormulaType> a, TextSpan span, List<FormulaDiagnostic> d)
     {
-        Fn.RequireArity("If", a.Count, 2, 3, span, d);
-        if (a.Count >= 1) Fn.RequireParam("If", 0, P.Bool, a[0], span, d);
-        var t1 = a.Count > 1 ? a[1] : FormulaType.Null;
-        var t2 = a.Count > 2 ? a[2] : FormulaType.Null;
-        var common = Fn.CommonType(t1, t2);
-        if (common == FormulaType.Null && t1 != FormulaType.Null && t2 != FormulaType.Null)
+        Fn.RequireArity("If", a.Count, 2, int.MaxValue, span, d);
+        var result = FormulaType.Null;
+        var first = FormulaType.Null;
+        var mismatch = false;
+        for (var i = 0; i < a.Count; i++)
         {
-            d.Add(new FormulaDiagnostic(FormulaErrorCode.TypeMismatch, $"If branches must have the same type (got {t1} and {t2}).", span));
-            return t1;
+            var isCondition = i % 2 == 0 && i < a.Count - (a.Count % 2 == 1 ? 1 : 0);
+            if (isCondition)
+            {
+                Fn.RequireParam("If", i, P.Bool, a[i], span, d);
+                continue;
+            }
+
+            if (a[i] == FormulaType.Null) continue;
+            if (first == FormulaType.Null) first = a[i];
+            var common = Fn.CommonType(result, a[i]);
+            if (common == FormulaType.Null && result != FormulaType.Null)
+            {
+                d.Add(new FormulaDiagnostic(FormulaErrorCode.TypeMismatch, $"If branches must have the same type (got {result} and {a[i]}).", span));
+                mismatch = true;
+                break;
+            }
+            result = common;
         }
-        return common;
+        return mismatch ? first : result;
+    }
+
+    private static FormulaValue EvalIf(IReadOnlyList<Func<FormulaValue>> t, EvaluationOptions opt)
+    {
+        var pairs = t.Count / 2;
+        for (var i = 0; i < pairs; i++)
+            if (t[2 * i]().AsBool()) return t[2 * i + 1]();
+        return t.Count % 2 == 1 ? t[^1]() : FormulaValue.Null(FormulaType.Null);
     }
 
     private static FunctionTypeCheck CheckBoolVariadic(string name) => (a, span, d) =>

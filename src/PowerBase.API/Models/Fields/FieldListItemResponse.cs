@@ -19,6 +19,10 @@ public class FieldListItemResponse
     public bool IsUnique { get; init; }
     public bool IsSystem { get; init; }
     public bool IsAutoFill { get; init; }
+    /// <summary>Snapshot field: Fid of the source field captured once at record creation; null when this is not a snapshot field.</summary>
+    public int? SnapshotSourceFid { get; init; }
+    public bool SnapshotEditable { get; init; }
+    public bool IsSharedValues { get; init; }
     public int? Fid { get; init; }
     public DateTime CreatedOn { get; init; }
     /// <summary>Whether this is the table's current key field (Set Key feature).</summary>

@@ -156,6 +156,14 @@ public class PblDeferredResolver
         ex is ValidationException ve ? string.Join(" ", ve.Errors.SelectMany(e => e.Value)) : ex.Message;
 }
 
+/// <summary>Names compared without regard to case or spaces at either end: PowerBase stores a label trimmed, a source file may not.</summary>
+internal sealed class TrimmedIgnoreCase : IEqualityComparer<string>
+{
+    public static readonly TrimmedIgnoreCase Instance = new();
+    public bool Equals(string? x, string? y) => string.Equals(x?.Trim(), y?.Trim(), StringComparison.OrdinalIgnoreCase);
+    public int GetHashCode(string value) => StringComparer.OrdinalIgnoreCase.GetHashCode(value.Trim());
+}
+
 /// <summary>Field Fid lookup shared by the importer passes.</summary>
 public static class FieldFids
 {
@@ -165,7 +173,7 @@ public static class FieldFids
     public static Dictionary<string, long> ByNameOrLabel(IEnumerable<AppField> fields)
     {
         var withFid = fields.Where(f => f.Fid.HasValue).ToList();
-        var map = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        var map = new Dictionary<string, long>(TrimmedIgnoreCase.Instance);
         foreach (var f in withFid)
             map.TryAdd(f.Name, f.Fid!.Value);
         foreach (var f in withFid.Where(f => !string.IsNullOrWhiteSpace(f.Label)))

@@ -1261,6 +1261,7 @@ public class ImportAppFromPblCommandHandler
             }
 
             var summarySpecs = new List<CreateSummarySpec>();
+            var summaryBySpec = new Dictionary<CreateSummarySpec, PblSummaryField>();
             // A summary over a lookup of the child is judged by that lookup's source field.
             var lookupSources = rel.Summaries.Count > 0 ? await SummaryLookupSources.LoadAsync(childFields, _fieldRepo, ct) : null;
             foreach (var summary in rel.Summaries)
@@ -1310,18 +1311,33 @@ public class ImportAppFromPblCommandHandler
                     continue;
                 }
                 summarySpecs.Add(new CreateSummarySpec(summary.Label ?? summary.Name, function, targetFid, summary.TargetSubField));
+                summaryBySpec[summarySpecs[^1]] = summary;
             }
 
             try
             {
-                var createdRel = await _createRelationshipHandler.HandleAsync(new CreateRelationshipCommand(
-                    appPublicId,
-                    parentTable.PublicId,
-                    childTable.PublicId,
-                    rel.ReferenceFieldLabel ?? rel.ReferenceFieldName,
-                    rel.IsReferenceRequired,
-                    lookupSpecs,
-                    summarySpecs), ct);
+                RelationshipDto createdRel;
+                try
+                {
+                    createdRel = await _createRelationshipHandler.HandleAsync(new CreateRelationshipCommand(
+                        appPublicId,
+                        parentTable.PublicId,
+                        childTable.PublicId,
+                        rel.ReferenceFieldLabel ?? rel.ReferenceFieldName,
+                        rel.IsReferenceRequired,
+                        lookupSpecs,
+                        summarySpecs), ct);
+                }
+                catch (ValidationException) when (summarySpecs.Count > 0)
+                {
+                    // A summary PowerBase's relationship check refuses (for example Max of a Reference whose key is text) must not cost the whole
+                    // relationship: create it without the summaries, and add each one on its own afterwards, where a refusal is reported per
+                    // summary and leaves a repairable placeholder.
+                    createdRel = await _createRelationshipHandler.HandleAsync(new CreateRelationshipCommand(
+                        appPublicId, parentTable.PublicId, childTable.PublicId,
+                        rel.ReferenceFieldLabel ?? rel.ReferenceFieldName, rel.IsReferenceRequired, lookupSpecs, []), ct);
+                    pendingSummaries.AddRange(summarySpecs.Select(sp => summaryBySpec[sp]));
+                }
 
                 created++;
                 deferredLookups.AddRange(pendingLookups.Select(l => new DeferredLookup(createdRel.PublicId, parentTable, l)));
@@ -1347,6 +1363,26 @@ public class ImportAppFromPblCommandHandler
     /// filters it to related records. The link is found through the relationship between the form's table and the report's table.
     /// Null when any of those do not exist.
     /// </summary>
+    private async Task<long?> FindReportLinkFidAsync(
+        PblFormElement element, AppTable parentTable, Dictionary<string, string> tableNameByRef, Dictionary<string, AppTable> tableByName, CancellationToken ct)
+    {
+        if (element.ReportLinkChildTableRef is null || element.ReportLinkReferenceFieldName is null) return null;
+        if (!tableNameByRef.TryGetValue(element.ReportLinkChildTableRef, out var childName) || !tableByName.TryGetValue(childName, out var childTable)) return null;
+
+        var referenceName = element.ReportLinkReferenceFieldName.Trim();
+        var childFields = await _fieldRepo.ListByTableAsync(childTable.Id, ct);
+        var reference = childFields.FirstOrDefault(f => string.Equals(f.TypeCode, "Reference", StringComparison.OrdinalIgnoreCase)
+            && (string.Equals(f.Label?.Trim(), referenceName, StringComparison.OrdinalIgnoreCase) || string.Equals(f.Name, referenceName, StringComparison.OrdinalIgnoreCase)));
+        if (reference?.Fid is not { } referenceFid) return null;
+
+        var parentFields = await _fieldRepo.ListByTableAsync(parentTable.Id, ct);
+        return parentFields.FirstOrDefault(f => string.Equals(f.TypeCode, "ReportLink", StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrEmpty(f.Settings)
+            && JsonSerializer.Deserialize<ReportLinkSettings>(f.Settings!, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) is { } rl
+            && string.Equals(rl.TargetTablePublicId, childTable.PublicId.ToString(), StringComparison.OrdinalIgnoreCase)
+            && rl.TargetFid == referenceFid)?.Fid;
+    }
+
     private async Task<string?> BuildReportElementContentAsync(
         PblFormElement element, PblForm form, AppTable parentTable, Dictionary<string, CreatedReport> createdReports,
         List<PblRelationship> relationships, Dictionary<string, string> tableNameByRef, Dictionary<string, AppTable> tableByName, CancellationToken ct)
@@ -1401,7 +1437,8 @@ public class ImportAppFromPblCommandHandler
         Guid FormPublicId,
         Dictionary<string, Guid> SectionGuidByRef,
         Dictionary<string, Guid> BlockGuidByRef,
-        Dictionary<string, Guid> ElementGuidByRef);
+        Dictionary<string, Guid> ElementGuidByRef,
+        Dictionary<string, Guid> PageGuidByRef);
 
     /// <summary>Creates every form via <see cref="CreateFormCommandHandler"/> then
     /// <see cref="SaveFormLayoutCommandHandler"/>. Form elements reference fields by Name,
@@ -1467,7 +1504,10 @@ public class ImportAppFromPblCommandHandler
 
                         if (string.Equals(element.ElementType, "Field", StringComparison.OrdinalIgnoreCase))
                         {
-                            if (element.FieldName is null || !fidByName.TryGetValue(element.FieldName, out var fid))
+                            var linkOrFid = element.FieldName is not null && fidByName.TryGetValue(element.FieldName, out var knownFid)
+                                ? knownFid
+                                : await FindReportLinkFidAsync(element, table, tableNameByRef, tableByName, ct);
+                            if (linkOrFid is not { } fid)
                             {
                                 skipped.Add(new ImportSkippedItem { LogicalRef = element.LogicalRef, Name = element.FieldName ?? element.LogicalRef, Reason = "Form element references a field that was not created." });
                                 continue;
@@ -1537,7 +1577,7 @@ public class ImportAppFromPblCommandHandler
             if (defaultedTableRefs.Add(form.TableRef) && tablesKeepingDefaults?.Contains(tableName) != true)
                 await _formRepo.SetDefaultAsync(table.PublicId, createdForm.Id, ct);
 
-            result[form.LogicalRef] = new CreatedFormLayout(createdForm.Id, sectionGuidByRef, blockGuidByRef, elementGuidByRef);
+            result[form.LogicalRef] = new CreatedFormLayout(createdForm.Id, sectionGuidByRef, blockGuidByRef, elementGuidByRef, pageGuidByRef);
         }
 
         return result;
@@ -1644,7 +1684,17 @@ public class ImportAppFromPblCommandHandler
                             unresolvedCondition = true;
                             break;
                         }
-                        conditionSpecs.Add(new FormRuleConditionSpec(fid, condition.Operator, condition.Value, condition.ValueType, null, condition.DisplayOrder));
+                        long? valueFieldId = null;
+                        if (condition.ValueFieldName is not null)
+                        {
+                            if (!fidByName.TryGetValue(condition.ValueFieldName, out var otherFid))
+                            {
+                                unresolvedCondition = true;
+                                break;
+                            }
+                            valueFieldId = otherFid;
+                        }
+                        conditionSpecs.Add(new FormRuleConditionSpec(fid, condition.Operator, condition.Value, condition.ValueType, valueFieldId, condition.DisplayOrder));
                     }
                 }
 
@@ -1660,6 +1710,7 @@ public class ImportAppFromPblCommandHandler
                 foreach (var action in rule.Actions)
                 {
                     long? targetElementId = null, targetSectionId = null, targetBlockId = null;
+                    Guid? targetPagePublicId = null;
                     var ok = false;
 
                     // A message or "block the save" that names no target is complete as it is.
@@ -1690,6 +1741,13 @@ public class ImportAppFromPblCommandHandler
                         ok = true;
                     }
 
+                    else if (action.TargetType == "Page" && action.TargetPageRef is not null &&
+                        layout.PageGuidByRef.TryGetValue(action.TargetPageRef, out var pg))
+                    {
+                        targetPagePublicId = pg;
+                        ok = true;
+                    }
+
                     if (!ok)
                     {
                         unresolvedAction = true;
@@ -1709,6 +1767,7 @@ public class ImportAppFromPblCommandHandler
 
                     actionSpecs.Add(new FormRuleActionSpec(
                         action.ActionType, action.TargetType, targetElementId, targetSectionId, targetBlockId, action.ActionValue, action.DisplayOrder,
+                        TargetPagePublicId: targetPagePublicId,
                         ValueSource: action.ValueSource, SourceFieldId: sourceFieldId, MessageType: action.MessageType, MessageSeverity: action.MessageSeverity));
                 }
 

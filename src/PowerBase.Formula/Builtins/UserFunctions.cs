@@ -26,8 +26,29 @@ internal static class UserFunctions
             (a, _) => FormulaValue.Text(a[0].IsNull ? string.Empty : a[0].AsUser().UserId)));
         r.Add(Fn.Exact("UserID", FormulaType.Text, new[] { P.User },
             (a, _) => FormulaValue.Text(a[0].IsNull ? string.Empty : a[0].AsUser().UserId)));
+        // UserRoles("ID") the role ids, UserRoles("Name") the role names, UserRoles("") or UserRoles() "ID/Name" for each role of the current user
+        // (one value per role: a multi-select text). Any other text is a user id (UserRoles(UserToId(user))): that user's roles, as "ID/Name".
+        r.Add(Fn.Range("UserRoles", FormulaType.TextList, Array.Empty<Param>(), new[] { P.Text }, (a, opt) => UserRoles(a, opt)));
         r.Add(Fn.Exact("IsUserEmail", FormulaType.Bool, new[] { P.Text },
             (a, _) => FormulaValue.Bool(IsEmail(a[0].AsText()))));
+    }
+
+    private static FormulaValue UserRoles(IReadOnlyList<FormulaValue> a, EvaluationOptions opt)
+    {
+        var mode = a.Count == 0 ? string.Empty : a[0].AsText().Trim();
+        IReadOnlyList<RoleRef> roles;
+        if (mode.Length == 0 || mode.Equals("ID", StringComparison.OrdinalIgnoreCase) || mode.Equals("Name", StringComparison.OrdinalIgnoreCase))
+            roles = opt.CurrentUserRoles?.Invoke() ?? Array.Empty<RoleRef>();
+        else
+        {
+            roles = opt.UserRolesOf?.Invoke(mode) ?? Array.Empty<RoleRef>();
+            mode = string.Empty;
+        }
+
+        var values = mode.Equals("ID", StringComparison.OrdinalIgnoreCase) ? roles.Select(r => r.Id)
+            : mode.Equals("Name", StringComparison.OrdinalIgnoreCase) ? roles.Select(r => r.Name)
+            : roles.Select(r => $"{r.Id}/{r.Name}");
+        return FormulaValue.TextList(values.ToList());
     }
 
     /// <summary>A user value read from a record is only an id; ask the host for the rest. A value that already

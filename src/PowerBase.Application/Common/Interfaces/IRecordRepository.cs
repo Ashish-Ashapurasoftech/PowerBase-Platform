@@ -344,9 +344,11 @@ public interface IRecordRepository
         CancellationToken ct = default);
 
     /// <param name="onlyRowIds">When given, only these rows are read (the rows the user's role may view).</param>
+    /// <param name="dropUndecryptable">For an encrypted field, leave out a value that cannot be decrypted instead of
+    /// returning it as stored (ciphertext).</param>
     Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(
         AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default,
-        IReadOnlyCollection<long>? onlyRowIds = null);
+        IReadOnlyCollection<long>? onlyRowIds = null, bool dropUndecryptable = false);
 
     Task<int> SanitizeTableEncryptedDataAsync(AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct = default);
     Task<IReadOnlyList<SearchIndexDocument>> GetFieldBackfillBatchAsync(long tenantId, long appId, long tableId, long fieldId, bool isNullify, int page, int pageSize, CancellationToken ct = default);

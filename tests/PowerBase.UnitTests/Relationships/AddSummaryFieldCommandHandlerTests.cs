@@ -95,7 +95,7 @@ public class AddSummaryFieldCommandHandlerTests
     [InlineData("Sum", 5)]     // Sum on Text
     [InlineData("Max", 5)]     // Max on Text
     [InlineData("Avg", 7)]     // Avg on Date
-    [InlineData("Sum", 10)]    // Sum on a Reference (Record IDs)
+    [InlineData("Avg", 10)]    // Avg on a Reference (Record IDs)
     public async Task Handle_FunctionNotValidForField_ThrowsValidation_AndCreatesNothing(string function, int targetFid)
     {
         await FluentActions.Invoking(() => _handler.HandleAsync(Command(function, targetFid)))
@@ -273,6 +273,22 @@ public class AddSummaryFieldCommandHandlerTests
         saved.TargetFid.Should().Be(10);
         saved.TargetTypeCode.Should().Be("Text");
         saved.ResultTypeCode.Should().Be("Text");
+    }
+
+    [Theory]
+    [InlineData("Max")]
+    [InlineData("Min")]
+    [InlineData("Sum")]
+    public async Task Handle_MaxMinSumOfAReferenceWhoseParentShowsATextKey_SavesItAsTheRecordIdNumber(string function)
+    {
+        ClientsShowClientNameAsTheirKey();
+
+        await _handler.HandleAsync(Command(function, 10));
+
+        var saved = SavedSettings();
+        saved.TargetFid.Should().Be(10);
+        saved.TargetTypeCode.Should().Be("Number");
+        saved.ResultTypeCode.Should().Be("Number");
     }
 
     [Fact]

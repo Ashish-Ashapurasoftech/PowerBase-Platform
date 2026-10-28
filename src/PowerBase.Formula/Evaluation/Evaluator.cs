@@ -37,6 +37,7 @@ internal sealed class Evaluator
         LiteralExpr l => l.Value,
         FieldRefExpr { TableAliasId: { } tableId } => FormulaValue.Text(tableId),
         FieldRefExpr { VariableValue: { } variableValue } => FormulaValue.Text(variableValue),
+        FieldRefExpr { IsAddress: true } a => FormulaValue.Text(AddressParts.Text(ctx.GetValue(a.Fid), a.AddressPart)),
         FieldRefExpr f => ValueConvert.FromRaw(f.Type, ctx.GetValue(f.Fid)),
         UnaryExpr u => EvalUnary(u, ctx, opt),
         BinaryExpr b => EvalBinary(b, ctx, opt),

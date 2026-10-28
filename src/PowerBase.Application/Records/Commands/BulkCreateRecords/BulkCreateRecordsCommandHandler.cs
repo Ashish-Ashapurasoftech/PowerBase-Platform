@@ -45,7 +45,8 @@ public class BulkCreateRecordsCommandHandler
         IFormRepository formRepo,
         IAppUserRepository appUserRepo,
         IReportRepository reportRepo,
-        IReferenceRelinkService? relink = null)
+        IReferenceRelinkService? relink = null,
+        ISnapshotCaptureService? snapshots = null)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -57,7 +58,7 @@ public class BulkCreateRecordsCommandHandler
         _messagePublisher = messagePublisher;
         _relink = relink;
         _preparer = new RecordCreatePreparer(
-            tableRepo, fieldRepo, recordRepo, relRepo, enforcer, queryContext, userRepo, appRepo, engine, formRuleRepo, formRepo, appUserRepo, reportRepo);
+            tableRepo, fieldRepo, recordRepo, relRepo, enforcer, queryContext, userRepo, appRepo, engine, formRuleRepo, formRepo, appUserRepo, reportRepo, snapshots);
     }
 
     /// <returns>The created records, in the same order as <see cref="BulkCreateRecordsCommand.Rows"/>.</returns>
