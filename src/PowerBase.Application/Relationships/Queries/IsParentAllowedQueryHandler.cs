@@ -58,7 +58,7 @@ public class IsParentAllowedQueryHandler
         var parentFields = await _fieldRepo.ListByTableAsync(parent.Id, ct);
         var clauses = await ReferenceFilterResolver.BuildAsync(
             settings, childFields, parentFields,
-            filterValues ?? new Dictionary<int, string?>(), _tableRepo, _fieldRepo, ct, _queryContext.UserId);
+            filterValues ?? new Dictionary<int, string?>(), _tableRepo, _fieldRepo, ct, _queryContext.UserId, _relRepo, _recordRepo);
         if (clauses.Count == 0) return true;   // nothing applicable without form values
 
         return await _recordRepo.MatchesReferenceFilterAsync(parent, parentRowId, clauses, ct);
