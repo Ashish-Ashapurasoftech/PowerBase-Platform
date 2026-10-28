@@ -94,6 +94,14 @@ public class PipelineStreamedAiSearchTests
             foreach (var (cursor, ids) in pages.Skip(skip)) { PagesServed++; yield return new AiSearchIdPage(ids, cursor); await Task.Yield(); }
         }
 
+        /// <summary>How many candidates the index reports for the filter (what a MaxResults search asks before it reads any).</summary>
+        public AiFake WithTotal(long total)
+        {
+            Service.SearchRecordsByFilterPagedAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string>(), 1, 1, Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                .Returns(Task.FromResult(((IReadOnlyList<Guid>)new List<Guid>(), total)));
+            return this;
+        }
+
         public AiFake Throwing(Func<Exception> error, int afterPages)
         {
             Service.SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
@@ -133,7 +141,7 @@ public class PipelineStreamedAiSearchTests
     private static async Task<Outcome> RunAsync(
         List<DataRow> data, AiFake? ai, PipelineSearchWorkset? workset = null, bool searchable = true, bool filterable = true,
         bool encrypted = false, int? maxResults = null, int? streamAbove = null, string op = "is", string value = "Active", long snapshotMax = 999,
-        int? lagSeconds = null, IReadOnlyList<(long Id, DateTime ChangedOn)>? recent = null, IReadOnlyCollection<long>? recentWhenPageRead = null)
+        int? lagSeconds = null, IReadOnlyList<(long Id, DateTime ChangedOn)>? recent = null, IReadOnlyCollection<long>? recentWhenPageRead = null, bool patternOperators = false)
     {
         var pipelineRepo = Substitute.For<IPipelineRepository>();
         var tableRepo = Substitute.For<IAppTableRepository>();
@@ -148,7 +156,7 @@ public class PipelineStreamedAiSearchTests
         tableRepo.GetByPublicIdAsync(TableId, Arg.Any<CancellationToken>()).Returns(table);
         fieldRepo.ListByTableAsync(100, Arg.Any<CancellationToken>()).Returns(new List<AppField>
         {
-            new() { Id = 6, Fid = 6, Name = "Order no", TypeCode = "Text", IsSearchable = searchable, IsFilterable = filterable, IsEncrypted = encrypted }
+            new() { Id = 6, Fid = 6, Name = "Order no", TypeCode = "Text", IsSearchable = searchable, IsFilterable = filterable, IsEncrypted = encrypted, SearchSlot = "str_01" }
         });
         recordRepo.GetIdsByPublicIdsAsync(table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(ci => Task.FromResult<IReadOnlyList<long>>(
@@ -172,7 +180,7 @@ public class PipelineStreamedAiSearchTests
 
         var uow = Substitute.For<ITenantUnitOfWork>();
         uow.Transaction.Returns(Substitute.For<IDbTransaction>());
-        var options = new PipelineExecutionOptions();
+        var options = new PipelineExecutionOptions { AiSearchMinTableRows = 0, AiSearchCountGuard = false, AiSearchFieldSettleHours = 0, AiSearchLimitedReadMaxMatches = 1000, AiSearchPatternOperators = patternOperators };
         if (streamAbove.HasValue) options.StreamSearchAboveRecords = streamAbove.Value;
         if (lagSeconds.HasValue) options.AiSearchIndexLagSeconds = lagSeconds.Value;
         var engine = new PipelineEngine(
@@ -356,15 +364,45 @@ public class PipelineStreamedAiSearchTests
     }
 
     [Fact]
-    public async Task MaxResults_StopsPagingOnceTheLimitIsStaged()
+    public async Task MaxResults_WithFewEnoughCandidates_ReadsThemAllAndStagesTheFirstByRecordId_AsSqlWould()
     {
+        // The index lists the HIGH ids first. "The first 3" must still be records 1, 2, 3, as the SQL search returns them.
         var data = Enumerable.Range(1, 6).Select(i => Data(i)).ToList();
-        var ai = new AiFake(AiPage("a", data[0], data[1]), AiPage("b", data[2], data[3]), AiPage("~", data[4], data[5]));
+        var ai = new AiFake(AiPage("a", data[5], data[4]), AiPage("b", data[3], data[2]), AiPage("~", data[1], data[0])).WithTotal(6);
 
         var o = await RunAsync(data, ai, maxResults: 3, streamAbove: 2);
 
+        Assert.Null(o.Error);
         Assert.Equal(new long[] { 1, 2, 3 }, o.StagedIds);
-        Assert.Equal(2, ai.PagesServed);                      // the third page was never asked for
+        Assert.Equal(3, ai.PagesServed);                                      // every candidate was read
+        Assert.Equal(new[] { PipelineEngine.AiIndexLagEndCursor }, o.AiCursors);   // staged in one go, index and lag tail done
+        Assert.Equal(0, o.UseSqlCalls);
+    }
+
+    [Fact]
+    public async Task MaxResults_AMatchOnlyTheLagTailKnows_CompetesForTheFirstNByRecordId()
+    {
+        // Record 1 changed a moment ago and is not (yet) proposed by the index; it has the lowest id, so it is among the first 3.
+        var data = Enumerable.Range(1, 6).Select(i => Data(i)).ToList();
+        var ai = new AiFake(AiPage("~", data[5], data[4], data[3])).WithTotal(3);
+
+        var o = await RunAsync(data, ai, maxResults: 3, streamAbove: 2, recent: [(1, BeforeTheSearch)]);
+
+        Assert.Null(o.Error);
+        Assert.Equal(new long[] { 1, 4, 5 }, o.StagedIds);
+    }
+
+    [Fact]
+    public async Task MaxResults_WithMoreCandidatesThanTheLimitedReadAllows_IsReadFromSql()
+    {
+        var data = Enumerable.Range(1, 6).Select(i => Data(i)).ToList();
+        var ai = new AiFake(AiPage("~", data.ToArray())).WithTotal(1001);   // above AiSearchLimitedReadMaxMatches
+
+        var o = await RunAsync(data, ai, maxResults: 3, streamAbove: 2);
+
+        Assert.Empty(ai.CursorsAskedFor);                    // the index was only asked how many
+        Assert.Equal(new long[] { 1, 2, 3 }, o.StagedIds);   // SQL stops at the limit, in record id order
+        Assert.Equal(1, o.UseSqlCalls);
     }
 
     // ── index lag ────────────────────────────────────────────────────────────────────────────
@@ -694,9 +732,8 @@ public class PipelineStreamedAiSearchTests
     }
 
     [Theory]
-    [InlineData(false, true, "is", "Active")]      // not searchable
-    [InlineData(true, false, "is", "Active")]      // not filterable
-    [InlineData(true, true, "contains", "Active")] // an operator the index cannot answer exactly
+    [InlineData(false, false, "is", "Active")]     // not indexed at all (neither searchable nor filterable)
+    [InlineData(true, true, "contains", "Active")] // pattern operators are switched off here (the helper default; see the test with them on)
     [InlineData(true, true, "is", "the")]          // a value the index cannot match
     public async Task IneligibleSearch_IsReadFromSql_AndTheIndexIsNeverAsked(bool searchable, bool filterable, string op, string value)
     {
@@ -710,6 +747,20 @@ public class PipelineStreamedAiSearchTests
         Assert.Equal(0, o.BeginAiCalls);
         Assert.Equal(0, o.UseSqlCalls);
         Assert.True(UsedTheOriginalSqlFilter(o));
+    }
+
+    [Fact]
+    public async Task Contains_WithPatternOperatorsOn_IsNarrowedByTheIndex_AndStagedFromTheSqlRead()
+    {
+        var data = new List<DataRow> { Data(1), Data(2) };
+        var ai = new AiFake(AiPage("~", data.ToArray()));
+
+        var o = await RunAsync(data, ai, op: "contains", value: "Active", patternOperators: true);
+
+        Assert.Null(o.Error);
+        Assert.Equal(1, o.BeginAiCalls);
+        Assert.NotEmpty(ai.CursorsAskedFor);
+        Assert.Equal(new long[] { 1, 2 }, o.StagedIds);
     }
 
     [Fact]
