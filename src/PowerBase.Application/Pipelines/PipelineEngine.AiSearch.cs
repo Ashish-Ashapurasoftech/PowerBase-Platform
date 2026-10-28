@@ -65,15 +65,17 @@ public partial class PipelineEngine
         CurrentStepServices.GetService(typeof(IAppRepository)) is IAppRepository apps
         && (await apps.GetByIdAsync(table.AppId, ct)).IsEncrypted;
 
-    /// <summary>Whether this search may be answered by AI Search (with the filter to use), or must be read from SQL.</summary>
+    /// <summary>Whether this search may be answered by AI Search (with the filter to use), or must be read from SQL. The checks of
+    /// <see cref="PipelineAiSearchGate"/> are made when a search starts (<paramref name="applyGates"/>), never while one is resumed: a
+    /// search keeps the source it began with.</summary>
     private async Task<PipelineAiSearchPlan> PlanAiSearchAsync(
-        AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree, CancellationToken ct)
+        AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree, IRecordRepository recordRepo, CancellationToken ct, bool applyGates = true)
     {
         var azure = StepAzureSearch();
         if (azure == null || !azure.IsGridSearchEnabled)
             return new PipelineAiSearchPlan(null, "Azure AI Search is not enabled");
 
-        var plan = PipelineAiSearchPlanner.Evaluate(filterTree, fields);
+        var plan = PipelineAiSearchPlanner.Evaluate(filterTree, fields, new PipelineAiSearchPlanOptions(_options.AiSearchPatternOperators));
         if (!plan.UseAiSearch)
         {
             _logger.LogInformation("[Pipeline SearchRecords] Table {TableId} is searched in SQL, not Azure AI Search: {Reason}.", table.Id, plan.SqlReason);
@@ -84,7 +86,25 @@ public partial class PipelineEngine
             _logger.LogWarning("[Pipeline SearchRecords] Azure AI Search is not healthy; table {TableId} is searched in SQL.", table.Id);
             return new PipelineAiSearchPlan(null, "Azure AI Search is not healthy");
         }
+        if (applyGates)
+        {
+            var gate = await PipelineAiSearchGate.EvaluateAsync(table, fields, plan, azure, StepTenantId(), recordRepo, _options, ct);
+            if (!gate.UseAiSearch)
+            {
+                _logger.LogInformation("[Pipeline SearchRecords] Table {TableId} is searched in SQL, not Azure AI Search: {Reason}.", table.Id, gate.SqlReason);
+                return new PipelineAiSearchPlan(null, gate.SqlReason);
+            }
+        }
         return plan;
+    }
+
+    /// <summary>With a MaxResults the search returns the first N records by record id, as SQL does, while the index lists ids in its own
+    /// order. The index is therefore used only when it finds few enough candidates to read them all, sort them by record id and cut to N.
+    /// More candidates (or none) are read from SQL, which stops at N.</summary>
+    private async Task<bool> AiMatchesFitLimitedReadAsync(string odataFilter, AppTable table, string? targetIndex, CancellationToken ct)
+    {
+        var (_, total) = await StepAzureSearch()!.SearchRecordsByFilterPagedAsync(StepTenantId(), table.Id, odataFilter, 1, 1, targetIndex, ct);
+        return total > 0 && total <= _options.AiSearchLimitedReadMaxMatches;
     }
 
     /// <summary>
@@ -241,6 +261,9 @@ public partial class PipelineEngine
         var targetIndex = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(fields)
             ? PowerBase.Application.Search.SearchSlotResolver.GetTableIndexName(table.Id)
             : null;
+        // A MaxResults is answered from the index only when every candidate can be read (see AiMatchesFitLimitedReadAsync); otherwise
+        // no rows come back and the caller reads the search from SQL.
+        if (limit.HasValue && !await AiMatchesFitLimitedReadAsync(odataFilter, table, targetIndex, ct)) return rows;
         var searchPages = targetIndex != null
             ? StepAzureSearch()!.SearchRecordIdsByFilterPagedAsync(StepTenantId(), table.Id, odataFilter, null, targetIndex, ct)
             : StepAzureSearch()!.SearchRecordIdsByFilterPagedAsync(StepTenantId(), table.Id, odataFilter, null, ct);
@@ -248,11 +271,11 @@ public partial class PipelineEngine
         {
             rows.AddRange(await VerifyAiCandidatesAsync(table, fields, tree, page.Ids, null,
                 inMemoryFilterFids, computedFieldFids, recordSearchService, recordRepo, pageSize, ct));
-            if (limit.HasValue && rows.Count >= limit.Value) break;   // a user-configured cap, not a silent one
         }
 
         // The records changed too recently for the index to be trusted with them, each added once (the index may have found it too).
-        if (lagSince is { } since && rows.Count > 0 && !(limit.HasValue && rows.Count >= limit.Value))
+        // Read with a MaxResults too: a recently changed record can be among the first N by record id.
+        if (lagSince is { } since && rows.Count > 0)
         {
             var found = rows.Select(RowRecordId).ToHashSet();
             for (var afterId = 0L; ;)
@@ -260,7 +283,7 @@ public partial class PipelineEngine
                 var (lagRows, changed) = await ReadAiIndexLagPageAsync(table, fields, tree, since, afterId, long.MaxValue,
                     inMemoryFilterFids, computedFieldFids, recordSearchService, recordRepo, pageSize, ct);
                 rows.AddRange(lagRows.Where(r => found.Add(RowRecordId(r))));
-                if (changed.Count < AiCandidateRecordIdChunkSize || (limit.HasValue && rows.Count >= limit.Value)) break;
+                if (changed.Count < AiCandidateRecordIdChunkSize) break;
                 afterId = changed[^1].Id;
             }
         }
@@ -329,6 +352,37 @@ public partial class PipelineEngine
         var limitReached = limit.HasValue && ordinal >= limit.Value;
         try
         {
+            // A MaxResults: the first N records by record id, as SQL returns them. The index lists ids in its own order, so when it finds
+            // few enough candidates they are all read (the index-lag tail too), sorted by record id, cut to N and staged in one go; when
+            // it finds more (or none) the search is read from SQL, which stops at N.
+            if (limit.HasValue && odataFilter != null && ordinal == 0 && !IsAiIndexReadDone(workset.LastSearchCursor))
+            {
+                if (!await AiMatchesFitLimitedReadAsync(odataFilter, table, targetIndex, ct)) return false;
+                var all = new List<IReadOnlyDictionary<string, object?>>();
+                var limitedPages = targetIndex != null
+                    ? StepAzureSearch()!.SearchRecordIdsByFilterPagedAsync(StepTenantId(), table.Id, odataFilter, null, targetIndex, ct)
+                    : StepAzureSearch()!.SearchRecordIdsByFilterPagedAsync(StepTenantId(), table.Id, odataFilter, null, ct);
+                await foreach (var limitedPage in limitedPages)
+                    all.AddRange(await VerifyAiCandidatesAsync(table, fields, tree, limitedPage.Ids, snapshotMaxRecordId,
+                        inMemoryFilterFids, computedFieldFids, recordSearchService, recordRepo, _options.SearchRecordsPageSize, ct));
+                if (lagSince is { } limitedSince)
+                {
+                    var seen = all.Select(RowRecordId).ToHashSet();
+                    for (var afterId = 0L; ;)
+                    {
+                        var (lagRows, changed) = await ReadAiIndexLagPageAsync(table, fields, tree, limitedSince, afterId, workset.SnapshotMaxRecordId,
+                            inMemoryFilterFids, computedFieldFids, recordSearchService, recordRepo, _options.SearchRecordsPageSize, ct);
+                        all.AddRange(lagRows.Where(r => seen.Add(RowRecordId(r))));
+                        if (changed.Count < AiCandidateRecordIdChunkSize) break;
+                        afterId = changed[^1].Id;
+                    }
+                }
+                var firstN = all.OrderBy(RowRecordId).Take(limit.Value).ToList();
+                if (firstN.Count == 0) return false;
+                await StageAsync(firstN, AiIndexLagEndCursor);
+                limitReached = true;
+            }
+
             if (!IsAiIndexReadDone(workset.LastSearchCursor) && !limitReached)
             {
                 var searchPages = targetIndex != null

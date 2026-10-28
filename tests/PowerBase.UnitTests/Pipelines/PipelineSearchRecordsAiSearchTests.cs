@@ -32,7 +32,9 @@ public class PipelineSearchRecordsAiSearchTests
     private readonly IAzureSearchService _azureSearchService;
     private readonly AppTable _table = new() { Id = 100, PublicId = Guid.NewGuid() };
 
-    private PipelineEngine BuildEngine(IServiceProvider serviceProvider) => new(
+    private static PipelineExecutionOptions TestOptions() => new() { AiSearchMinTableRows = 0, AiSearchCountGuard = false, AiSearchFieldSettleHours = 0, AiSearchLimitedReadMaxMatches = 1000, AiSearchPatternOperators = false };
+
+    private PipelineEngine BuildEngine(IServiceProvider serviceProvider, PipelineExecutionOptions? options = null) => new(
         Substitute.For<IPipelineRepository>(),
         _recordRepo,
         Substitute.For<IRecordWriteService>(),
@@ -42,7 +44,7 @@ public class PipelineSearchRecordsAiSearchTests
         Substitute.For<IEmailService>(),
         Substitute.For<IHttpClientFactory>(),
         Substitute.For<IFileStorageService>(),
-        Options.Create(new PipelineExecutionOptions()),
+        Options.Create(options ?? TestOptions()),
         Substitute.For<ILogger<PipelineEngine>>(),
         Substitute.For<IPipelineTriggerInterceptor>(),
         Substitute.For<ITenantUnitOfWork>(),
@@ -66,7 +68,7 @@ public class PipelineSearchRecordsAiSearchTests
 
     private static List<AppField> Fields() => new()
     {
-        new() { Id = 7, Fid = 7, Name = "Status", TypeCode = "Text", IsSearchable = true, IsFilterable = true }
+        new() { Id = 7, Fid = 7, Name = "Status", TypeCode = "Text", IsSearchable = true, IsFilterable = true, SearchSlot = "str_01" }
     };
 
     private static async IAsyncEnumerable<AiSearchIdPage> Pages(params AiSearchIdPage[] pages)
@@ -99,10 +101,10 @@ public class PipelineSearchRecordsAiSearchTests
         }
     };
 
-    private async Task<string> RunAsync(IServiceProvider serviceProvider, object? config = null, List<AppField>? fields = null, IServiceProvider? stepScope = null)
+    private async Task<string> RunAsync(IServiceProvider serviceProvider, object? config = null, List<AppField>? fields = null, IServiceProvider? stepScope = null, PipelineExecutionOptions? options = null)
     {
         _fieldRepo.ListByTableAsync(_table.Id, Arg.Any<CancellationToken>()).Returns(fields ?? Fields());
-        var engine = BuildEngine(serviceProvider);
+        var engine = BuildEngine(serviceProvider, options);
         if (stepScope != null)
         {
             // What RunInStepScopeAsync does around a saved-account step: the step's own service scope.
@@ -179,7 +181,7 @@ public class PipelineSearchRecordsAiSearchTests
         await RunAsync(Provider());
 
         _azureSearchService.Received(1).SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), _table.Id,
-            "search.ismatch('\"Active\"', 'f_7', 'full', 'any')", Arg.Any<string?>(), Arg.Any<CancellationToken>());
+            "search.ismatch('\"Active\"', 'str_01', 'full', 'any')", Arg.Any<string?>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -354,50 +356,96 @@ public class PipelineSearchRecordsAiSearchTests
         Assert.DoesNotContain(stale.ToString(), json);
     }
 
-    [Fact]
-    public async Task GridSearchEnabled_MaxResults_StopsPagingOnceEnoughVerifiedRows()
+    private object MaxResultsConfig(int maxResults) => new
     {
+        TableId = _table.PublicId.ToString(),
+        MaxResults = maxResults,
+        FilterGroups = new List<object> { new { LogicalOp = "AND", Rules = new List<object> { new { Field = "fid_7", Operator = "is", Value = "Active" } } } }
+    };
+
+    private void AiTotal(long total) =>
+        _azureSearchService.SearchRecordsByFilterPagedAsync(Arg.Any<long>(), _table.Id, Arg.Any<string>(), 1, 1, Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(((IReadOnlyList<Guid>)new List<Guid>(), total)));
+
+    [Fact]
+    public async Task GridSearchEnabled_MaxResults_ReadsEveryCandidateAndReturnsTheFirstByRecordId_AsSqlWould()
+    {
+        // The index lists ids in its own order. MaxResults = "the first N by record id" (what SQL returns), so with few enough
+        // candidates they are ALL read, sorted by record id and cut — never the first N the index happened to list.
         _azureSearchService.IsGridSearchEnabled.Returns(true);
         _azureSearchService.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
         var p1 = Enumerable.Range(0, 3).Select(_ => Guid.NewGuid()).ToList();
         var p2 = Enumerable.Range(0, 3).Select(_ => Guid.NewGuid()).ToList();
         AiPages(new AiSearchIdPage(p1, "a"), new AiSearchIdPage(p2, "b"));
-        long id = 0;
+        AiTotal(6);
+        // The first page holds the HIGH record ids (6, 5, 4), the second the low ones (3, 2, 1).
+        var recordIdOf = p1.Select((g, i) => (g, id: 6L - i)).Concat(p2.Select((g, i) => (g, id: 3L - i))).ToDictionary(x => x.g, x => x.id);
         _recordRepo.GetIdsByPublicIdsAsync(_table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(ci => ci.ArgAt<IReadOnlyCollection<Guid>>(1).Select(_ => ++id).ToList());
+            .Returns(ci => ci.ArgAt<IReadOnlyCollection<Guid>>(1).Select(g => recordIdOf[g]).ToList());
         _searchService.SearchAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int?>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
             .Returns(ci => Task.FromResult((IReadOnlyList<IReadOnlyDictionary<string, object?>>)
                 JsonSerializer.Deserialize<long[]>(IdCondition(ci.ArgAt<FilterGroup?>(3)).Value!)!
-                    .Select(i => (IReadOnlyDictionary<string, object?>)Row(i, Guid.NewGuid())).ToList()));
-        var config = new
-        {
-            TableId = _table.PublicId.ToString(),
-            MaxResults = 2,
-            FilterGroups = new List<object> { new { LogicalOp = "AND", Rules = new List<object> { new { Field = "fid_7", Operator = "is", Value = "Active" } } } }
-        };
+                    .Select(i => (IReadOnlyDictionary<string, object?>)Row(i, recordIdOf.First(p => p.Value == i).Key)).ToList()));
 
-        var json = await RunAsync(Provider(), config);
+        var json = await RunAsync(Provider(), MaxResultsConfig(2));
 
-        using var doc = JsonDocument.Parse(json);
-        Assert.Equal(2, doc.RootElement.GetProperty("records").GetArrayLength());
-        await _recordRepo.Received(1).GetIdsByPublicIdsAsync(_table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>());   // the second page was never read
+        Assert.Equal(new[] { recordIdOf.First(p => p.Value == 1).Key, recordIdOf.First(p => p.Value == 2).Key }.Select(g => g.ToString()), RecordPublicIds(json));
+        await _recordRepo.Received(2).GetIdsByPublicIdsAsync(_table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>());   // both pages were read
+    }
+
+    [Fact]
+    public async Task GridSearchEnabled_MaxResults_WithMoreCandidatesThanTheLimitedReadAllows_IsReadFromSql()
+    {
+        _azureSearchService.IsGridSearchEnabled.Returns(true);
+        _azureSearchService.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
+        AiPages(new AiSearchIdPage([Guid.NewGuid()], "~"));
+        AiTotal(1001);   // one above AiSearchLimitedReadMaxMatches
+        FilterGroup? capturedFilter = null;
+        StubSearchServiceAsync(new List<IReadOnlyDictionary<string, object?>> { Row(1L, Guid.NewGuid()) }, f => capturedFilter = f);
+
+        await RunAsync(Provider(), MaxResultsConfig(2));
+
+        _azureSearchService.DidNotReceive().SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+        Assert.Equal(7, capturedFilter!.Nodes[0].Condition!.FieldId);   // SQL ran with the original condition
+    }
+
+    [Fact]
+    public async Task GridSearchEnabled_MaxResults_AValidRecentRecordWithALowerIdThanTheIndexedOnes_IsNotLost()
+    {
+        // The index found record 5; record 2 changed a moment ago (not indexed yet) and has the lower id, so it is the first of two.
+        _azureSearchService.IsGridSearchEnabled.Returns(true);
+        _azureSearchService.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
+        var indexed = Guid.NewGuid();
+        AiPages(new AiSearchIdPage([indexed], "~"));
+        AiTotal(1);
+        var recent = Guid.NewGuid();
+        _recordRepo.GetIdsByPublicIdsAsync(_table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>()).Returns(new List<long> { 5 });
+        _recordRepo.ListRecordsChangedSinceAsync(_table, Arg.Any<DateTime>(), Arg.Any<long>(), Arg.Any<long>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(ci => Task.FromResult<IReadOnlyList<(long Id, DateTime ChangedOn)>>(ci.ArgAt<long>(2) == 0 ? [(2L, DateTime.UtcNow)] : []));
+        _searchService.SearchAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int?>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
+            .Returns(ci => Task.FromResult((IReadOnlyList<IReadOnlyDictionary<string, object?>>)
+                JsonSerializer.Deserialize<long[]>(IdCondition(ci.ArgAt<FilterGroup?>(3)).Value!)!
+                    .Select(i => (IReadOnlyDictionary<string, object?>)Row(i, i == 5 ? indexed : recent)).ToList()));
+
+        var json = await RunAsync(Provider(), MaxResultsConfig(2));
+
+        Assert.Equal(new[] { recent, indexed }.Select(g => g.ToString()), RecordPublicIds(json));
     }
 
     public static IEnumerable<object[]> SearchesThatMustStayInSql()
     {
-        AppField Text(string type, bool searchable = true, bool filterable = true) =>
-            new() { Id = 7, Fid = 7, Name = "Status", TypeCode = type, IsSearchable = searchable, IsFilterable = filterable };
+        AppField Text(string type, bool searchable = true, bool filterable = true, string? slot = "str_01") =>
+            new() { Id = 7, Fid = 7, Name = "Status", TypeCode = type, IsSearchable = searchable, IsFilterable = filterable, SearchSlot = slot };
 
-        yield return new object[] { "not searchable", Text("Text", searchable: false), "is" };
-        yield return new object[] { "not filterable", Text("Text", filterable: false), "is" };
         yield return new object[] { "not indexed", Text("Text", false, false), "is" };
+        yield return new object[] { "no slot of its own in the shared index", Text("Text", slot: null), "is" };
         yield return new object[] { "formula", Text("Formula_Text"), "is" };
         yield return new object[] { "lookup", Text("Lookup"), "is" };
         yield return new object[] { "summary", Text("Summary"), "is" };
         yield return new object[] { "reference", Text("Reference"), "is" };
-        yield return new object[] { "number", Text("Number"), "is" };
-        yield return new object[] { "date", Text("Date"), "is" };
-        yield return new object[] { "contains operator", Text("Text"), "contains" };
+        yield return new object[] { "rich text (the index holds its HTML)", Text("RichText"), "is" };
+        yield return new object[] { "contains operator (pattern operators are off)", Text("Text"), "contains" };
+        yield return new object[] { "negation", Text("Text"), "is not" };
     }
 
     [Theory]
@@ -421,16 +469,20 @@ public class PipelineSearchRecordsAiSearchTests
     }
 
     [Fact]
-    public async Task GridSearchEnabled_OneIneligibleConditionAmongEligibleOnes_SendsTheWholeSearchToSql()
+    public async Task GridSearchEnabled_OneIneligibleConditionAmongEligibleOnes_NarrowsWithTheEligibleOneAndSqlStillChecksBoth()
     {
         _azureSearchService.IsGridSearchEnabled.Returns(true);
         _azureSearchService.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
         var fields = new List<AppField>
         {
-            new() { Id = 7, Fid = 7, Name = "Status", TypeCode = "Text", IsSearchable = true, IsFilterable = true },
+            new() { Id = 7, Fid = 7, Name = "Status", TypeCode = "Text", IsSearchable = true, IsFilterable = true, SearchSlot = "str_01" },
             new() { Id = 8, Fid = 8, Name = "Order no", TypeCode = "Formula_Text", IsSearchable = true, IsFilterable = true }
         };
-        StubSearchServiceAsync(new List<IReadOnlyDictionary<string, object?>>());
+        var matched = Guid.NewGuid();
+        AiPages(new AiSearchIdPage([matched], "~"));
+        _recordRepo.GetIdsByPublicIdsAsync(_table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>()).Returns(new List<long> { 42 });
+        var seenFilters = new List<FilterGroup?>();
+        StubSearchServiceAsync(new List<IReadOnlyDictionary<string, object?>> { Row(42L, matched) }, f => seenFilters.Add(f));
         var config = new
         {
             TableId = _table.PublicId.ToString(),
@@ -446,7 +498,116 @@ public class PipelineSearchRecordsAiSearchTests
 
         await RunAsync(Provider(), config, fields);
 
+        // The index is asked only about the Status condition...
+        _azureSearchService.Received(1).SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), _table.Id,
+            "search.ismatch('\"Active\"', 'str_01', 'full', 'any')", Arg.Any<string?>(), Arg.Any<CancellationToken>());
+        // ...and SQL reads only those candidates, with the Status condition still applied (the formula one is checked in memory on them).
+        static IEnumerable<FilterCondition> Flatten(FilterGroup g) =>
+            g.Nodes.SelectMany(n => n.Condition != null ? [n.Condition] : n.Group != null ? Flatten(n.Group) : []);
+        // The first SQL read is the candidates (the row has no formula value, so the in-memory check rejects it and SQL then reads the search whole).
+        var sqlConditions = Flatten(seenFilters[0]!).ToList();
+        Assert.True(sqlConditions.Any(c => c is { FieldId: 3, Operator: "in" }), "conditions: " + string.Join(", ", sqlConditions.Select(c => $"{c.FieldId}{c.Operator}")));
+        Assert.True(sqlConditions.Any(c => c is { FieldId: 7 }), "conditions: " + string.Join(", ", sqlConditions.Select(c => $"{c.FieldId}{c.Operator}")));
+    }
+
+    private object ContainsConfig() => new
+    {
+        TableId = _table.PublicId.ToString(),
+        FilterGroups = new List<object> { new { LogicalOp = "AND", Rules = new List<object> { new { Field = "fid_7", Operator = "contains", Value = "Active" } } } }
+    };
+
+    [Fact]
+    public async Task GridSearchEnabled_Contains_WithTheDefaultOptions_IsAnsweredByTheIndex()
+    {
+        // Pattern operators are on by default: "contains" asks the index for the word inside any word, and SQL still re-checks it.
+        _azureSearchService.IsGridSearchEnabled.Returns(true);
+        _azureSearchService.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
+        AiPages(new AiSearchIdPage([Guid.NewGuid()], "~"));
+        _recordRepo.GetIdsByPublicIdsAsync(_table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>()).Returns(new List<long> { 1 });
+        StubSearchServiceAsync(new List<IReadOnlyDictionary<string, object?>> { Row(1L, Guid.NewGuid()) });
+        var defaults = new PipelineExecutionOptions { AiSearchMinTableRows = 0, AiSearchCountGuard = false, AiSearchFieldSettleHours = 0 };   // AiSearchPatternOperators left at its default
+
+        await RunAsync(Provider(), ContainsConfig(), options: defaults);
+
+        Assert.True(defaults.AiSearchPatternOperators);
+        _azureSearchService.Received(1).SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), _table.Id,
+            "search.ismatch('/.*active.*/', 'str_01', 'full', 'any')", Arg.Any<string?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task GridSearchEnabled_Contains_WithPatternOperatorsSwitchedOff_IsAnsweredFromSql()
+    {
+        _azureSearchService.IsGridSearchEnabled.Returns(true);
+        _azureSearchService.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
+        StubSearchServiceAsync(new List<IReadOnlyDictionary<string, object?>> { Row(1L, Guid.NewGuid()) });
+        var off = new PipelineExecutionOptions { AiSearchMinTableRows = 0, AiSearchCountGuard = false, AiSearchFieldSettleHours = 0, AiSearchPatternOperators = false };
+
+        await RunAsync(Provider(), ContainsConfig(), options: off);
+
         _azureSearchService.DidNotReceive().SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task GridSearchEnabled_AFieldChangedWithinTheSettleWindow_IsAnsweredFromSql()
+    {
+        // A field just switched on for search is still being copied into the index for the records already there.
+        _azureSearchService.IsGridSearchEnabled.Returns(true);
+        _azureSearchService.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
+        StubSearchServiceAsync(new List<IReadOnlyDictionary<string, object?>> { Row(1L, Guid.NewGuid()) });
+        var fresh = Fields();
+        fresh[0].ModifiedOn = DateTime.UtcNow.AddHours(-1);
+
+        await RunAsync(Provider(), fields: fresh, options: new PipelineExecutionOptions { AiSearchMinTableRows = 0, AiSearchCountGuard = false, AiSearchFieldSettleHours = 24 });
+
+        _azureSearchService.DidNotReceive().SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task GridSearchEnabled_ASmallTable_IsAnsweredFromSql()
+    {
+        _azureSearchService.IsGridSearchEnabled.Returns(true);
+        _azureSearchService.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
+        _recordRepo.CountAsync(_table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>(), Arg.Any<IReadOnlySet<long>?>())
+            .Returns(500);
+        StubSearchServiceAsync(new List<IReadOnlyDictionary<string, object?>> { Row(1L, Guid.NewGuid()) });
+
+        await RunAsync(Provider(), options: new PipelineExecutionOptions { AiSearchMinTableRows = 20000, AiSearchCountGuard = false, AiSearchFieldSettleHours = 0, AiSearchGuardCacheSeconds = 0 });
+
+        _azureSearchService.DidNotReceive().SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task GridSearchEnabled_AnIndexMissingRecords_IsAnsweredFromSql()
+    {
+        _azureSearchService.IsGridSearchEnabled.Returns(true);
+        _azureSearchService.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
+        _recordRepo.CountAsync(_table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>(), Arg.Any<IReadOnlySet<long>?>())
+            .Returns(100000);
+        _azureSearchService.SearchRecordsPagedAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(((IReadOnlyList<Guid>)new List<Guid>(), 90000L)));   // 10,000 documents missing
+        StubSearchServiceAsync(new List<IReadOnlyDictionary<string, object?>> { Row(1L, Guid.NewGuid()) });
+
+        await RunAsync(Provider(), options: new PipelineExecutionOptions { AiSearchMinTableRows = 20000, AiSearchCountGuard = true, AiSearchFieldSettleHours = 0, AiSearchGuardCacheSeconds = 0 });
+
+        _azureSearchService.DidNotReceive().SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task GridSearchEnabled_ACompleteIndexOfALargeTable_AnswersTheSearch()
+    {
+        _azureSearchService.IsGridSearchEnabled.Returns(true);
+        _azureSearchService.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
+        _recordRepo.CountAsync(_table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>(), Arg.Any<IReadOnlySet<long>?>())
+            .Returns(100000);
+        _azureSearchService.SearchRecordsPagedAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(((IReadOnlyList<Guid>)new List<Guid>(), 100000L)));
+        AiPages(new AiSearchIdPage([Guid.NewGuid()], "~"));
+        _recordRepo.GetIdsByPublicIdsAsync(_table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>()).Returns(new List<long> { 1 });
+        StubSearchServiceAsync(new List<IReadOnlyDictionary<string, object?>> { Row(1L, Guid.NewGuid()) });
+
+        await RunAsync(Provider(), options: new PipelineExecutionOptions { AiSearchMinTableRows = 20000, AiSearchCountGuard = true, AiSearchFieldSettleHours = 0, AiSearchGuardCacheSeconds = 0 });
+
+        _azureSearchService.Received(1).SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), _table.Id, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]

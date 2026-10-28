@@ -129,9 +129,15 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         var copyLogger = services.GetService<ILogger<CopyRecordsExecutor>>();
         if (azureSearch != null && azureSearch.IsGridSearchEnabled)
         {
-            var aiPlan = PipelineAiSearchPlanner.Evaluate(effectiveFilter, sourceFields);
+            var pipelineOptions = services.GetService<IOptions<PipelineExecutionOptions>>()?.Value ?? new PipelineExecutionOptions();
+            var aiPlan = PipelineAiSearchPlanner.Evaluate(effectiveFilter, sourceFields, new PipelineAiSearchPlanOptions(pipelineOptions.AiSearchPatternOperators));
+            var aiGate = aiPlan.UseAiSearch && await azureSearch.IsHealthyAsync(ct)
+                ? await PipelineAiSearchGate.EvaluateAsync(source, sourceFields, aiPlan, azureSearch, queryContext.TenantId, records, pipelineOptions, ct)
+                : PipelineAiSearchGateResult.Yes;
             if (!aiPlan.UseAiSearch)
                 copyLogger?.LogInformation("[CopyRecords] Source table {TableId} is read from SQL, not Azure AI Search: {Reason}.", source.Id, aiPlan.SqlReason);
+            else if (!aiGate.UseAiSearch)
+                copyLogger?.LogInformation("[CopyRecords] Source table {TableId} is read from SQL, not Azure AI Search: {Reason}.", source.Id, aiGate.SqlReason);
             else if (await azureSearch.IsHealthyAsync(ct))
             {
                 try
