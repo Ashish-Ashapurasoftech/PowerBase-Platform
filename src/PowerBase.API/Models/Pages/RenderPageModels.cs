@@ -119,6 +119,8 @@ public class RenderedTabResponse
     public string Id { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public DashboardGridResponse Grid { get; set; } = new();
+    /// <summary>This tab's own filter slots; the viewer shows only the active tab's.</summary>
+    public IReadOnlyList<DashboardFilterSlotResponse> Filters { get; set; } = [];
     public IReadOnlyList<RenderedWidgetResponse> Widgets { get; set; } = [];
 }
 
