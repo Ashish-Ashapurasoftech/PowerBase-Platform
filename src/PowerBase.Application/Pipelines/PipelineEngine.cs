@@ -1593,7 +1593,7 @@ public partial class PipelineEngine : IPipelineEngine
     private async Task ValidateNewBulkUpsertRowAsync(AppTable table, IReadOnlyList<AppField> fields, Dictionary<long, object?> row,
         IRecordRepository recordRepo, IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IDbTransaction? transaction, int rowNumber, CancellationToken ct)
     {
-        await PipelineCreateRecordRules.ApplyDefaultsAsync(fields, row, StepActingUserId, CurrentStepServices, ct);
+        await PipelineCreateRecordRules.ApplyDefaultsAsync(table, fields, row, StepActingUserId, CurrentStepServices, ct);
         try
         {
             await PipelineCreateRecordRules.ValidateAsync(table, fields, row, recordRepo, tableRepo, fieldRepo, CurrentStepServices, transaction, ct);
@@ -2377,7 +2377,7 @@ public partial class PipelineEngine : IPipelineEngine
                 // Same rules as adding the record by hand: defaults, Required / Unique / format, Custom Data Rule. After the receipt check
                 // above, so a retry of a step that already wrote its record returns that result instead of reporting its own record as a duplicate.
                 LoopBatchProfile.Phase("receipt-check", ref phaseMark);
-                await PipelineCreateRecordRules.ApplyDefaultsAsync(fields, values, StepActingUserId, CurrentStepServices, ct);
+                await PipelineCreateRecordRules.ApplyDefaultsAsync(table, fields, values, StepActingUserId, CurrentStepServices, ct);
                 LoopBatchProfile.Phase("defaults", ref phaseMark);
                 await PipelineCreateRecordRules.ValidateAsync(table, fields, values, recordRepo, tableRepo, fieldRepo, CurrentStepServices, uow.Transaction, ct);
 

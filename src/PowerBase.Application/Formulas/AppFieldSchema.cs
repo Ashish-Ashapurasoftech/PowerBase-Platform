@@ -26,12 +26,13 @@ public sealed class AppFieldSchema : IFieldSchema
             if (type is null) continue;
 
             var fid = (long)f.Fid.Value;
-            _byFid[fid] = new FieldRef(fid, string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label, type.Value);
+            var isAddress = f.TypeCode == "Address";
+            _byFid[fid] = new FieldRef(fid, string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label, type.Value, isAddress);
             // Always register by internal name.
-            _byName[f.Name] = new FieldRef(fid, f.Name, type.Value);
+            _byName[f.Name] = new FieldRef(fid, f.Name, type.Value, isAddress);
             // Also register by label when it differs, so [Label] and [Name] both resolve.
             if (!string.IsNullOrWhiteSpace(f.Label) && !string.Equals(f.Label, f.Name, StringComparison.OrdinalIgnoreCase))
-                _byName[f.Label] = new FieldRef(fid, f.Label, type.Value);
+                _byName[f.Label] = new FieldRef(fid, f.Label, type.Value, isAddress);
         }
     }
 

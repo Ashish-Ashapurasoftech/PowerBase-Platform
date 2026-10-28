@@ -141,7 +141,29 @@ public static class Binder
             f.Fid = field.Fid;
             f.IsBound = true;
             f.Type = field.Type;
+            f.IsAddress = field.IsAddress;
             fids.Add(field.Fid);
+            return;
+        }
+
+        // [Address : Street 1] - one part of an Address field.
+        if (AddressParts.TrySplit(f.Name, out var addressName, out var partLabel) && schema.TryResolve(addressName, out var addressField) && addressField.IsAddress)
+        {
+            var key = AddressParts.KeyOf(partLabel);
+            if (key is null)
+            {
+                diagnostics.Add(new FormulaDiagnostic(
+                    FormulaErrorCode.UnknownField,
+                    $"[{addressName}] has no part called {partLabel}. Use Street 1, Street 2, City, State, Postal Code or Country.",
+                    f.Span));
+                return;
+            }
+            f.Fid = addressField.Fid;
+            f.IsBound = true;
+            f.Type = addressField.Type;
+            f.IsAddress = true;
+            f.AddressPart = key;
+            fids.Add(addressField.Fid);
             return;
         }
 

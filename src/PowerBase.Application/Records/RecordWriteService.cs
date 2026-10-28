@@ -147,6 +147,11 @@ public sealed class RecordWriteService : IRecordWriteService
                 existingByFid[f.Fid!.Value] = stored;
         }
 
+        // Snapshot fields are read-only after creation: a write that changes one is rejected here for every caller
+        // (record edit, grid edit, Action Button, Pipeline update, Copy Records). A value equal to the stored one is fine.
+        SnapshotWriteGuard.EnsureUnchanged(fields, fieldValues, (f, submitted) =>
+            existingByFid.TryGetValue(f.Fid!.Value, out var stored) && AreValuesEqual(stored, submitted, f.TypeCode));
+
         // Reference fields must point at an existing parent record; a value submitted as a
         // human key is resolved to the parent row Id here.
         var refOverrides = await ReferenceWriteValidator.ValidateAsync(

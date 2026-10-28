@@ -51,6 +51,13 @@ public sealed class FieldRefExpr : Expr
 
     public bool IsBound { get; internal set; }
 
+    /// <summary>Set by the binder when the field is an Address: its value is the whole address as text, or the part named by
+    /// <see cref="AddressPart"/> (<c>[Address : Street 1]</c>).</summary>
+    public bool IsAddress { get; internal set; }
+
+    /// <summary>The stored key of the address part this reference reads (street1, street2, city, state, zip, country), or null for the whole address.</summary>
+    public string? AddressPart { get; internal set; }
+
     /// <summary>Set by the binder when this bracket token resolved as a table alias
     /// (<c>[_DBID_FILE_TYPES]</c>) rather than a field — the target table's id, to be evaluated as
     /// a Text literal. Null for an ordinary field reference. See <see cref="Binding.ITableAliasSchema"/>.</summary>

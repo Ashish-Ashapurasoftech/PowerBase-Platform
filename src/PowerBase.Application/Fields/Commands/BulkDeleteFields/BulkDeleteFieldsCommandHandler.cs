@@ -61,6 +61,7 @@ public class BulkDeleteFieldsCommandHandler
 
         await RelationshipKeyFieldDeleteGuard.EnsureNotRelationshipKeyAsync(table, fieldsToDelete, _relRepo, ct);
         ReferenceFilterDependencyGuard.EnsureNotControlling(table, fields, fieldsToDelete);
+        Common.SnapshotSourceDependencyGuard.EnsureNotSource(fields, fieldsToDelete);
 
         var blockedFieldsErrors = new Dictionary<string, string[]>();
         var pipelinesToDeactivate = new Dictionary<Guid, Pipeline>();

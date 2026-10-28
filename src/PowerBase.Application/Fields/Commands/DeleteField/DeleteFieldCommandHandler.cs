@@ -64,8 +64,9 @@ public class DeleteFieldCommandHandler
             : PowerBase.Application.Search.FieldDeleteIndexCleanup.Capture(_queryContext.TenantId, table, await _fieldRepo.ListByTableAsync(table.Id, ct), [field]);
 
         await RelationshipKeyFieldDeleteGuard.EnsureNotRelationshipKeyAsync(table, [field], _relRepo, ct);
-        ReferenceFilterDependencyGuard.EnsureNotControlling(
-            table, await _fieldRepo.ListByTableAsync(table.Id, ct), [field]);
+        var tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
+        ReferenceFilterDependencyGuard.EnsureNotControlling(table, tableFields, [field]);
+        Common.SnapshotSourceDependencyGuard.EnsureNotSource(tableFields, [field]);
 
         // Dependency Check: Pipeline Field Lock
         if (field.Fid.HasValue)

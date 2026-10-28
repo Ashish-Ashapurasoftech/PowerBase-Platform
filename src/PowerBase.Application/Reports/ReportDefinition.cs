@@ -56,6 +56,11 @@ public class ReportDefinition
     public bool GroupByDescending { get; set; }
     public List<SummaryAggregation> Aggregations { get; set; } = [];
 
+    /// <summary>Up to <see cref="ReportFormulaFields.MaxFormulas"/> report-only calculated columns. Each is exposed to the
+    /// run/export code as a virtual field (reserved Fid) — see <see cref="ReportFormulaFields"/> — so it can be a column,
+    /// a filter, a sort, a group-by level or an aggregation like any Formula field, without ever being stored.</summary>
+    public List<ReportFormula> ReportFormulas { get; set; } = [];
+
     /// <summary>Table-only. Null when not a Table report or when nothing has been customized.</summary>
     public ReportOptions? Options { get; set; }
 
@@ -73,6 +78,21 @@ public class ReportDefinition
     public long? SortFieldId { get; set; }
     public bool SortDesc { get; set; }
     public List<ReportFilter> Filters { get; set; } = [];
+}
+
+// ── Report formulas ────────────────────────────────────────────────────────────
+
+public class ReportFormula
+{
+    /// <summary>Reserved id (<see cref="ReportFormulaFields.FirstId"/> + 0..2) other parts of the definition (columns, filters, sorts, group-by, aggregations)
+    /// use to refer to this formula; it can never collide with a real field's Fid.</summary>
+    public long Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+    /// <summary>One of <see cref="ReportFormulaFields.AllowedTypeCodes"/>.</summary>
+    public string TypeCode { get; set; } = "Formula_Text";
+    /// <summary>Formula_Number only: Number, Currency, Percent or Rating (the dropdown's "Numeric - Currency" etc.).</summary>
+    public string? DisplayAs { get; set; }
+    public string Expression { get; set; } = string.Empty;
 }
 
 // ── Table: unified Sort + Group ────────────────────────────────────────────────

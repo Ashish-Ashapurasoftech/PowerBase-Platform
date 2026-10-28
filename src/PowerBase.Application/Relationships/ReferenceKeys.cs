@@ -66,10 +66,27 @@ public static class ReferenceKeys
     /// <summary>The type of the key <paramref name="field"/> shows (its display key in <paramref name="referenceKeys"/>,
     /// see <see cref="LoadAsync"/>: "Text" for "Related Client" keyed by Client Name) — what a summary judges and reads it
     /// as. Null for any other field, or a Reference showing Record ID#.</summary>
-    public static string? KeyTypeCode(AppField field, IReadOnlyDictionary<long, AppField>? referenceKeys) =>
+    public static string? KeyTypeCode(AppField field, IReadOnlyDictionary<long, AppField>? referenceKeys, string? function = null) =>
         field.TypeCode == nameof(FieldTypeCode.Reference) && field.Fid is int fid && referenceKeys?.GetValueOrDefault(fid) is { } key
+            && !SummarizesAsRecordId(function)
             ? key.TypeCode
             : null;
+
+    /// <summary>True for the functions that read a Reference as the Record ID# its column holds, not the key it shows: Sum /
+    /// Min / Max of "Related Status" is the newest status record's number, as in Quickbase, and a key can't be summed or
+    /// ordered the way a number can. Count, Distinct Count and Combined Text still read the key.</summary>
+    public static bool SummarizesAsRecordId(string? function) =>
+        function is SummaryFunctions.Sum or SummaryFunctions.Min or SummaryFunctions.Max;
+
+    /// <summary>True when <paramref name="function"/> reads <paramref name="target"/> as a Record ID# (a number): a Reference, or a
+    /// lookup of one ("SPC - Related LEA"), summarized with Sum / Min / Max.</summary>
+    public static bool ReadsRecordId(AppField target, IReadOnlyDictionary<long, AppField>? lookupSources, string? function)
+    {
+        if (!SummarizesAsRecordId(function)) return false;
+        if (target.TypeCode == nameof(FieldTypeCode.Reference)) return true;
+        return SummaryLookupSources.IsLookup(target) && string.IsNullOrWhiteSpace(SummaryLookupSources.SourceSubField(target))
+            && SummaryLookupSources.ReadableSource(target, lookupSources)?.TypeCode == nameof(FieldTypeCode.Reference);
+    }
 
     /// <summary>True for a Reference compared as its parent's key: one whose parent shows a key field.</summary>
     public static bool ComparesAsKey(AppField field, IReadOnlyDictionary<long, AppField>? referenceKeys) =>
@@ -85,11 +102,11 @@ public static class ReferenceKeys
     /// summary's target too (<paramref name="targetFid"/>), when it is one. Null when nothing reads such a Reference.</summary>
     public static (FilterGroup? Filter, IReadOnlyList<AppField> Lookups, IReadOnlyDictionary<long, AppField> Sources, IReadOnlyDictionary<long, long> Moved)? StandIn(
         FilterGroup? filter, int? targetFid, IReadOnlyDictionary<long, AppField> childFieldsByFid,
-        IReadOnlyDictionary<long, AppField>? referenceKeys)
+        IReadOnlyDictionary<long, AppField>? referenceKeys, string? function = null)
     {
         if (referenceKeys is not { Count: > 0 }) return null;
         var referenceFids = SummaryEncryptionGuard.ConditionFieldIds(filter)
-            .Concat(targetFid is int t ? [t] : [])
+            .Concat(targetFid is int t && !SummarizesAsRecordId(function) ? [t] : [])
             .Distinct()
             .Where(fid => childFieldsByFid.TryGetValue(fid, out var f) && ComparesAsKey(f, referenceKeys))
             .ToList();

@@ -34,6 +34,7 @@ public class ReportDefinitionDto
     public long? GroupByFieldId { get; init; }
     public string GroupByMode { get; init; } = "EqualValues";
     public List<RowGroupLevelDto> RowGroupLevels { get; init; } = [];
+    public List<ReportFormulaDto> ReportFormulas { get; init; } = [];
     public List<SummarySortFieldDto> SummarySortFields { get; init; } = [];
     public bool HideTotals { get; init; }
     public bool? GroupDefaultCollapsed { get; init; }
@@ -71,6 +72,15 @@ public class SummarySortFieldDto
     public long? AggregationFieldId { get; init; }
     public string? AggregationFunction { get; init; }
     public bool Desc { get; init; }
+}
+
+public class ReportFormulaDto
+{
+    public long Id { get; init; }
+    public string Name { get; init; } = string.Empty;
+    public string TypeCode { get; init; } = "Formula_Text";
+    public string? DisplayAs { get; init; }
+    public string Expression { get; init; } = string.Empty;
 }
 
 public class RowGroupLevelDto

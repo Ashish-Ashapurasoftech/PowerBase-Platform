@@ -282,12 +282,17 @@ public class SummaryTargetValidatorTests
 
     // A Reference whose parent shows a key field ("Related Client", keyed by Client Name) is summarized as that key:
     // judged by the key's type. With no key it holds — and is judged as — a Record ID, whatever type it was converted from.
+    // Sum / Min / Max are the exception: they read the Record ID# the column holds (a number), whatever key is shown.
     [Theory]
     [InlineData("CombinedText", "Text", true)]
     [InlineData("DistinctCount", "Text", true)]
-    [InlineData("Sum", "Text", false)]
+    [InlineData("Sum", "Text", true)]
+    [InlineData("Max", "Text", true)]
+    [InlineData("Min", "Text", true)]
+    [InlineData("Avg", "Text", false)]
     [InlineData("Max", "Date", true)]
     [InlineData("Sum", "Currency", true)]
+    [InlineData("Max", null, true)]
     [InlineData("CombinedText", null, true)]    // no key: its Record IDs
     [InlineData("DistinctCount", null, true)]
     public void Validate_ReferenceTarget_FollowsTheKeyItShows(string function, string? keyType, bool valid)
@@ -297,6 +302,20 @@ public class SummaryTargetValidatorTests
             ? new Dictionary<long, AppField>()
             : new Dictionary<long, AppField> { [5] = new() { Id = 906, Fid = 6, AppTableId = 9, Name = "Key", TypeCode = keyType } };
         var run = () => SummaryTargetValidator.Validate(function, 5, reference, null, referenceKeys: keys);
+        if (valid) run.Should().NotThrow(); else run.Should().Throw<ValidationException>();
+    }
+
+    // Sum / Min / Max of a lookup of a Reference read the Record ID# it holds, like the Reference itself.
+    [Theory]
+    [InlineData("Min", true)]
+    [InlineData("Max", true)]
+    [InlineData("Sum", true)]
+    [InlineData("Avg", false)]
+    public void Validate_LookupOfAReference_MinMaxSumReadTheRecordId(string function, bool valid)
+    {
+        var lookup = new AppField { Id = 1, Fid = 20, Name = "SPC - Related LEA", TypeCode = "Lookup", Settings = """{"sourceFid":5,"sourceTypeCode":"Reference"}""" };
+        var sources = new Dictionary<long, AppField> { [20] = new() { Fid = 5, Name = "Related LEA", TypeCode = "Reference" } };
+        var run = () => SummaryTargetValidator.Validate(function, 20, lookup, null, lookupSources: sources);
         if (valid) run.Should().NotThrow(); else run.Should().Throw<ValidationException>();
     }
 

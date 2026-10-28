@@ -92,6 +92,8 @@ public static class SummaryComputedTargets
         "DateTime" => "DateTime",
         "Boolean" => "Bool",
         "Text" or "Email" or "Phone" => "Text",
+        // A Reference is read as the key its parent shows, which is the Record ID# when the parent has no key set: text either way.
+        "Reference" => "Text",
         _ => null,
     };
 

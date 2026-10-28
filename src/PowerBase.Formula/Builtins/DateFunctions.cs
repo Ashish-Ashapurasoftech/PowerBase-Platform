@@ -38,9 +38,9 @@ internal static class DateFunctions
 
         // ── Wave 1: register-only date/time additions ──
         r.Add(Fn.Exact("DayOfYear", FormulaType.Number, new[] { P.DateLike }, (a, _) => Part(a[0], d => d.DayOfYear)));
-        r.Add(Fn.Exact("Hour", FormulaType.Number, new[] { P.DateLike }, (a, _) => TimePart(a[0], t => t.Hour)));
-        r.Add(Fn.Exact("Minute", FormulaType.Number, new[] { P.DateLike }, (a, _) => TimePart(a[0], t => t.Minute)));
-        r.Add(Fn.Exact("Second", FormulaType.Number, new[] { P.DateLike }, (a, _) => TimePart(a[0], t => t.Second)));
+        r.Add(Fn.Exact("Hour", FormulaType.Number, new[] { P.TimeLike }, (a, _) => TimePart(a[0], t => t.Hour)));
+        r.Add(Fn.Exact("Minute", FormulaType.Number, new[] { P.TimeLike }, (a, _) => TimePart(a[0], t => t.Minute)));
+        r.Add(Fn.Exact("Second", FormulaType.Number, new[] { P.TimeLike }, (a, _) => TimePart(a[0], t => t.Second)));
 
         r.Add(Fn.Exact("NameOfDay", FormulaType.Text, new[] { P.DateLike }, (a, _) => Name(a[0], d => Inv.GetDayName(d.DayOfWeek))));
         r.Add(Fn.Exact("NameOfMonth", FormulaType.Text, new[] { P.DateLike }, (a, _) => Name(a[0], d => Inv.GetMonthName(d.Month))));
@@ -92,6 +92,7 @@ internal static class DateFunctions
     private static DateTime? AsDateTimeOrNull(FormulaValue v) => v.IsNull ? null
         : v.Type == FormulaType.DateTime ? v.AsDateTime()
         : v.Type == FormulaType.Date ? v.AsDate().ToDateTime(TimeOnly.MinValue)
+        : v.Type == FormulaType.Time ? DateOnly.MinValue.ToDateTime(v.AsTime())
         : null;
 
     private static FormulaValue Name(FormulaValue v, Func<DateOnly, string> f)

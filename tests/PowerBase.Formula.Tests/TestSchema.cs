@@ -15,5 +15,12 @@ public sealed class TestSchema : IFieldSchema
         return this;
     }
 
+    /// <summary>An Address field: reads as text, whole or by part ([Address : City]).</summary>
+    public TestSchema AddAddress(string name)
+    {
+        _fields[name] = new FieldRef(_nextFid++, name, FormulaType.Text, IsAddress: true);
+        return this;
+    }
+
     public bool TryResolve(string fieldName, out FieldRef field) => _fields.TryGetValue(fieldName, out field!);
 }

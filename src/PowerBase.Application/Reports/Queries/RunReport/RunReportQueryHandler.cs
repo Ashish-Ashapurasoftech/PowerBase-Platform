@@ -152,6 +152,15 @@ public class RunReportQueryHandler
         // Totals/grouping that no longer fit a field whose type was changed are skipped (Change Type).
         PowerBase.Application.Fields.TypeConversion.ReportDefinitionTypeSanitizer.Apply(definition, allFields);
 
+        // The report's own formulas become virtual (reserved-Fid) fields, visible to every viewer, so the columns / filter /
+        // sort / group-by / aggregation code below treats them like any Formula field.
+        var reportFormulaFields = ReportFormulaFields.Build(definition.ReportFormulas, table.Id);
+        if (reportFormulaFields.Count > 0)
+        {
+            allFields = [.. allFields, .. reportFormulaFields];
+            access = ReportFormulaFields.WithVisible(access, reportFormulaFields);
+        }
+
         // Enforce the report's Dynamic Filter configuration server-side: when DynamicFilterType
         // is "Custom", only the fields the report designer picked may be used as a runtime
         // dynamic filter — previously this was a UI-only hint (any filterable field worked
@@ -297,6 +306,8 @@ public class RunReportQueryHandler
         if (!access.CanView) return null;
 
         var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
+        var reportFormulaFields = ReportFormulaFields.Build(definition.ReportFormulas, table.Id);
+        if (reportFormulaFields.Count > 0) allFields = [.. allFields, .. reportFormulaFields];
         var runtimeFilters = FilterRuntimeFiltersByDynamicFilterConfig(definition, query.RuntimeFilters);
         var tree = await BuildFilterTreeAsync(definition, query, table, allFields, ct);
         tree = MergeRuntimeFilters(tree, allFields, runtimeFilters);
@@ -536,8 +547,9 @@ public class RunReportQueryHandler
                     return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns, TotalCount = 0 };
                 }
 
-                // Fetch ONLY the requested page rows from SQL (e.g. 25 rows)
-                var pagedRows = await _recordRepo.ListByPublicIdsAsync(table, allFields, pagedIds, ct);
+                // Fetch ONLY the requested page rows from SQL (e.g. 25 rows), and only the columns the report uses
+                var fastUsed = FieldsUsed(allFields, selectedFields, sortFields, userFilterTree, access.ViewFilter);
+                var pagedRows = await _recordRepo.ListByPublicIdsAsync(table, FieldsToRead(allFields, fastUsed), pagedIds, ct);
 
                 // If role ViewFilter or RestrictToCreatedBy applies, verify candidate page (defense in depth)
                 if (access.RestrictToCreatedBy.HasValue)
@@ -556,7 +568,7 @@ public class RunReportQueryHandler
                 }
 
                 var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, pagedRows,
-                    await _relationalProjector.ProjectAsync(table, allFields, pagedRows, ct));
+                    await _relationalProjector.ProjectAsync(table, FieldsToProject(allFields, fastUsed), pagedRows, ct));
                 var computed = _formulaProjector.Project(allFields, pagedRows, relational, table);
                 var userNames = await ResolveUserNamesAsync(pagedRows, allFields, _userRepo, ct, computed);
                 var itemsFast = pagedRows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
@@ -719,6 +731,9 @@ public class RunReportQueryHandler
 
         hasFormulaFilters = FormulaFilterSorter.TreeContainsFormulaField(filterTree, formulaFids);
         hasFormulaSorts   = sortFields.Any(s => formulaFids.Contains(s.FieldId));
+        var usedFields = FieldsUsed(allFields, selectedFields, sortFields, filterTree);
+        var projectedFields = FieldsToProject(allFields, usedFields);
+        var readFields = FieldsToRead(allFields, usedFields);
 
         IReadOnlyList<RecordResult> items;
         int total;
@@ -734,15 +749,18 @@ public class RunReportQueryHandler
             // When sorts include formula fields, skip SQL ORDER BY (we'll re-sort everything in-memory).
             IReadOnlyList<SortSpec> sqlSorts = hasFormulaSorts ? [] : sortFields;
 
-            var allRows = await _recordRepo.ListAllMatchingAsync(table, allFields,
+            var allRows = await _recordRepo.ListAllMatchingAsync(table, readFields,
                 physicalFilterTree, sqlSorts,
                 restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids);
             // The read stops at InMemoryReadLimit.Rows: past that the in-memory order and filter below only cover the
             // first that-many records, which the result says (InMemoryRowLimit) instead of passing them off as all.
             var readEveryMatch = allRows.Count < InMemoryReadLimit.Rows;
 
-            var allRelational = Relationships.ReferenceOriginalFallback.Apply(allFields, allRows,
-                await _relationalProjector.ProjectAsync(table, allFields, allRows, ct));
+            // Over every record read, only the References / Lookups / Summaries the filter, the sort and (when every match
+            // was read) the totals use: one the page only shows is worked out below, for the page's rows alone.
+            var everyRowFields = FieldsToProject(allFields, FieldsUsed(allFields, readEveryMatch ? totalCols : [], sortFields, filterTree));
+            var allRelationalRaw = await _relationalProjector.ProjectAsync(table, everyRowFields, allRows, ct);
+            var allRelational = Relationships.ReferenceOriginalFallback.Apply(allFields, allRows, allRelationalRaw);
             var allComputed = _formulaProjector.Project(allFields, allRows, allRelational, table);
             var pairs = allRows.Zip(allComputed, (r, c) => (Row: r, Computed: c)).ToList();
 
@@ -780,19 +798,20 @@ public class RunReportQueryHandler
 
             // Paginate in memory.
             var pagePairs = pairs.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+            pagePairs = await ProjectPageOnlyFieldsAsync(table, allFields, projectedFields, everyRowFields, allRows, allRelationalRaw, pagePairs, ct);
             var userNames = await ResolveUserNamesAsync(pagePairs.Select(p => p.Row), allFields, _userRepo, ct, pagePairs.Select(p => p.Computed));
             items = pagePairs.Select(p => RecordResult.FromRow(p.Row, selectedFields, userNames, p.Computed)).ToList();
         }
         else
         {
             // Normal path — SQL handles pagination, sorting, and filtering entirely.
-            var rows = await _recordRepo.ListAsync(table, allFields, page, pageSize, filterTree, sortFields,
+            var rows = await _recordRepo.ListAsync(table, readFields, page, pageSize, filterTree, sortFields,
                 restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids);
             total = await _recordRepo.CountAsync(table, allFields, filterTree,
                 restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids);
 
             var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, rows,
-                await _relationalProjector.ProjectAsync(table, allFields, rows, ct));
+                await _relationalProjector.ProjectAsync(table, projectedFields, rows, ct));
             var computed = _formulaProjector.Project(allFields, rows, relational, table);
             var userNames = await ResolveUserNamesAsync(rows, allFields, _userRepo, ct, computed);
             items = rows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
@@ -850,9 +869,11 @@ public class RunReportQueryHandler
         if (memoryCols.Count == 0) return (totals, false);
         if (!fitsInMemory) return (totals, true);
 
-        var everyRow = await _recordRepo.ListAllMatchingAsync(table, allFields, filterTree, [], restrictToCreatedBy: restrictToCreatedBy, ct: ct,
+        // Only the columns the totals and the filter use, and only the Lookups / Summaries among them.
+        var used = FieldsUsed(allFields, selectedFields, [], filterTree);
+        var everyRow = await _recordRepo.ListAllMatchingAsync(table, FieldsToRead(allFields, used), filterTree, [], restrictToCreatedBy: restrictToCreatedBy, ct: ct,
             sqlLookupFids: sqlLookupFids);
-        var everyRelational = await _relationalProjector.ProjectAsync(table, allFields, everyRow, ct);
+        var everyRelational = await _relationalProjector.ProjectAsync(table, FieldsToProject(allFields, used), everyRow, ct);
         var everyComputed = _formulaProjector.Project(allFields, everyRow, everyRelational, table);
         var everyResult = everyRow.Select((r, i) => RecordResult.FromRow(r, selectedFields, null, everyComputed[i])).ToList();
         foreach (var kv in AggregateInMemory(everyResult, memoryCols))
@@ -1009,6 +1030,93 @@ public class RunReportQueryHandler
         return existingFilter == null
             ? aiSearchGroup
             : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = existingFilter }, new FilterNode { Group = aiSearchGroup }] };
+    }
+
+    /// <summary>The Fids of the fields a table report uses: the columns it shows, the fields its filters and sort read and,
+    /// for the formulas among those, every field they read in turn. Null when a formula's reads can't be listed up front —
+    /// the report then uses every field.</summary>
+    private IReadOnlySet<long>? FieldsUsed(
+        IReadOnlyList<AppField> allFields, IReadOnlyList<AppField> selectedFields, IReadOnlyList<SortSpec> sortFields, params FilterGroup?[] filters)
+    {
+        var ids = selectedFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value)
+            .Concat(sortFields.Select(s => s.FieldId))
+            .Concat(filters.SelectMany(Relationships.SummaryEncryptionGuard.ConditionFieldIds))
+            .ToHashSet();
+        // A sort or condition may name its field by Id rather than Fid.
+        var used = allFields.Where(f => f.Fid.HasValue && (ids.Contains(f.Fid.Value) || ids.Contains(f.Id)))
+            .Select(f => (long)f.Fid!.Value)
+            .ToHashSet();
+
+        var formulaFids = allFields
+            .Where(f => f.Fid is int fid && used.Contains(fid) && FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings))
+            .Select(f => (long)f.Fid!.Value)
+            .ToList();
+        if (formulaFids.Count > 0)
+        {
+            if (_formulaProjector.GetFormulaDependencies(allFields, formulaFids) is not { } dependencies) return null;
+            used.UnionWith(dependencies);
+        }
+        return used;
+    }
+
+    /// <summary>The fields the relational projector is given — it works out each Reference, Lookup and Summary among them for
+    /// the rows read, a query each: only those the report uses (<see cref="FieldsUsed"/>). A Summary the report doesn't
+    /// show, filter, sort or compute with is then a query it doesn't run for every page.</summary>
+    private static IReadOnlyList<AppField> FieldsToProject(IReadOnlyList<AppField> allFields, IReadOnlySet<long>? used) =>
+        used is null
+            ? allFields
+            : allFields.Where(f => f.TypeCode is not ("Reference" or "Lookup" or "Summary") || (f.Fid.HasValue && used.Contains(f.Fid.Value))).ToList();
+
+    /// <summary>The fields whose columns a table report reads (and decrypts): the stored fields it uses, the reference column
+    /// each Lookup it uses pulls its value through, and the "(original)" text a Reference it uses falls back to. Every column
+    /// when it uses a field whose reads can't be listed — a formula's that can't be compiled, a Report Link, an Action Button.</summary>
+    private static IReadOnlyList<AppField> FieldsToRead(IReadOnlyList<AppField> allFields, IReadOnlySet<long>? used)
+    {
+        if (used is null) return allFields;
+        var byFid = allFields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+        var read = new HashSet<long>(used);
+        foreach (var fid in used)
+        {
+            if (!byFid.TryGetValue(fid, out var field)) continue;
+            if (PhysicalNaming.IsComputedTypeCode(field.TypeCode) && field.TypeCode is not ("Lookup" or "Summary")
+                && !FormulaTypeMap.IsFormulaComputed(field.TypeCode, field.Settings))
+                return allFields;
+            if (field.TypeCode == "Lookup" && FormulaTypeMap.ParseLookupSettings(field.Settings)?.ReferenceFid is int referenceFid)
+                read.Add(referenceFid);
+            if (field.TypeCode == "Reference" && FormulaTypeMap.ParseReferenceSettings(field.Settings)?.OriginalFid is int originalFid)
+                read.Add(originalFid);
+        }
+        return allFields.Where(f => f.IsSystem || (f.Fid.HasValue && read.Contains(f.Fid.Value))).ToList();
+    }
+
+    /// <summary>The page of a report filtered or sorted in memory, with the References / Lookups / Summaries it shows but
+    /// its filter, sort and totals don't use (<paramref name="everyRowFields"/> were worked out for every record read) worked
+    /// out for the page's rows only — a Combined Text it shows reads the children of 20 parents, not of every record. The
+    /// formulas are then worked out again over all of the row's values.</summary>
+    private async Task<List<(IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed)>> ProjectPageOnlyFieldsAsync(
+        AppTable table, IReadOnlyList<AppField> allFields, IReadOnlyList<AppField> projectedFields, IReadOnlyList<AppField> everyRowFields,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> allRows, IReadOnlyList<IReadOnlyDictionary<long, object?>> allRelational,
+        List<(IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed)> pagePairs, CancellationToken ct)
+    {
+        var projectedForEveryRow = everyRowFields.Where(f => f.Fid.HasValue).Select(f => f.Fid!.Value).ToHashSet();
+        var pageOnly = projectedFields
+            .Where(f => f.TypeCode is "Reference" or "Lookup" or "Summary" && f.Fid is int fid && !projectedForEveryRow.Contains(fid))
+            .ToList();
+        if (pageOnly.Count == 0 || pagePairs.Count == 0) return pagePairs;
+
+        var relationalByRow = new Dictionary<IReadOnlyDictionary<string, object?>, IReadOnlyDictionary<long, object?>>(ReferenceEqualityComparer.Instance);
+        for (var i = 0; i < allRows.Count; i++) relationalByRow[allRows[i]] = allRelational[i];
+
+        var pageRows = pagePairs.Select(p => p.Row).ToList();
+        var pageRelational = await _relationalProjector.ProjectAsync(table, pageOnly, pageRows, ct);
+        var merged = pageRows.Select((row, i) =>
+        {
+            var values = new Dictionary<long, object?>(relationalByRow[row]);
+            foreach (var (fid, value) in pageRelational[i]) values[fid] = value;
+            return (IReadOnlyDictionary<long, object?>)values;
+        }).ToList();
+        var computed = _formulaProjector.Project(allFields, pageRows, Relationships.ReferenceOriginalFallback.Apply(allFields, pageRows, merged), table);
+        return pageRows.Select((row, i) => (row, computed[i])).ToList();
     }
 
     private static List<string>? BuildSearchOrderBy(IReadOnlyList<SortSpec>? sortFields, IReadOnlyList<AppField> allFields)

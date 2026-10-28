@@ -48,6 +48,10 @@ public sealed class PblTablePermission
     /// <summary>Which records the role sees (translated source criteria). Null = no row filter.</summary>
     public PblFilterGroup? RecordFilter { get; set; }
 
+    /// <summary>Which records the role may edit or delete when that differs from the ones it can see (Quickbase "modify" custom rule).
+    /// Only meaningful with <see cref="ModifyScope"/> "AllRecords"; null = modify everything the role can see.</summary>
+    public PblFilterGroup? ModifyRecordFilter { get; set; }
+
     /// <summary>Real QBL exports carry no field-level permission data (confirmed against a
     /// real sample — every RolePermissions block found was on a Table or Report, never a
     /// Field); this stays empty for QBL-sourced imports and exists for hand-authored PBL.</summary>

@@ -45,6 +45,15 @@ public interface IAppFieldRepository
     /// <summary>Lightweight settings-only update (used when wiring relationship metadata after field creation).</summary>
     Task UpdateSettingsAsync(long id, string? settings, CancellationToken ct = default);
 
+    /// <summary>Sets (or clears, when <paramref name="sourceFid"/> is null) the field's Snapshot configuration.</summary>
+    Task SetSnapshotConfigAsync(long id, int? sourceFid, bool editable, CancellationToken ct = default, IDbTransaction? transaction = null);
+
+    /// <summary>Every non-deleted Shared-values field in the given apps, with its app and table names.</summary>
+    Task<IReadOnlyList<PowerBase.Application.Fields.Queries.SharedValues.SharedFieldDto>> ListSharedValuesFieldsAsync(IReadOnlyCollection<long> appIds, CancellationToken ct = default);
+
+    /// <summary>Sets whether the field's values may be used as another field's choices ("Shared values").</summary>
+    Task SetSharedValuesAsync(long id, bool isSharedValues, CancellationToken ct = default, IDbTransaction? transaction = null);
+
     /// <summary>Changes a field's type (and settings/required) in place, keeping its Fid and physical column.
     /// Used when converting an existing physical field into a relationship Reference field.</summary>
     Task UpdateFieldTypeAsync(long id, long fieldTypeId, string? settings, bool isRequired, CancellationToken ct = default);

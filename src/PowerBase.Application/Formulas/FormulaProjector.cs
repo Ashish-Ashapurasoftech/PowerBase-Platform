@@ -29,12 +29,17 @@ public sealed class FormulaProjector : IFormulaProjector
     private readonly IAppRepository _appRepo;
     private readonly IAppVariableRepository? _variableRepo;
     private readonly FormulaUserDirectory? _users;
+    private readonly IAppUserRepository? _appUserRepo;
+    private readonly IAppRoleRepository? _appRoleRepo;
 
     public FormulaProjector(
         FormulaEngine engine, IQueryContext queryContext, IFormulaRuntimeContext runtime,
         IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo,
-        IAppRepository appRepo, IAppVariableRepository? variableRepo = null, IUserRepository? userRepo = null)
+        IAppRepository appRepo, IAppVariableRepository? variableRepo = null, IUserRepository? userRepo = null,
+        IAppUserRepository? appUserRepo = null, IAppRoleRepository? appRoleRepo = null)
     {
+        _appUserRepo = appUserRepo;
+        _appRoleRepo = appRoleRepo;
         _variableRepo = variableRepo;
         _users = userRepo is null ? null : new FormulaUserDirectory(userRepo);
         _engine = engine;
@@ -300,6 +305,10 @@ public sealed class FormulaProjector : IFormulaProjector
         UtcNow = DateTime.UtcNow,
         UserLookup = _users is null ? null : _users.Lookup,
         FieldTypes = FormulaTypeMap.FieldTypesByFid(fields),
+        CurrentUserRoles = RolesOf(table, _queryContext.UserId),
+        UserRolesOf = _appUserRepo is null || _appRoleRepo is null || table is null
+            ? null
+            : userId => long.TryParse(userId, NumberStyles.Integer, CultureInfo.InvariantCulture, out var id) ? LoadRoles(table.AppId, id) : Array.Empty<RoleRef>(),
         CurrentUser = _queryContext.UserId > 0
             ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail, _queryContext.UserName)
             : null,
@@ -311,6 +320,23 @@ public sealed class FormulaProjector : IFormulaProjector
         UrlRoot = _runtime.UrlRoot,
         ReturnUrl = _runtime.ReturnUrl,
     };
+
+    /// <summary>The roles of a user in the table's app, for <c>UserRoles()</c>; looked up only when a formula calls it.</summary>
+    private Func<IReadOnlyList<RoleRef>>? RolesOf(AppTable? table, long userId)
+    {
+        if (_appUserRepo is null || _appRoleRepo is null || table is null || userId <= 0) return null;
+        IReadOnlyList<RoleRef>? loaded = null;
+        return () => loaded ??= LoadRoles(table.AppId, userId);
+    }
+
+    private IReadOnlyList<RoleRef> LoadRoles(long appId, long userId)
+    {
+        var roleIds = Block(_appUserRepo!.GetUserAppRoleIdsAsync(appId, userId)).ToHashSet();
+        return Block(_appRoleRepo!.ListDetailsByAppIdAsync(appId))
+            .Where(r => roleIds.Contains(r.Id))
+            .Select(r => new RoleRef(r.PublicId.ToString(), r.Name))
+            .ToList();
+    }
 
     private static T Block<T>(Task<T> task) => task.GetAwaiter().GetResult();
 

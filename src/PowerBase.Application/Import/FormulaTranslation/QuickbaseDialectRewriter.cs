@@ -2,6 +2,7 @@ using System.Text.RegularExpressions;
 using PowerBase.Formula.Diagnostics;
 using PowerBase.Formula.Lexing;
 using PowerBase.Formula.Syntax;
+using PowerBase.Formula.Types;
 
 namespace PowerBase.Application.Import.FormulaTranslation;
 
@@ -42,11 +43,51 @@ internal static class QuickbaseDialectRewriter
     private static readonly Regex MinMaxNonNumber =
         new(@"^(?<fn>Min|Max) argument \d+ expects Number but got (?<t>Date|DateTime|Time|Duration)\.$", RegexOptions.Compiled);
 
+    /// <summary>"Operator 'and' requires boolean operands (got Bool and Number)": Quickbase reads a number as true when it is not zero.</summary>
+    private static readonly Regex LogicalMismatch =
+        new(@"^Operator '(?<op>and|or)' requires boolean operands \(got (?<l>\w+) and (?<r>\w+)\)\.$", RegexOptions.Compiled);
+
     private static readonly Regex IfArity =
         new(@"^If expects 2[–-]3 argument\(s\) but got (?<n>\d+)\.$", RegexOptions.Compiled);
 
     private static readonly HashSet<string> TextCoercible = new(StringComparer.Ordinal)
         { "Number", "Date", "DateTime", "Time", "Duration", "Bool" };
+
+    /// <summary>"If branches must have the same type (got Text and User)": Quickbase converts the branch to the other's type.</summary>
+    private static readonly Regex IfBranchMismatch =
+        new(@"^If branches must have the same type \(got (?<a>\w+) and (?<b>\w+)\)\.$", RegexOptions.Compiled);
+
+    /// <summary>"Formula returns Text but User is required.": the whole result has to be converted.</summary>
+    private static readonly Regex ResultMismatch =
+        new(@"^Formula returns (?<got>\w+) but (?<want>\w+) is required\.$", RegexOptions.Compiled);
+
+    /// <summary>The conversion that makes a result of one type acceptable where another is required, or null when there is none.</summary>
+    private static string? ResultConversion(string got, string want) => (got, want) switch
+    {
+        ("Text", "User") => "ToUser",
+        ("Text", "Number") => "ToNumber",
+        ("Number", "Text") => "ToText",
+        ("Number", "Duration") => "Hours", // a Duration formula over a number: the number is hours, as the formulas that read it use ToHours
+        ("Bool", "Number") => "ToNumber",
+        _ => null,
+    };
+
+    /// <summary>"Expecting number but found text.": a typed <c>var</c> given another type — Quickbase converts the value on the way in.</summary>
+    private static readonly Regex VariableMismatch =
+        new(@"^Expecting (?<want>[\w-]+) but found (?<got>[\w -]+)\.$", RegexOptions.Compiled);
+
+    private static readonly Regex SplitArity =
+        new(@"^Split expects 2 argument\(s\) but got 1\.$", RegexOptions.Compiled);
+
+    /// <summary>The conversion that lets a value of <paramref name="got"/> initialise a variable declared <paramref name="want"/> (the keywords an author writes).</summary>
+    private static string? VariableConversion(string got, string want) => (got, want) switch
+    {
+        ("text", "number") => "ToNumber",
+        ("number", "text") => "ToText",
+        ("bool", "number") => "ToNumber",
+        ("text", "user") => "ToUser",
+        _ => null,
+    };
 
     private enum Wrap { ToText, ToUser }
 
@@ -67,8 +108,25 @@ internal static class QuickbaseDialectRewriter
         var ifCalls = new HashSet<TextSpan>();
         var orderingFixes = new Dictionary<TextSpan, (string Left, string Right)>();
         var minMaxCalls = new HashSet<TextSpan>();
+        var logicalFixes = new Dictionary<TextSpan, (string Left, string Right)>();
+        var ifBranchFixes = new Dictionary<TextSpan, (string Then, string Else)>();
+        string? resultConversion = null;
+        var variableFixes = new Dictionary<TextSpan, string>();
+        var splitCalls = new HashSet<TextSpan>();
         foreach (var d in diagnostics)
         {
+            if (d.Code == FormulaErrorCode.VariableTypeMismatch)
+            {
+                var vm = VariableMismatch.Match(d.Message);
+                if (vm.Success && VariableConversion(vm.Groups["got"].Value, vm.Groups["want"].Value) is { } variableConversion)
+                    variableFixes[d.Span] = variableConversion;
+                continue;
+            }
+            if (d.Code == FormulaErrorCode.WrongArgumentCount && SplitArity.IsMatch(d.Message))
+            {
+                splitCalls.Add(d.Span);
+                continue;
+            }
             if (d.Code == FormulaErrorCode.TypeMismatch)
             {
                 var m = TextArgMismatch.Match(d.Message);
@@ -81,12 +139,22 @@ internal static class QuickbaseDialectRewriter
                 if (m.Success) { orderingFixes[d.Span] = (m.Groups["l"].Value, m.Groups["r"].Value); continue; }
                 m = MinMaxNonNumber.Match(d.Message);
                 if (m.Success) { minMaxCalls.Add(d.Span); continue; }
+                m = LogicalMismatch.Match(d.Message);
+                if (m.Success) { logicalFixes[d.Span] = (m.Groups["l"].Value, m.Groups["r"].Value); continue; }
+                m = IfBranchMismatch.Match(d.Message);
+                if (m.Success) { ifBranchFixes[d.Span] = (m.Groups["a"].Value, m.Groups["b"].Value); continue; }
+            }
+            if (d.Code == FormulaErrorCode.ResultTypeMismatch)
+            {
+                var m = ResultMismatch.Match(d.Message);
+                if (m.Success && ResultConversion(m.Groups["got"].Value, m.Groups["want"].Value) is { } conversion)
+                    resultConversion = conversion;
             }
             if (d.Code == FormulaErrorCode.WrongArgumentCount && IfArity.IsMatch(d.Message))
                 ifCalls.Add(d.Span);
         }
 
-        if (concatSpans.Count == 0 && argWraps.Count == 0 && equalityFixes.Count == 0 && ifCalls.Count == 0 && orderingFixes.Count == 0 && minMaxCalls.Count == 0)
+        if (concatSpans.Count == 0 && argWraps.Count == 0 && equalityFixes.Count == 0 && ifCalls.Count == 0 && orderingFixes.Count == 0 && minMaxCalls.Count == 0 && logicalFixes.Count == 0 && ifBranchFixes.Count == 0 && variableFixes.Count == 0 && splitCalls.Count == 0 && resultConversion is null)
             return null;
 
         var parsed = Parser.Parse(expression);
@@ -96,8 +164,14 @@ internal static class QuickbaseDialectRewriter
         // Only the operands/arguments the checker actually complained about — leaving everything
         // else alone keeps the stored formula close to what the author wrote.
         var edits = new List<(TextSpan Span, string Text)>();
-        var flags = new Flags(concatSpans, argWraps, equalityFixes, ifCalls, orderingFixes, minMaxCalls);
+        var flags = new Flags(concatSpans, argWraps, equalityFixes, ifCalls, orderingFixes, minMaxCalls, logicalFixes, ifBranchFixes, variableFixes, splitCalls);
         Collect(parsed.Root, expression, flags, edits);
+        if (edits.Count == 0 && resultConversion is not null)
+        {
+            // Only once the inner fixes are done (the edit would overlap them): convert the value the whole formula returns.
+            var result = parsed.Root is LetExpr let ? let.Body : parsed.Root;
+            AddWrap(result, expression, resultConversion, edits);
+        }
         if (edits.Count == 0)
             return null;
 
@@ -115,7 +189,11 @@ internal static class QuickbaseDialectRewriter
         Dictionary<TextSpan, (string Left, string Right)> Equality,
         HashSet<TextSpan> Ifs,
         Dictionary<TextSpan, (string Left, string Right)> Ordering,
-        HashSet<TextSpan> MinMax);
+        HashSet<TextSpan> MinMax,
+        Dictionary<TextSpan, (string Left, string Right)> Logical,
+        Dictionary<TextSpan, (string Then, string Else)> IfBranches,
+        Dictionary<TextSpan, string> Variables,
+        HashSet<TextSpan> Splits);
 
     private static void Collect(Expr? node, string source, Flags flags, List<(TextSpan Span, string Text)> edits)
     {
@@ -135,21 +213,43 @@ internal static class QuickbaseDialectRewriter
                     // the engine keeps internal — so wrap both. ToText of text is the identity, so
                     // the extra call costs nothing beyond a little verbosity, and wrapping is
                     // skipped where the author already did it.
-                    AddWrap(b.Left, source, "ToText", edits);
-                    AddWrap(b.Right, source, "ToText", edits);
-                    return; // operands are being wrapped wholesale; don't also rewrite inside them
+                    // A long chain a & b & c & … nests to the left: an operand that is itself a concatenation is rewritten on its own
+                    // (wrapping it wholesale would leave the non-text operands inside it unfixed, one level per pass).
+                    foreach (var operand in new[] { b.Left, b.Right })
+                    {
+                        if (operand is BinaryExpr { Op: BinaryOp.Concat })
+                            Collect(operand, source, flags, edits);
+                        else
+                            AddWrap(operand, source, "ToText", edits);
+                    }
+                    return;
                 }
                 if (b.Op is BinaryOp.Equal or BinaryOp.NotEqual && flaggedEquality.TryGetValue(b.Span, out var types))
                 {
                     // Quickbase compares text with another type as text: wrap the non-text side.
                     if (types.Left == "Text" && TextCoercible.Contains(types.Right)) { AddWrap(b.Right, source, "ToText", edits); return; }
                     if (types.Right == "Text" && TextCoercible.Contains(types.Left)) { AddWrap(b.Left, source, "ToText", edits); return; }
+                    // Text against a user: PowerBase does not compare users, so the user is compared by the email the text is expected to hold.
+                    if (types.Left == "Text" && types.Right == "User") { AddWrap(b.Right, source, "UserToEmail", edits); return; }
+                    if (types.Left == "User" && types.Right == "Text") { AddWrap(b.Left, source, "UserToEmail", edits); return; }
+                    // A checkbox against a number: Quickbase counts true as 1 and false as 0.
+                    if (types.Left == "Number" && types.Right == "Bool") { AddWrap(b.Right, source, "ToNumber", edits); return; }
+                    if (types.Left == "Bool" && types.Right == "Number") { AddWrap(b.Left, source, "ToNumber", edits); return; }
                 }
                 if (b.Op is BinaryOp.Less or BinaryOp.LessEqual or BinaryOp.Greater or BinaryOp.GreaterEqual && flags.Ordering.TryGetValue(b.Span, out var ordering))
                 {
                     // Text against a number: Quickbase reads the text as a number.
                     if (ordering.Left == "Text" && ordering.Right == "Number") { AddWrap(b.Left, source, "ToNumber", edits); return; }
                     if (ordering.Right == "Text" && ordering.Left == "Number") { AddWrap(b.Right, source, "ToNumber", edits); return; }
+                    if (ordering.Left == "Number" && ordering.Right == "Bool") { AddWrap(b.Right, source, "ToNumber", edits); return; }
+                    if (ordering.Left == "Bool" && ordering.Right == "Number") { AddWrap(b.Left, source, "ToNumber", edits); return; }
+                }
+                if (b.Op is BinaryOp.And or BinaryOp.Or && flags.Logical.TryGetValue(b.Span, out var logical))
+                {
+                    // A number in and / or: Quickbase reads it as true when it is not zero.
+                    if (logical.Left == "Number") AddWrap(b.Left, source, "ToBool", edits);
+                    if (logical.Right == "Number") AddWrap(b.Right, source, "ToBool", edits);
+                    if (logical.Left == "Number" || logical.Right == "Number") return;
                 }
                 Collect(b.Left, source, flags, edits);
                 Collect(b.Right, source, flags, edits);
@@ -158,7 +258,12 @@ internal static class QuickbaseDialectRewriter
             case LetExpr l:
                 // A formula that starts with "var ... ;" is a LetExpr: everything below it needs the same fixes.
                 foreach (var declaration in l.Declarations)
-                    Collect(declaration.Value, source, flags, edits);
+                {
+                    if (flags.Variables.TryGetValue(declaration.Value.Span, out var conversion))
+                        AddWrap(declaration.Value, source, conversion, edits);
+                    else
+                        Collect(declaration.Value, source, flags, edits);
+                }
                 Collect(l.Body, source, flags, edits);
                 return;
 
@@ -180,8 +285,30 @@ internal static class QuickbaseDialectRewriter
                     edits.Add((f.Span, MinMaxAsIf(f, source, string.Equals(f.Name, "Max", StringComparison.OrdinalIgnoreCase) ? ">" : "<")));
                     return;
                 }
+                if (string.Equals(f.Name, "Split", StringComparison.OrdinalIgnoreCase) && f.Args.Count == 1 && flags.Splits.Contains(f.Span))
+                {
+                    // Quickbase's one-argument Split(List(" ; ", …)) splits on the delimiter the list was built with.
+                    var delimiter = f.Args[0] is FunctionCallExpr { Args.Count: > 0 } list
+                        && string.Equals(list.Name, "List", StringComparison.OrdinalIgnoreCase) && list.Args[0] is LiteralExpr { Type: FormulaType.Text }
+                        ? source[list.Args[0].Span.Start..list.Args[0].Span.End]
+                        : "\";\"";
+                    edits.Add((f.Span, $"Split({source[f.Args[0].Span.Start..f.Args[0].Span.End]}, {delimiter})"));
+                    return;
+                }
+                var wrappedBranch = -1;
+                if (string.Equals(f.Name, "If", StringComparison.OrdinalIgnoreCase) && f.Args.Count == 3 && flags.IfBranches.TryGetValue(f.Span, out var branches))
+                {
+                    // A text branch next to a user branch becomes a user; any other mix is compared as text.
+                    string? function = null;
+                    if (branches.Then == "Text" && branches.Else == "User") { wrappedBranch = 1; function = "ToUser"; }
+                    else if (branches.Then == "User" && branches.Else == "Text") { wrappedBranch = 2; function = "ToUser"; }
+                    else if (branches.Else == "Text" && TextCoercible.Contains(branches.Then)) { wrappedBranch = 1; function = "ToText"; }
+                    else if (branches.Then == "Text" && TextCoercible.Contains(branches.Else)) { wrappedBranch = 2; function = "ToText"; }
+                    if (function is not null) AddWrap(f.Args[wrappedBranch], source, function, edits);
+                }
                 for (var i = 0; i < f.Args.Count; i++)
                 {
+                    if (i == wrappedBranch) continue;
                     // Wrap only the argument position the checker named — other positions may
                     // legitimately want a non-text type.
                     if (flaggedArgs.TryGetValue((f.Span, i), out var wrap))

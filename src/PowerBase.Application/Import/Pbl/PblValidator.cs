@@ -461,7 +461,11 @@ public class PblValidator
 
                     if (string.Equals(element.ElementType, "Field", StringComparison.OrdinalIgnoreCase))
                     {
-                        if (string.IsNullOrWhiteSpace(element.FieldName))
+                        if (string.IsNullOrWhiteSpace(element.FieldName) && element.ReportLinkChildTableRef is not null)
+                        {
+                            // A report link: PowerBase's own link to that child table is found when the form is built.
+                        }
+                        else if (string.IsNullOrWhiteSpace(element.FieldName))
                             issues.Add(Error("MISSING_FORM_ELEMENT_FIELD", $"Field element is missing a FieldName.", element.LogicalRef));
                         else if (tableOk && !validFieldNames.Contains(element.FieldName))
                             issues.Add(Error("UNKNOWN_FORM_ELEMENT_FIELD", $"Form element references unknown field '{element.FieldName}' on table '{form.TableRef}'.", element.LogicalRef));
@@ -499,7 +503,7 @@ public class PblValidator
 
     private static readonly IReadOnlyCollection<string> ValidFormRuleTargetTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
-        "Field", "Section", "Block",
+        "Field", "Section", "Block", "Page",
     };
 
     private static void ValidateFormRule(
@@ -565,6 +569,7 @@ public class PblValidator
                 "Field" => action.TargetElementRef is not null && elementRefs.Contains(action.TargetElementRef),
                 "Section" => action.TargetSectionRef is not null && sectionRefs.Contains(action.TargetSectionRef),
                 "Block" => action.TargetBlockRef is not null && blockRefs.Contains(action.TargetBlockRef),
+                "Page" => action.TargetPageRef is not null && form.Pages.Any(pg => string.Equals(pg.LogicalRef, action.TargetPageRef, StringComparison.OrdinalIgnoreCase)),
                 _ => false,
             };
 

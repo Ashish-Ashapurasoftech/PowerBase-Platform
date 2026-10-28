@@ -26,7 +26,10 @@ public record CreateReportCommand(
     ReportOptionsCommand? Options = null,
     List<RowGroupLevelCommand>? RowGroupLevels = null,
     List<SummarySortFieldCommand>? SummarySortFields = null,
-    Guid? RelationshipPublicId = null);
+    Guid? RelationshipPublicId = null,
+    List<ReportFormulaCommand>? ReportFormulas = null);
+
+public record ReportFormulaCommand(long Id, string Name, string TypeCode, string? DisplayAs, string Expression);
 
 public record SummaryAggregationCommand(long FieldId, string Function, string DisplayAs = "Normal");
 

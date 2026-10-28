@@ -95,6 +95,9 @@ public class MassUpdateRecordsCommandHandler
             throw new ValidationException(
                 new Dictionary<string, string[]> { ["fields"] = [$"Formula fields are read-only and cannot be set: {string.Join(", ", computedIds)}"] });
 
+        // A Snapshot field is read-only: setting one value on many records would overwrite what each captured at creation.
+        SnapshotWriteGuard.EnsureNotWritten(fields, command.FieldValues.Keys);
+
         var systemIds = command.FieldValues.Keys
             .Where(k => fields.Any(f => f.Fid.HasValue && (long)f.Fid.Value == k && f.IsSystem))
             .ToList();
