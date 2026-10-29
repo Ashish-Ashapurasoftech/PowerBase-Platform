@@ -80,8 +80,17 @@ public static class ImportColumnFit
         return (sampled, failed, example);
     }
 
+    /// <summary>True when at least one filled sample value converts to the field, or nothing is filled (no evidence against it).</summary>
+    private static bool HoldsSome(AppField field, IReadOnlyList<string?> sample)
+    {
+        var (sampled, failed, _) = Check(field, sample);
+        return sampled == 0 || failed < sampled;
+    }
+
+    /// <param name="byHandOnly">Fields a column can be chosen for by hand but never matches by its heading (the Record ID#, which an import can map only when it
+    /// matches records on it): they are added to the fields a column is offered when at least one of its values converts (the run reports the others row by row).</param>
     public static IReadOnlyList<ImportColumnFitColumn> Evaluate(
-        IReadOnlyList<ImportFileColumn> columns, IReadOnlyList<string?[]> rows, IReadOnlyList<AppField> candidates)
+        IReadOnlyList<ImportFileColumn> columns, IReadOnlyList<string?[]> rows, IReadOnlyList<AppField> candidates, IReadOnlyList<AppField>? byHandOnly = null)
     {
         var result = new List<ImportColumnFitColumn>(columns.Count);
         foreach (var column in columns)
@@ -89,6 +98,12 @@ public static class ImportColumnFit
             var at = column.Position - 1;
             var sample = rows.Select(r => at < r.Length ? r[at] : null).ToList();
             var fitting = FieldsFitting(sample, candidates);
+            if (byHandOnly is { Count: > 0 })
+            {
+                // Such a field takes a column that holds some values for it: the rows that do not convert are reported by the run, one by one, with the reason.
+                var partial = byHandOnly.Where(f => f.Fid is not null && HoldsSome(f, sample)).Select(f => f.Fid!.Value);
+                fitting = fitting.Concat(partial).ToList();
+            }
             var field = FieldFor(column.Name, candidates);
             if (field is null)
             {
@@ -155,7 +170,9 @@ public sealed class ColumnFitHandler(
         if (sheets.Count > MaxSheets) throw ImportFileErrors.Invalid($"At most {MaxSheets} sheets can be checked at once.");
 
         var table = await tables.GetByPublicIdAsync(request.TableId, ct);
-        var candidates = ImportColumnFit.Candidates(await fields.ListByTableAsync(table.Id, ct));
+        var tableFields = await fields.ListByTableAsync(table.Id, ct);
+        var candidates = ImportColumnFit.Candidates(tableFields);
+        var recordId = tableFields.Where(f => !f.IsDeleted && ImportTypeCompatibility.IsRecordId(f)).ToList();
 
         await using var stream = await fileAccess.OpenAsync(file.StoragePath, ct);
         IReadOnlyList<string> names = file.Format == ImportFileFormats.Xlsx ? ImportXlsxReader.SheetNames(stream) : [];
@@ -173,7 +190,7 @@ public sealed class ColumnFitHandler(
             try
             {
                 var (columns, rows) = ImportColumnFit.Sample(stream, options.ToLayout());
-                result.Add(new ImportSheetFit(sheet.Name, ImportColumnFit.Evaluate(columns, rows, candidates)));
+                result.Add(new ImportSheetFit(sheet.Name, ImportColumnFit.Evaluate(columns, rows, candidates, recordId)));
             }
             catch (ImportFileHeaderMissingException ex) { result.Add(new ImportSheetFit(sheet.Name, [], ex.Message)); }
             catch (ImportFileFormatException ex) { throw ImportFileErrors.Invalid(ex.Message); }

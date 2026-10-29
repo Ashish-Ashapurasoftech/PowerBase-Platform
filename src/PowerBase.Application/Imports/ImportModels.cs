@@ -78,6 +78,8 @@ public static class ImportReason
     public const string ConstraintViolation = "ConstraintViolation";
     public const string WriteFailed = "WriteFailed";
     public const string MergeKeyMissing = "MergeKeyMissing";
+    /// <summary>A merge on the Record ID# found no record with it: the system assigns Record IDs, so a row is never inserted under one it does not have.</summary>
+    public const string RecordIdNotFound = "RecordIdNotFound";
     /// <summary>A merge matched a record but every mapped value was a blank that "Ignore blanks" skips.</summary>
     public const string NoChanges = "NoChanges";
 }
