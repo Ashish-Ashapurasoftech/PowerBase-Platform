@@ -5,6 +5,7 @@ using PowerBase.Application.Reports;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Formula;
+using PowerBase.Formula.Binding;
 using PowerBase.Formula.Diagnostics;
 
 namespace PowerBase.Application.Imports;
@@ -54,6 +55,11 @@ public sealed class ImportDefinitionChecker(
     {
         // A file import has no source table to go missing: its columns are the ones saved with it.
         var isFile = def.SourceKind == ImportSourceKinds.File;
+        // The import's variables: a filter or a fixed value that names one is checked with its text in place; [var_name] in a formula resolves through the schema.
+        var stored = ImportConfigMapper.ToConfig(def, Guid.Empty);
+        if (ImportVariables.Check(stored.Variables) is { } variableProblem) return Cap(variableProblem);
+        if (ImportVariables.TryApply(stored, out var config) is { } tokenProblem) return Cap(tokenProblem);
+        var variables = ImportVariables.Schema(config.Variables);
         IReadOnlyList<AppField> sourceFields;
         if (isFile)
         {
@@ -69,36 +75,35 @@ public sealed class ImportDefinitionChecker(
         var destination = await LoadAsync(def.DestinationTableId, cache, ct);
         if (destination.Table is null) return Cap("The table this import copies into no longer exists.");
 
-        var mappings = ImportJson.Deserialize<List<ImportFieldMapping>>(def.FieldMappingJson) ?? [];
-        var conditions = ImportJson.Deserialize<FilterGroup>(def.ConditionsJson);
+        var mappings = config.Mappings;
+        var conditions = config.Conditions;
         // Virtual columns are part of the import: they must still calculate, and mappings may use them as a source.
-        var (virtuals, virtualError) = ImportVirtual.Resolve(ImportConfigMapper.ToConfig(def, Guid.Empty).VirtualColumns, sourceFields, formulaEngine);
+        var (virtuals, virtualError) = ImportVirtual.Resolve(config.VirtualColumns, sourceFields, formulaEngine, variables: variables);
         if (virtualError is not null) return Cap(virtualError);
         if (virtuals.Count > 0) sourceFields = sourceFields.Concat(virtuals.Select(v => v.Field)).ToList();
         var sourceByFid = Live(sourceFields);
         var destByFid = Live(destination.Fields);
 
         var schema = new AppFieldSchema(sourceFields);
-        if (TargetProblem(def.ImportType, def.MergeKeyFid, mappings, destByFid, sourceByFid, schema, isFile) is { } homeProblem) return Cap(homeProblem);
-        var checkedConfig = ImportConfigMapper.ToConfig(def, Guid.Empty);
-        if (isFile && checkedConfig.File is { } homeFile && SheetProblem(homeFile, destByFid, def.ImportType, def.MergeKeyFid, checkedConfig.SheetMappings) is { } homeSheet)
+        if (TargetProblem(def.ImportType, def.MergeKeyFid, mappings, destByFid, sourceByFid, schema, isFile, variables) is { } homeProblem) return Cap(homeProblem);
+        var checkedConfig = config;
+        if (isFile && checkedConfig.File is { } homeFile && SheetProblem(homeFile, destByFid, def.ImportType, def.MergeKeyFid, checkedConfig.SheetMappings, variables) is { } homeSheet)
             return Cap(homeSheet);
 
         // The other tables this import fills are checked the same way, each against its own fields.
-        foreach (var target in ImportConfigMapper.ToConfig(def, Guid.Empty).AdditionalTargets)
+        foreach (var target in config.AdditionalTargets)
         {
             var extra = await LoadByPublicIdAsync(target.DestinationTableId, cache, ct);
             if (extra.Table is null) return Cap("A table this import also copies into no longer exists.");
-            if (TargetProblem(target.ImportType, target.MergeKeyFid, target.Mappings, Live(extra.Fields), sourceByFid, schema, isFile) is { } problem)
+            if (TargetProblem(target.ImportType, target.MergeKeyFid, target.Mappings, Live(extra.Fields), sourceByFid, schema, isFile, variables) is { } problem)
                 return Cap($"'{extra.Table.Name}': {problem}");
-            if (isFile && checkedConfig.File is { } targetFile && SheetProblem(targetFile, Live(extra.Fields), target.ImportType, target.MergeKeyFid, target.SheetMappings) is { } sheetProblem)
+            if (isFile && checkedConfig.File is { } targetFile && SheetProblem(targetFile, Live(extra.Fields), target.ImportType, target.MergeKeyFid, target.SheetMappings, variables) is { } sheetProblem)
                 return Cap($"'{extra.Table.Name}': {sheetProblem}");
         }
 
         if (MissingConditionField(conditions, sourceByFid) is { } missing)
             return Cap($"A field this import filters on was deleted (field {missing}).");
         // A table's own filter reads the same source: a field it filters on can be deleted too.
-        var config = ImportConfigMapper.ToConfig(def, Guid.Empty);
         if (MissingConditionField(config.TableConditions, sourceByFid) is { } missingOwn)
             return Cap($"A field this import filters a table on was deleted (field {missingOwn}).");
         foreach (var target in config.AdditionalTargets)
@@ -110,18 +115,19 @@ public sealed class ImportDefinitionChecker(
     /// <summary>What is wrong with a table that reads a workbook sheet by sheet: each sheet's mapping is checked against that sheet's own saved
     /// columns, with its own virtual columns and filter, or null. Whether the sheet is still in the workbook is only known when a file is uploaded.</summary>
     private string? SheetProblem(
-        ImportFileOptions options, Dictionary<int, AppField> destByFid, string importType, int? mergeKeyFid, IReadOnlyList<ImportSheetMapping> sheets)
+        ImportFileOptions options, Dictionary<int, AppField> destByFid, string importType, int? mergeKeyFid, IReadOnlyList<ImportSheetMapping> sheets,
+        IVariableSchema? variables)
     {
         foreach (var sheet in sheets)
         {
             var settings = options.Sheets.FirstOrDefault(s => string.Equals(s.Name, sheet.Sheet, StringComparison.OrdinalIgnoreCase));
             if (settings is null) return $"Sheet '{sheet.Sheet}' has no saved settings.";
             IReadOnlyList<AppField> fields = ImportFileColumns.ToFields(ImportFileColumns.NamedBy(ImportFileValidation.SavedSheetSource(options, settings).Columns, options.ColumnBy));
-            var (virtuals, virtualError) = ImportVirtual.Resolve(sheet.VirtualColumns, fields, formulaEngine);
+            var (virtuals, virtualError) = ImportVirtual.Resolve(sheet.VirtualColumns, fields, formulaEngine, variables: variables);
             if (virtualError is not null) return $"Sheet '{sheet.Sheet}': {virtualError}";
             if (virtuals.Count > 0) fields = fields.Concat(virtuals.Select(v => v.Field)).ToList();
             var byFid = Live(fields);
-            if (TargetProblem(importType, mergeKeyFid, sheet.Mappings, destByFid, byFid, new AppFieldSchema(fields), isFile: true) is { } problem)
+            if (TargetProblem(importType, mergeKeyFid, sheet.Mappings, destByFid, byFid, new AppFieldSchema(fields), isFile: true, variables) is { } problem)
                 return $"Sheet '{sheet.Sheet}': {problem}";
             if (MissingConditionField(sheet.Conditions, byFid) is { } missing)
                 return $"Sheet '{sheet.Sheet}': a field it filters on was deleted (field {missing}).";
@@ -133,7 +139,7 @@ public sealed class ImportDefinitionChecker(
     /// table and for every other table it fills.</summary>
     private string? TargetProblem(
         string importType, int? mergeKeyFid, IReadOnlyList<ImportFieldMapping> mappings, Dictionary<int, AppField> destByFid,
-        Dictionary<int, AppField> sourceByFid, AppFieldSchema schema, bool isFile)
+        Dictionary<int, AppField> sourceByFid, AppFieldSchema schema, bool isFile, IVariableSchema? variables)
     {
         AppField? mergeKey = null;
         if (importType == ImportTypes.Merge)
@@ -156,7 +162,7 @@ public sealed class ImportDefinitionChecker(
             {
                 ImportMappingSource.Dynamic when ImportTypeCompatibility.IsUserDestination(dest) => null, // one chosen user: looked up when the import is planned
                 ImportMappingSource.Dynamic => DynamicProblem(m, dest, sourceByFid, isFile),
-                ImportMappingSource.Formula => FormulaProblem(m, dest, schema),
+                ImportMappingSource.Formula => FormulaProblem(m, dest, schema, variables),
                 ImportMappingSource.Static when ImportTypeCompatibility.IsUserDestination(dest) => null,
                 ImportMappingSource.Static => StaticProblem(m, dest, dest.Fid == mergeKey?.Fid),
                 _ => null
@@ -181,12 +187,12 @@ public sealed class ImportDefinitionChecker(
         return anySourceType || ImportVirtual.IsVirtualFid(sourceFid) ? null : ImportTypeCompatibility.CheckMapping(src, dest);
     }
 
-    private string? FormulaProblem(ImportFieldMapping m, AppField dest, AppFieldSchema schema)
+    private string? FormulaProblem(ImportFieldMapping m, AppField dest, AppFieldSchema schema, IVariableSchema? variables)
     {
         if (string.IsNullOrWhiteSpace(m.Formula)) return null; // an empty formula is reported by the save and run checks
         var name = ImportTypeCompatibility.DisplayName(dest);
         if (ImportFormulaGuard.IsTooDeep(m.Formula)) return $"The formula for '{name}' is nested too deeply.";
-        var compiled = formulaEngine.Compile(m.Formula, schema);
+        var compiled = formulaEngine.Compile(m.Formula, schema, variableSchema: variables);
         if (compiled.Diagnostics.FirstOrDefault(d => d.Severity == FormulaSeverity.Error) is { } error)
             return $"The formula for '{name}' no longer works: {error.Message}";
         var problem = ImportTypeCompatibility.CheckFormulaResult(compiled.ResultType, dest);

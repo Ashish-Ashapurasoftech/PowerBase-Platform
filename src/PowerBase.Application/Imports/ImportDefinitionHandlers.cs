@@ -99,7 +99,8 @@ public sealed class GetImportDefinitionHandler(
             cfg.Conditions, cfg.Mappings, cfg.ColumnRules, cfg.ConstraintPolicy, cfg.NotifyEmails, def.NeedsAttention, def.AttentionReason,
             ImportJson.Deserialize<ImportSchedule>(def.ScheduleJson), def.NextRunOn, def.SourceKind, cfg.File,
             cfg.AdditionalTargets.Count == 0 ? null : cfg.AdditionalTargets, cfg.VirtualColumns.Count == 0 ? null : cfg.VirtualColumns,
-            cfg.TableConditions is { Nodes.Count: > 0 } ? cfg.TableConditions : null, cfg.SheetMappings.Count == 0 ? null : cfg.SheetMappings, cfg.OnlyChangedSinceLastRun);
+            cfg.TableConditions is { Nodes.Count: > 0 } ? cfg.TableConditions : null, cfg.SheetMappings.Count == 0 ? null : cfg.SheetMappings, cfg.OnlyChangedSinceLastRun,
+            cfg.Variables.Count == 0 ? null : cfg.Variables);
     }
 }
 
