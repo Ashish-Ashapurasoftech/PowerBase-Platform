@@ -11,6 +11,8 @@ using PowerBase.Application.Relationships.Commands.CreateRelationship;
 using PowerBase.Application.Relationships.Commands.DeleteRelationship;
 using PowerBase.Application.Relationships.Commands.RemoveRelationshipField;
 using PowerBase.Application.Relationships.Commands.UpdateDisplayKey;
+using PowerBase.Application.Relationships.Commands.UpdateParentLink;
+using PowerBase.Application.Relationships.Commands.UpdateProxyField;
 using PowerBase.Application.Relationships.Commands.UpdateReferenceFilter;
 using PowerBase.Application.Relationships.Commands.UpdateSummaryField;
 using PowerBase.Application.Relationships.Queries;
@@ -29,12 +31,15 @@ public class RelationshipsController : ControllerBase
     private readonly GetParentOptionsQueryHandler _parentOptions;
     private readonly IsParentAllowedQueryHandler _parentAllowed;
     private readonly GetChildRecordsForParentQueryHandler _childRecords;
+    private readonly GetParentRecordQueryHandler _parentRecord;
     private readonly AddLookupFieldsCommandHandler _addLookups;
     private readonly AddSummaryFieldCommandHandler _addSummary;
     private readonly UpdateSummaryFieldCommandHandler _updateSummary;
     private readonly RemoveRelationshipFieldCommandHandler _removeField;
     private readonly UpdateDisplayKeyCommandHandler _updateDisplayKey;
     private readonly UpdateReferenceFilterCommandHandler _updateReferenceFilter;
+    private readonly UpdateProxyFieldCommandHandler _updateProxyField;
+    private readonly UpdateParentLinkCommandHandler _updateParentLink;
     private readonly AddRelationshipFormSectionCommandHandler _addFormSection;
 
     public RelationshipsController(
@@ -44,12 +49,15 @@ public class RelationshipsController : ControllerBase
         GetParentOptionsQueryHandler parentOptions,
         IsParentAllowedQueryHandler parentAllowed,
         GetChildRecordsForParentQueryHandler childRecords,
+        GetParentRecordQueryHandler parentRecord,
         AddLookupFieldsCommandHandler addLookups,
         AddSummaryFieldCommandHandler addSummary,
         UpdateSummaryFieldCommandHandler updateSummary,
         RemoveRelationshipFieldCommandHandler removeField,
         UpdateDisplayKeyCommandHandler updateDisplayKey,
         UpdateReferenceFilterCommandHandler updateReferenceFilter,
+        UpdateProxyFieldCommandHandler updateProxyField,
+        UpdateParentLinkCommandHandler updateParentLink,
         AddRelationshipFormSectionCommandHandler addFormSection)
     {
         _createHandler = createHandler;
@@ -58,12 +66,15 @@ public class RelationshipsController : ControllerBase
         _parentOptions = parentOptions;
         _parentAllowed = parentAllowed;
         _childRecords = childRecords;
+        _parentRecord = parentRecord;
         _addLookups = addLookups;
         _addSummary = addSummary;
         _updateSummary = updateSummary;
         _removeField = removeField;
         _updateDisplayKey = updateDisplayKey;
         _updateReferenceFilter = updateReferenceFilter;
+        _updateProxyField = updateProxyField;
+        _updateParentLink = updateParentLink;
         _addFormSection = addFormSection;
     }
 
@@ -195,6 +206,32 @@ public class RelationshipsController : ControllerBase
         return Ok(new ApiResponse<RelationshipDto>(result));
     }
 
+    /// <summary>Choose the relationship's reference proxy: a lookup of this relationship or a formula field on the
+    /// child table that stands in for the Reference on forms and reports. Null clears it.</summary>
+    [HttpPatch("apps/{appId:guid}/relationships/{id:guid}/proxy")]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiResponse<RelationshipDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> UpdateProxyField(Guid appId, Guid id, [FromBody] UpdateProxyFieldRequest request, CancellationToken ct)
+    {
+        var result = await _updateProxyField.HandleAsync(new UpdateProxyFieldCommand(id, request.ProxyFid), ct);
+        return Ok(new ApiResponse<RelationshipDto>(result));
+    }
+
+    /// <summary>Turn "Display as a link to the parent record" on or off for the relationship's reference field or one
+    /// of its lookup fields.</summary>
+    [HttpPatch("apps/{appId:guid}/relationships/{id:guid}/fields/{fieldId:guid}/parent-link")]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiResponse<RelationshipDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> UpdateParentLink(Guid appId, Guid id, Guid fieldId, [FromBody] UpdateParentLinkRequest request, CancellationToken ct)
+    {
+        var result = await _updateParentLink.HandleAsync(new UpdateParentLinkCommand(id, fieldId, request.DisplayAsLinkToParent), ct);
+        return Ok(new ApiResponse<RelationshipDto>(result));
+    }
+
     /// <summary>Set the dependent-dropdown conditions of the relationship's Reference field (empty clears them).</summary>
     [HttpPut("apps/{appId:guid}/relationships/{id:guid}/reference-filter")]
     [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByAppId)]
@@ -274,6 +311,18 @@ public class RelationshipsController : ControllerBase
             return InvalidFilterValues();
         var allowed = await _parentAllowed.HandleAsync(relId, recordId, values, ct);
         return Ok(new ApiResponse<ParentAllowedResponse>(new ParentAllowedResponse(allowed)));
+    }
+
+    /// <summary>The parent record a child record's Reference points at, so a field set to link to its parent can open it. Data is null
+    /// when the record has no parent or the user can't open it; 404 when the child record isn't one the user can open.</summary>
+    [HttpGet("tables/{tableId:guid}/relationships/{relId:guid}/parent-record/{recordId:guid}")]
+    [RequireAppPermission(PermissionCodes.RecordsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<ParentRecordLink>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ParentRecord(Guid tableId, Guid relId, Guid recordId, CancellationToken ct)
+    {
+        var link = await _parentRecord.HandleAsync(tableId, relId, recordId, ct);
+        return Ok(new ApiResponse<ParentRecordLink?>(link));
     }
 
     /// <summary>filterValues: JSON object {"&lt;fid&gt;": "&lt;current form value&gt;"} for a dependent dropdown.</summary>

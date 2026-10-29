@@ -56,8 +56,7 @@ public class RemoveRelationshipFieldCommandHandler
         if (rel.ProxyFieldId == field.Id)
         {
             var childFields = await _fieldRepo.ListByTableAsync(rel.ChildTableId, ct);
-            var nextProxy = childFields.FirstOrDefault(f => f.TypeCode == "Lookup" && f.Id != field.Id
-                && FormulaTypeMap.ParseLookupSettings(f.Settings)?.RelationshipId == rel.Id);
+            var nextProxy = ReferenceProxyRules.PickDefault(childFields, rel, [field.Id]);
             await _relRepo.UpdateProxyFieldAsync(rel.Id, nextProxy?.Id, ct);
         }
 
