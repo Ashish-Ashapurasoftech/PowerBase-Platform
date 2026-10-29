@@ -8,11 +8,18 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class AppTokenRepository : TenantRepositoryBase, IAppTokenRepository
 {
+    private readonly IControlConnectionFactory? _controlConnectionFactory;
+    private readonly ITenantConnectionResolver? _tenantConnectionResolver;
+
     public AppTokenRepository(
         ITenantConnectionFactory tenantConnectionFactory,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IControlConnectionFactory? controlConnectionFactory = null,
+        ITenantConnectionResolver? tenantConnectionResolver = null)
         : base(tenantConnectionFactory, queryContext)
     {
+        _controlConnectionFactory = controlConnectionFactory;
+        _tenantConnectionResolver = tenantConnectionResolver;
     }
 
     private const string GetAppIdByPublicIdSql = @"
@@ -174,5 +181,94 @@ public class AppTokenRepository : TenantRepositoryBase, IAppTokenRepository
             new CommandDefinition(RotateSecretSql, new { id, newTokenHash, newTokenPrefix }, cancellationToken: ct));
 
         return rows > 0;
+    }
+
+    private const string GetByHashSql = @"
+        SELECT Id, PublicId, TenantId, AppId, CreatedByUserId, TokenName, Description, TokenHash, TokenPrefix, IsActive, CreatedAt, LastUsedAt, IsDeleted, RowVersion
+        FROM meta.AppToken
+        WHERE TokenHash = @hash AND IsActive = 1 AND IsDeleted = 0;";
+
+    private const string UpdateLastUsedAtSql = @"
+        UPDATE meta.AppToken
+        SET LastUsedAt = SYSUTCDATETIME()
+        WHERE Id = @id;";
+
+    public async Task<AppToken?> GetByHashAsync(string hash, CancellationToken ct = default)
+    {
+        if (QueryContext.TenantId > 0)
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            return await connection.QueryFirstOrDefaultAsync<AppToken>(
+                new CommandDefinition(GetByHashSql, new { hash }, cancellationToken: ct));
+        }
+
+        if (_controlConnectionFactory != null)
+        {
+            await using var controlConn = _controlConnectionFactory.Create();
+            await controlConn.OpenAsync(ct);
+            try
+            {
+                var token = await controlConn.QueryFirstOrDefaultAsync<AppToken>(
+                    new CommandDefinition(GetByHashSql, new { hash }, cancellationToken: ct));
+                if (token != null) return token;
+            }
+            catch
+            {
+                // Table might not exist in control DB if multi-DB layout
+            }
+
+            if (_tenantConnectionResolver != null)
+            {
+                try
+                {
+                    var tenantIds = (await controlConn.QueryAsync<long>(
+                        new CommandDefinition("SELECT Id FROM meta.Tenant WHERE IsDeleted = 0 AND Status = 'Active'", cancellationToken: ct))).ToList();
+
+                    foreach (var tid in tenantIds)
+                    {
+                        try
+                        {
+                            var connStr = await _tenantConnectionResolver.ResolveAsync(tid, ct);
+                            await using var tenantConn = new Microsoft.Data.SqlClient.SqlConnection(connStr);
+                            await tenantConn.OpenAsync(ct);
+                            var token = await tenantConn.QueryFirstOrDefaultAsync<AppToken>(
+                                new CommandDefinition(GetByHashSql, new { hash }, cancellationToken: ct));
+                            if (token != null) return token;
+                        }
+                        catch
+                        {
+                            // Continue checking next tenant
+                        }
+                    }
+                }
+                catch
+                {
+                    // Ignore resolution query errors
+                }
+            }
+        }
+
+        return null;
+    }
+
+    public async Task UpdateLastUsedAtAsync(long id, CancellationToken ct = default)
+    {
+        try
+        {
+            if (QueryContext.TenantId > 0)
+            {
+                await using var connection = await ConnectionFactory.CreateAsync(ct);
+                await connection.ExecuteAsync(new CommandDefinition(UpdateLastUsedAtSql, new { id }, cancellationToken: ct));
+            }
+            else if (_controlConnectionFactory != null)
+            {
+                await using var controlConn = _controlConnectionFactory.Create();
+                await controlConn.ExecuteAsync(new CommandDefinition(UpdateLastUsedAtSql, new { id }, cancellationToken: ct));
+            }
+        }
+        catch
+        {
+            // Fire-and-forget: do not fail request if timestamp update fails
+        }
     }
 }

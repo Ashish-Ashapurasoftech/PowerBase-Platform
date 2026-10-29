@@ -8,6 +8,9 @@ using PowerBase.Application.Records;
 using PowerBase.Application.Records.Commands.CreateRecord;
 using PowerBase.Application.Records.Commands.DeleteRecord;
 using PowerBase.Application.Records.Commands.UpdateRecord;
+using PowerBase.Application.Records.Commands.RestoreRecord;
+using PowerBase.Application.Records.Commands.PermanentDeleteRecord;
+using PowerBase.Application.Records.Queries.ListArchivedRecords;
 using PowerBase.Application.Records.Queries.GetRecord;
 using PowerBase.Application.Records.Queries.ListRecords;
 using PowerBase.Application.Reports;
@@ -467,6 +470,135 @@ public class RecordHandlerTests
         var result = await _recordRepo.GetActiveRecordIdByPublicIdAsync(table, publicId, null, CancellationToken.None);
 
         result.Should().Be(0L);
+    }
+
+    // --- RestoreRecordCommandHandler ---
+
+    [Fact]
+    public async Task RestoreRecord_ValidCommand_RestoresRecordIncrementsCountAndLogsAudit()
+    {
+        var table = MakeTable();
+        var recordId = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { MakeField(1) });
+        var messagePublisher = Substitute.For<IMessagePublisher>();
+        var sut = new RestoreRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _uow, messagePublisher);
+
+        await sut.HandleAsync(new RestoreRecordCommand(table.PublicId, recordId));
+
+        await _recordRepo.Received(1).RestoreAsync(table, recordId, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
+        await _tableRepo.Received(1).IncrementRecordCountAsync(table.Id, Arg.Any<CancellationToken>());
+        await _auditRepo.Received(1).LogActivityAsync("Restored", AuditEntityTypes.Record, recordId.ToString(), Arg.Any<string>(), table.AppId, Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+        await _uow.Received(1).CommitAsync(Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task RestoreRecord_NoDeleteOrModifyPermission_ThrowsUnauthorizedActionException()
+    {
+        var table = MakeTable();
+        var recordId = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { MakeField(1) });
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(new TableAccessContext
+            {
+                Unrestricted = false,
+                CanDelete = false,
+                ModifyScope = RecordScopes.None
+            });
+        var sut = new RestoreRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _uow, Substitute.For<IMessagePublisher>());
+
+        await sut.Invoking(s => s.HandleAsync(new RestoreRecordCommand(table.PublicId, recordId)))
+            .Should().ThrowAsync<UnauthorizedActionException>();
+
+        await _recordRepo.DidNotReceiveWithAnyArgs().RestoreAsync(Arg.Any<AppTable>(), Arg.Any<Guid>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
+    }
+
+    // --- PermanentDeleteRecordCommandHandler ---
+
+    [Fact]
+    public async Task PermanentDeleteRecord_AsSuperAdmin_CallsPermanentDeleteAndLogsAudit()
+    {
+        var table = MakeTable();
+        var recordId = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { MakeField(1) });
+        _queryContext.IsSuperAdmin.Returns(true);
+        var messagePublisher = Substitute.For<IMessagePublisher>();
+        var sut = new PermanentDeleteRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _uow, messagePublisher, _queryContext);
+
+        await sut.HandleAsync(new PermanentDeleteRecordCommand(table.PublicId, recordId));
+
+        await _recordRepo.Received(1).PermanentDeleteAsync(table, recordId, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
+        await _auditRepo.Received(1).LogActivityAsync("PermanentlyDeleted", AuditEntityTypes.Record, recordId.ToString(), Arg.Any<string>(), table.AppId, Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+        await _uow.Received(1).CommitAsync(Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task PermanentDeleteRecord_WithoutAdminPrivileges_ThrowsUnauthorizedActionException()
+    {
+        var table = MakeTable();
+        var recordId = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { MakeField(1) });
+        _queryContext.IsSuperAdmin.Returns(false);
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(new TableAccessContext
+            {
+                Unrestricted = false,
+                CanDelete = false
+            });
+        var sut = new PermanentDeleteRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _uow, Substitute.For<IMessagePublisher>(), _queryContext);
+
+        await sut.Invoking(s => s.HandleAsync(new PermanentDeleteRecordCommand(table.PublicId, recordId)))
+            .Should().ThrowAsync<UnauthorizedActionException>();
+
+        await _recordRepo.DidNotReceiveWithAnyArgs().PermanentDeleteAsync(Arg.Any<AppTable>(), Arg.Any<Guid>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
+    }
+
+    // --- ListArchivedRecordsQueryHandler ---
+
+    [Fact]
+    public async Task ListArchivedRecords_ValidQuery_ReturnsPagedArchivedRecordsResult()
+    {
+        var table = MakeTable();
+        var recordPublicId = Guid.NewGuid();
+        var row = MakeRow(recordPublicId);
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { MakeField(1) });
+        _recordRepo.ListArchivedAsync(table, Arg.Any<IReadOnlyList<AppField>>(), 1, 50, Arg.Any<CancellationToken>())
+            .Returns(new List<IReadOnlyDictionary<string, object?>> { row });
+        _recordRepo.CountArchivedAsync(table, Arg.Any<CancellationToken>()).Returns(1);
+
+        var sut = new ListArchivedRecordsQueryHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer);
+        var result = await sut.HandleAsync(new ListArchivedRecordsQuery(table.PublicId, 1, 50));
+
+        result.Items.Should().HaveCount(1);
+        result.TotalCount.Should().Be(1);
+        result.Page.Should().Be(1);
+        result.PageSize.Should().Be(50);
+    }
+
+    [Fact]
+    public async Task ListArchivedRecords_NoPermission_ThrowsUnauthorizedActionException()
+    {
+        var table = MakeTable();
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { MakeField(1) });
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(new TableAccessContext
+            {
+                Unrestricted = false,
+                ViewScope = RecordScopes.None,
+                CanDelete = false
+            });
+
+        var sut = new ListArchivedRecordsQueryHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer);
+
+        await sut.Invoking(s => s.HandleAsync(new ListArchivedRecordsQuery(table.PublicId, 1, 50)))
+            .Should().ThrowAsync<UnauthorizedActionException>();
+
+        await _recordRepo.DidNotReceiveWithAnyArgs().ListArchivedAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>());
     }
 }
 

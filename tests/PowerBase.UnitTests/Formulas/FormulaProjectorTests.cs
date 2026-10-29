@@ -215,4 +215,24 @@ public class FormulaProjectorTests
 
         result[0][2].Should().NotBe("x");
     }
+
+    [Fact]
+    public void Circular_formula_dependencies_safely_project_null_without_recursion()
+    {
+        // Field A references Field B, Field B references Field A
+        var fields = new List<AppField>
+        {
+            Field(1, "FieldA", "Formula", "{\"resultType\":\"Number\",\"expression\":\"[FieldB] + 1\"}"),
+            Field(2, "FieldB", "Formula", "{\"resultType\":\"Number\",\"expression\":\"[FieldA] + 1\"}"),
+            Field(3, "FieldC", "Formula", "{\"resultType\":\"Number\",\"expression\":\"[FieldA] * 2\"}"), // transitive dependent
+        };
+        var rows = Rows(new Dictionary<string, object?>());
+
+        var result = NewProjector().Project(fields, rows);
+
+        result.Should().HaveCount(1);
+        result[0][1].Should().BeNull();
+        result[0][2].Should().BeNull();
+        result[0][3].Should().BeNull();
+    }
 }

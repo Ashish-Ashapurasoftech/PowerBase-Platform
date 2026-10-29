@@ -18,6 +18,7 @@ public class JwtMiddleware
         IQueryContext queryContext, 
         IUserPermissionRepository permissionRepo,
         IUserTokenRepository userTokenRepository,
+        IAppTokenRepository appTokenRepository,
         IUserRepository userRepository,
         ITenantRepository tenantRepository,
         IAuditRepository auditRepository)
@@ -69,6 +70,47 @@ public class JwtMiddleware
                         // Fire and forget update last used at to prevent blocking request thread
                         _ = userTokenRepository.UpdateLastUsedAtAsync(userToken.Id, CancellationToken.None);
                     }
+                }
+            }
+            else if (token.StartsWith("pb_at_"))
+            {
+                using var sha256 = SHA256.Create();
+                var hash = Convert.ToHexString(sha256.ComputeHash(Encoding.UTF8.GetBytes(token))).ToLowerInvariant();
+
+                var appToken = await appTokenRepository.GetByHashAsync(hash, context.RequestAborted);
+                if (appToken != null && appToken.IsActive && !appToken.IsDeleted)
+                {
+                    var user = appToken.CreatedByUserId > 0
+                        ? await userRepository.GetByIdAsync(appToken.CreatedByUserId, context.RequestAborted)
+                        : null;
+
+                    var ctx = (QueryContext)queryContext;
+                    ctx.UserId = user?.Id ?? appToken.CreatedByUserId;
+                    ctx.TenantId = appToken.TenantId;
+                    ctx.IsSuperAdmin = user?.SystemRoleCode == SystemRoleCodes.SuperAdmin;
+                    ctx.UserName = user?.Name ?? appToken.TokenName;
+                    ctx.UserEmail = user?.Email ?? string.Empty;
+                    ctx.IpAddress = context.Connection.RemoteIpAddress?.ToString() ?? string.Empty;
+                    ctx.IsUserToken = true;
+                    ctx.TokenAccessAllApps = false;
+                    ctx.AllowedAppIds = new HashSet<long> { appToken.AppId };
+
+                    if (appToken.TenantId > 0)
+                    {
+                        if (user != null)
+                        {
+                            ctx.Permissions = await permissionRepo.GetPermissionsAsync(user.Id, appToken.TenantId);
+                            ctx.TenantRole = await tenantRepository.GetUserRoleNameInTenantAsync(user.Id, appToken.TenantId, context.RequestAborted) ?? string.Empty;
+                        }
+                        else
+                        {
+                            ctx.Permissions = new HashSet<string>();
+                            ctx.TenantRole = DefaultTenantRoles.User;
+                        }
+                    }
+
+                    // Fire and forget update last used at to prevent blocking request thread
+                    _ = appTokenRepository.UpdateLastUsedAtAsync(appToken.Id, CancellationToken.None);
                 }
             }
             else if (jwtService.ValidateToken(token, out var userId, out var tenantId, out var jwtId, out var userName, out var userEmail, out var systemRoleCode, out var tenantRole)

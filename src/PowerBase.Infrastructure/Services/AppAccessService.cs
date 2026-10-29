@@ -114,6 +114,7 @@ public class AppAccessService : IAppAccessService
     public async Task RequirePermissionByAppIdAsync(long appId, string permissionCode, CancellationToken ct = default)
     {
         EnsureTokenAppAccess(appId);
+        await EnsureApprovedUserAccessAsync(appId, ct);
         var permissions = await _appUserRepo.GetUserAppPermissionsAsync(appId, _queryContext.UserId, ct);
         if (!permissions.Contains(permissionCode))
         {
@@ -168,9 +169,33 @@ public class AppAccessService : IAppAccessService
     private async Task RequireMembershipByAppIdAsync(long appId, CancellationToken ct)
     {
         EnsureTokenAppAccess(appId);
+        await EnsureApprovedUserAccessAsync(appId, ct);
         var permissions = await _appUserRepo.GetUserAppPermissionsAsync(appId, _queryContext.UserId, ct);
         if (permissions.Count == 0)
             throw new UnauthorizedActionException("You are not a member of this app.");
+    }
+
+    private async Task EnsureApprovedUserAccessAsync(long appId, CancellationToken ct)
+    {
+        if (_queryContext.IsSuperAdmin) return;
+        var app = await _appRepo.GetByIdAsync(appId, ct);
+        if (app != null && !string.IsNullOrWhiteSpace(app.SecurityOptions))
+        {
+            try
+            {
+                var sec = System.Text.Json.JsonSerializer.Deserialize<PowerBase.Domain.ValueObjects.AppSecurityOptionsSettings>(
+                    app.SecurityOptions, new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                if (sec?.OnlyApprovedUsersAccess == true)
+                {
+                    var permissions = await _appUserRepo.GetUserAppPermissionsAsync(appId, _queryContext.UserId, ct);
+                    if (permissions.Count == 0)
+                    {
+                        throw new UnauthorizedActionException("This application is restricted to approved realm users.");
+                    }
+                }
+            }
+            catch (System.Text.Json.JsonException) { }
+        }
     }
 
     private void EnsureTokenAppAccess(long appId)

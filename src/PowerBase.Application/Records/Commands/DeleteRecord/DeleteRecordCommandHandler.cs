@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
@@ -17,6 +18,8 @@ public class DeleteRecordCommandHandler
     private readonly ITenantUnitOfWork _uow;
     private readonly IMessagePublisher _messagePublisher;
     private readonly RecordModifyGuard? _modifyGuard;
+    private readonly ILogger<DeleteRecordCommandHandler>? _logger;
+
     public DeleteRecordCommandHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
@@ -27,7 +30,8 @@ public class DeleteRecordCommandHandler
         IPipelineTriggerInterceptor triggerInterceptor,
         ITenantUnitOfWork uow,
         IMessagePublisher messagePublisher,
-        RecordModifyGuard? modifyGuard = null)
+        RecordModifyGuard? modifyGuard = null,
+        ILogger<DeleteRecordCommandHandler>? logger = null)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -39,6 +43,7 @@ public class DeleteRecordCommandHandler
         _uow = uow;
         _messagePublisher = messagePublisher;
         _modifyGuard = modifyGuard;
+        _logger = logger;
     }
 
     public async Task HandleAsync(DeleteRecordCommand command, CancellationToken ct = default)
@@ -102,7 +107,9 @@ public class DeleteRecordCommandHandler
 
         if (indexMessage != null)
         {
-            _ = _messagePublisher.PublishPriorityAsync(indexMessage, default);
+            _ = _messagePublisher.PublishPriorityAsync(indexMessage, default).ContinueWith(
+                t => _logger?.LogWarning(t.Exception, "Failed to immediately publish priority search index message for record {RecordId} in table {TableId}. SearchOutbox will relay.", command.RecordPublicId, table.Id),
+                TaskContinuationOptions.OnlyOnFaulted);
         }
     }
 }

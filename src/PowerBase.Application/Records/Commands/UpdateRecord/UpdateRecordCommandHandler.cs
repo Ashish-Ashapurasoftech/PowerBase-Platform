@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
@@ -15,6 +16,7 @@ public class UpdateRecordCommandHandler
     private readonly IMessagePublisher _messagePublisher;
     private readonly IReferenceRelinkService? _relink;
     private readonly RecordModifyGuard? _modifyGuard;
+    private readonly ILogger<UpdateRecordCommandHandler>? _logger;
 
     public UpdateRecordCommandHandler(
         IAppTableRepository tableRepo,
@@ -24,7 +26,8 @@ public class UpdateRecordCommandHandler
         ITenantUnitOfWork uow,
         IMessagePublisher messagePublisher,
         IReferenceRelinkService? relink = null,
-        RecordModifyGuard? modifyGuard = null)
+        RecordModifyGuard? modifyGuard = null,
+        ILogger<UpdateRecordCommandHandler>? logger = null)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -34,6 +37,7 @@ public class UpdateRecordCommandHandler
         _messagePublisher = messagePublisher;
         _relink = relink;
         _modifyGuard = modifyGuard;
+        _logger = logger;
     }
 
     public async Task HandleAsync(UpdateRecordCommand command, CancellationToken ct = default)
@@ -127,7 +131,9 @@ public class UpdateRecordCommandHandler
 
         if (indexMessage != null)
         {
-            _ = _messagePublisher.PublishPriorityAsync(indexMessage, default);
+            _ = _messagePublisher.PublishPriorityAsync(indexMessage, default).ContinueWith(
+                t => _logger?.LogWarning(t.Exception, "Failed to immediately publish priority search index message for record {RecordId} in table {TableId}. SearchOutbox will relay.", command.RecordPublicId, table.Id),
+                TaskContinuationOptions.OnlyOnFaulted);
         }
     }
 }

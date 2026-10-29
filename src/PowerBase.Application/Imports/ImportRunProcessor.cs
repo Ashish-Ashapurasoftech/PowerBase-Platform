@@ -286,8 +286,8 @@ public sealed class ImportRunProcessor(
         if (snapshot is null) return;
         try
         {
-            // PRAI: Import Email Functionality Commented Temporary
-            //if (await notifier.NotifyAsync(finished, snapshot, ct) is { Length: > 0 } mailNote) await runs.AppendDetailAsync(run.Id, mailNote, ct);
+            if (await notifier.NotifyAsync(finished, snapshot, ct) is { Length: > 0 } mailNote)
+                await runs.AppendDetailAsync(run.Id, mailNote, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

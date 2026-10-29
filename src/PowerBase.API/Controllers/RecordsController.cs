@@ -15,6 +15,9 @@ using PowerBase.Application.Records.Commands.UpdateRecord;
 using PowerBase.Application.Records.Queries.GetRecord;
 using PowerBase.Application.Records.Queries.ListRecords;
 using PowerBase.Application.Records.Queries.GetDistinctFieldValues;
+using PowerBase.Application.Records.Commands.RestoreRecord;
+using PowerBase.Application.Records.Commands.PermanentDeleteRecord;
+using PowerBase.Application.Records.Queries.ListArchivedRecords;
 namespace PowerBase.API.Controllers;
 
 [ApiController]
@@ -32,6 +35,9 @@ public class RecordsController : ControllerBase
     private readonly InvokeButtonActionCommandHandler _invokeButtonHandler;
     private readonly IAppAccessService _appAccessService;
     private readonly PowerBase.Application.Records.Queries.GetModifiableRecordIds.GetModifiableRecordIdsQueryHandler _modifiableHandler;
+    private readonly RestoreRecordCommandHandler _restoreHandler;
+    private readonly PermanentDeleteRecordCommandHandler _permanentDeleteHandler;
+    private readonly ListArchivedRecordsQueryHandler _listArchivedHandler;
 
     public RecordsController(
         CreateRecordCommandHandler createHandler,
@@ -45,7 +51,10 @@ public class RecordsController : ControllerBase
         GetDistinctFieldValuesQueryHandler distinctHandler,
         InvokeButtonActionCommandHandler invokeButtonHandler,
         IAppAccessService appAccessService,
-        PowerBase.Application.Records.Queries.GetModifiableRecordIds.GetModifiableRecordIdsQueryHandler modifiableHandler)
+        PowerBase.Application.Records.Queries.GetModifiableRecordIds.GetModifiableRecordIdsQueryHandler modifiableHandler,
+        RestoreRecordCommandHandler restoreHandler,
+        PermanentDeleteRecordCommandHandler permanentDeleteHandler,
+        ListArchivedRecordsQueryHandler listArchivedHandler)
     {
         _createHandler = createHandler;
         _updateHandler = updateHandler;
@@ -59,6 +68,9 @@ public class RecordsController : ControllerBase
         _invokeButtonHandler = invokeButtonHandler;
         _appAccessService = appAccessService;
         _modifiableHandler = modifiableHandler;
+        _restoreHandler = restoreHandler;
+        _permanentDeleteHandler = permanentDeleteHandler;
+        _listArchivedHandler = listArchivedHandler;
     }
 
     /// <summary>Of the given record ids, the ones the current user may edit / delete under the role's Modify
@@ -296,6 +308,45 @@ public class RecordsController : ControllerBase
     {
         await _deleteHandler.HandleAsync(new DeleteRecordCommand(tableId, id), ct);
         return NoContent();
+    }
+
+    /// <summary>Restore an archived (soft-deleted) record.</summary>
+    [HttpPost("tables/{tableId:guid}/records/{id:guid}/restore")]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<string>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Restore(Guid tableId, Guid id, CancellationToken ct)
+    {
+        await _restoreHandler.HandleAsync(new RestoreRecordCommand(tableId, id), ct);
+        return Ok(new ApiResponse<string>("Record restored successfully."));
+    }
+
+    /// <summary>Permanently hard-delete an archived record.</summary>
+    [HttpDelete("tables/{tableId:guid}/records/{id:guid}/permanent")]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> PermanentDelete(Guid tableId, Guid id, CancellationToken ct)
+    {
+        await _permanentDeleteHandler.HandleAsync(new PermanentDeleteRecordCommand(tableId, id), ct);
+        return NoContent();
+    }
+
+    /// <summary>List archived (soft-deleted) records for a table (paged).</summary>
+    [HttpGet("tables/{tableId:guid}/records/archived")]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<ArchivedRecordsResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ListArchived(Guid tableId, [FromQuery] int page = 1, [FromQuery] int pageSize = 50, CancellationToken ct = default)
+    {
+        var result = await _listArchivedHandler.HandleAsync(new ListArchivedRecordsQuery(tableId, page, pageSize), ct);
+        return Ok(new ApiResponse<ArchivedRecordsResult>(result));
     }
 
     public record BulkDeleteRequest(List<Guid> Ids);

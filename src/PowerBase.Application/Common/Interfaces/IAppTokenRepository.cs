@@ -14,4 +14,6 @@ public interface IAppTokenRepository
     /// assume it equals publicIds.Count (some ids may already be deleted / belong to another tenant-app).</summary>
     Task<int> BulkDeleteAsync(IEnumerable<Guid> publicIds, long tenantId, Guid appPublicId, CancellationToken ct);
     Task<bool> RotateSecretAsync(long id, string newTokenHash, string newTokenPrefix, CancellationToken ct);
+    Task<AppToken?> GetByHashAsync(string hash, CancellationToken ct = default);
+    Task UpdateLastUsedAtAsync(long id, CancellationToken ct = default);
 }

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
@@ -18,6 +19,7 @@ public class CreateRecordCommandHandler
     private readonly IMessagePublisher _messagePublisher;
     private readonly IReferenceRelinkService? _relink;
     private readonly RecordCreatePreparer _preparer;
+    private readonly ILogger<CreateRecordCommandHandler>? _logger;
 
     public CreateRecordCommandHandler(
         IAppTableRepository tableRepo,
@@ -38,7 +40,8 @@ public class CreateRecordCommandHandler
         IFormRepository formRepo,
         IAppUserRepository appUserRepo,
         IReferenceRelinkService? relink = null,
-        ISnapshotCaptureService? snapshots = null)
+        ISnapshotCaptureService? snapshots = null,
+        ILogger<CreateRecordCommandHandler>? logger = null)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -50,6 +53,7 @@ public class CreateRecordCommandHandler
         _queryContext = queryContext;
         _messagePublisher = messagePublisher;
         _relink = relink;
+        _logger = logger;
         _preparer = new RecordCreatePreparer(
             tableRepo, fieldRepo, recordRepo, relRepo, enforcer, queryContext, userRepo, appRepo, engine, formRuleRepo, formRepo, appUserRepo,
             snapshots: snapshots);
@@ -111,7 +115,7 @@ public class CreateRecordCommandHandler
         if (indexMessage != null)
         {
             _ = _messagePublisher.PublishPriorityAsync(indexMessage, default).ContinueWith(
-                t => { /* Observed fire-and-forget: failure logged if faulted */ },
+                t => _logger?.LogWarning(t.Exception, "Failed to immediately publish priority search index message for record {RecordId} in table {TableId}. SearchOutbox will relay.", publicId, table.Id),
                 TaskContinuationOptions.OnlyOnFaulted);
         }
 

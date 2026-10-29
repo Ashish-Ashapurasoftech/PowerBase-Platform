@@ -292,6 +292,18 @@ public interface IRecordRepository
 
     Task BulkDeleteAsync(AppTable table, IReadOnlyList<Guid> publicIds, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
 
+    /// <summary>Restores a soft-deleted record (IsDeleted = 0) and issues an index upsert.</summary>
+    Task RestoreAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
+
+    /// <summary>Permanently deletes an archived record from physical storage (IsDeleted = 1).</summary>
+    Task PermanentDeleteAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
+
+    /// <summary>Lists archived (IsDeleted = 1) records for the table with pagination, decrypted.</summary>
+    Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListArchivedAsync(AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize, CancellationToken ct = default);
+
+    /// <summary>Counts archived (IsDeleted = 1) records for the table.</summary>
+    Task<int> CountArchivedAsync(AppTable table, CancellationToken ct = default);
+
     /// <summary>Set the given field's column to <paramref name="defaultValue"/> for all non-deleted rows
     /// whose value is currently NULL or empty. Used when an optional field becomes required. Returns rows affected.</summary>
     Task<int> BackfillDefaultAsync(AppTable table, AppField field, string defaultValue, CancellationToken ct = default);

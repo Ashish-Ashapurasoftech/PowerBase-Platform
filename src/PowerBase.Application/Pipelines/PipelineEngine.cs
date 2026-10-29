@@ -955,6 +955,28 @@ public partial class PipelineEngine : IPipelineEngine
                 }
                 suppressScope.Complete();
             }
+
+            try
+            {
+                var auditRepo = _serviceProvider.GetService(typeof(IAuditRepository)) as IAuditRepository;
+                if (auditRepo != null)
+                {
+                    var pMeta = await _pipelineRepo.GetByIdAsync(task.PipelineId, ct);
+                    var sanitizedMsg = SanitizeErrorMessage(ex.Message);
+                    await auditRepo.LogActivityAsync(
+                        "ExecutionFailed",
+                        "PipelineRun",
+                        run?.PublicId.ToString() ?? task.PipelineId.ToString(),
+                        $"Pipeline run {run?.PublicId} failed: {sanitizedMsg}. Any prior completed mutation steps remain committed.",
+                        appId: pMeta?.AppId,
+                        ct: ct);
+                }
+            }
+            catch (Exception auditEx)
+            {
+                _logger.LogWarning(auditEx, "Failed to log pipeline failure audit activity for pipeline {PipelineId}.", task.PipelineId);
+            }
+
             throw;
         }
         finally
@@ -1294,6 +1316,25 @@ public partial class PipelineEngine : IPipelineEngine
                     }, ct);
                     suppressScope.Complete();
                 }
+
+                try
+                {
+                    var auditRepo = _serviceProvider.GetService(typeof(IAuditRepository)) as IAuditRepository;
+                    if (auditRepo != null)
+                    {
+                        await auditRepo.LogActivityAsync(
+                            "StepFailed",
+                            "PipelineStep",
+                            step.PublicId.ToString(),
+                            $"Pipeline step {step.RefId} ({step.Subtype}) failed: {sanitizedError}",
+                            ct: ct);
+                    }
+                }
+                catch (Exception auditEx)
+                {
+                    _logger.LogWarning(auditEx, "Failed to log pipeline step failure audit activity for step {StepId}.", step.Id);
+                }
+
                 throw;
             }
         }

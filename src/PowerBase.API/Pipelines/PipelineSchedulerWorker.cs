@@ -269,7 +269,7 @@ public class PipelineSchedulerWorker : BackgroundService
                                         TriggerStepId = step.Id,
                                         TriggerStepRefId = step.RefId
                                     }),
-                                    TriggeredBy = pipeline.CreatedBy,
+                                    TriggeredBy = pipeline?.CreatedBy ?? 0,
                                     VariablesJson = null,
                                     CorrelationId = Guid.NewGuid().ToString(),
                                     Depth = 1,
@@ -387,7 +387,7 @@ public class PipelineSchedulerWorker : BackgroundService
                                     ScheduledTime = latestOccurrenceLocal,
                                     CronExpression = sched.CronExpression
                                 }),
-                                TriggeredBy = pipeline.CreatedBy,
+                                TriggeredBy = pipeline?.CreatedBy ?? 0,
                                 VariablesJson = null,
                                 CorrelationId = Guid.NewGuid().ToString(),
                                 Depth = 1,

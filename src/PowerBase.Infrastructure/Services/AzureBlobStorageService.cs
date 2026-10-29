@@ -42,7 +42,7 @@ public sealed class AzureBlobStorageService : IFileStorageService, IFileStorageR
     {
         if (_containerClient != null)
         {
-            await _containerClient.CreateIfNotExistsAsync(PublicAccessType.Blob, cancellationToken: ct);
+            await _containerClient.CreateIfNotExistsAsync(PublicAccessType.None, cancellationToken: ct);
         }
     }
 

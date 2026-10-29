@@ -83,6 +83,7 @@ public sealed class FormulaProjector : IFormulaProjector
         var sorted = new List<(long Fid, CompiledFormula? Formula)>(compiled.Count);
         var visited = new HashSet<long>();
         var visiting = new HashSet<long>();
+        var circularFids = new HashSet<long>();
 
         // Whether formula `start` reads formula `target`, directly or through other formulas.
         bool ReadsTransitively(long start, long target)
@@ -106,7 +107,11 @@ public sealed class FormulaProjector : IFormulaProjector
         void Visit(long fid)
         {
             if (visited.Contains(fid)) return;
-            if (visiting.Contains(fid)) return;
+            if (visiting.Contains(fid))
+            {
+                circularFids.Add(fid);
+                return;
+            }
 
             visiting.Add(fid);
 
@@ -116,7 +121,15 @@ public sealed class FormulaProjector : IFormulaProjector
                 {
                     foreach (var depFid in item.Formula.ReferencedFieldIds)
                     {
-                        Visit(depFid);
+                        if (visiting.Contains(depFid))
+                        {
+                            circularFids.Add(depFid);
+                            circularFids.Add(fid);
+                        }
+                        else
+                        {
+                            Visit(depFid);
+                        }
                     }
 
                     // A formula that reads a field chosen per record can't list what it depends on, so it
@@ -126,7 +139,17 @@ public sealed class FormulaProjector : IFormulaProjector
                         foreach (var (otherFid, other) in compiledDict)
                         {
                             if (otherFid != fid && other.Formula is { UsesDynamicFieldReference: false } && !ReadsTransitively(otherFid, fid))
-                                Visit(otherFid);
+                            {
+                                if (visiting.Contains(otherFid))
+                                {
+                                    circularFids.Add(otherFid);
+                                    circularFids.Add(fid);
+                                }
+                                else
+                                {
+                                    Visit(otherFid);
+                                }
+                            }
                         }
                     }
                 }
@@ -145,6 +168,24 @@ public sealed class FormulaProjector : IFormulaProjector
         foreach (var item in compiled)
         {
             Visit(item.Fid);
+        }
+
+        // Propagate circularity transitively to all formulas that reference a circular field
+        if (circularFids.Count > 0)
+        {
+            bool added;
+            do
+            {
+                added = false;
+                foreach (var (fid, formula) in compiled)
+                {
+                    if (formula is not null && !circularFids.Contains(fid) && formula.ReferencedFieldIds.Any(dep => circularFids.Contains(dep)))
+                    {
+                        circularFids.Add(fid);
+                        added = true;
+                    }
+                }
+            } while (added);
         }
 
         var options = BuildOptions(table, fields);
@@ -203,7 +244,7 @@ public sealed class FormulaProjector : IFormulaProjector
             foreach (var (fid, formula) in sorted)
             {
                 object? value = null;
-                if (formula is not null)
+                if (formula is not null && !circularFids.Contains(fid))
                 {
                     try { value = FormulaRawValue.ToRaw(_engine.Evaluate(formula, evalCtx, options)); }
                     catch (FormulaEvaluationException) { value = null; }

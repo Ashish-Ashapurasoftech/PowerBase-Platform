@@ -248,6 +248,13 @@ public class PagesController : ControllerBase
             "js" => "application/javascript",
             _ => "text/html",
         };
+
+        Response.Headers["X-Content-Type-Options"] = "nosniff";
+        if (mimeType == "text/html")
+        {
+            Response.Headers["Content-Security-Policy"] = "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https:; sandbox allow-scripts allow-forms allow-same-origin allow-popups allow-downloads allow-modals;";
+        }
+
         return Content(result.Content, $"{mimeType}; charset=utf-8");
     }
 

@@ -2048,6 +2048,130 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
     }
 
+    public async Task RestoreAsync(AppTable table, Guid publicId, IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
+    {
+        var sql = $"""
+            UPDATE {PhysicalNaming.FullTableName(table.Id)}
+            SET IsDeleted = 0, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+            WHERE PublicId = @publicId AND IsDeleted = 1
+            """;
+
+        if (transaction is not null)
+        {
+            var affectedTx = await transaction.Connection!.ExecuteAsync(
+                new CommandDefinition(sql, new { publicId, modifiedBy = QueryContext.UserId }, transaction, cancellationToken: ct));
+            if (affectedTx == 0) throw new NotFoundException("Archived Record", publicId);
+        }
+        else
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            var affected = await connection.ExecuteAsync(
+                new CommandDefinition(sql, new { publicId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
+            if (affected == 0) throw new NotFoundException("Archived Record", publicId);
+        }
+
+        // Re-index into Azure AI Search
+        var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
+        {
+            Action = PowerBase.Application.Common.Models.IndexAction.Upsert,
+            TenantId = QueryContext.TenantId,
+            AppId = table.AppId,
+            TableId = table.Id,
+            RecordPublicId = publicId
+        };
+
+        await RecordSearchChangesAsync([msg], transaction, ct);
+        if (onIndexMessageCreated != null)
+        {
+            onIndexMessageCreated(msg);
+        }
+        else
+        {
+            _ = _messagePublisher.PublishAsync(msg, default);
+        }
+    }
+
+    public async Task PermanentDeleteAsync(AppTable table, Guid publicId, IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
+    {
+        var sql = $"""
+            DELETE FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE PublicId = @publicId AND IsDeleted = 1
+            """;
+
+        if (transaction is not null)
+        {
+            var affectedTx = await transaction.Connection!.ExecuteAsync(
+                new CommandDefinition(sql, new { publicId }, transaction, cancellationToken: ct));
+            if (affectedTx == 0) throw new NotFoundException("Archived Record", publicId);
+        }
+        else
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            var affected = await connection.ExecuteAsync(
+                new CommandDefinition(sql, new { publicId }, cancellationToken: ct));
+            if (affected == 0) throw new NotFoundException("Archived Record", publicId);
+        }
+
+        // Delete tombstone from Azure AI Search
+        var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
+        {
+            Action = PowerBase.Application.Common.Models.IndexAction.Delete,
+            TenantId = QueryContext.TenantId,
+            AppId = table.AppId,
+            TableId = table.Id,
+            RecordPublicId = publicId
+        };
+
+        await RecordSearchChangesAsync([msg], transaction, ct);
+        if (onIndexMessageCreated != null)
+        {
+            onIndexMessageCreated(msg);
+        }
+        else
+        {
+            _ = _messagePublisher.PublishAsync(msg, default);
+        }
+    }
+
+    public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListArchivedAsync(
+        AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize, CancellationToken ct = default)
+    {
+        var fieldCols = BuildFieldColumnList(fields);
+        var parameters = new DynamicParameters();
+        parameters.Add("offset", Math.Max(0, page - 1) * pageSize);
+        parameters.Add("pageSize", Math.Max(1, pageSize));
+
+        var sql = $"""
+            SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
+            FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE IsDeleted = 1
+            ORDER BY ModifiedOn DESC, Id DESC
+            OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
+            """;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
+
+        var mutableRows = rows.Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
+
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
+        await enc.DecryptRowsAsync(mutableRows, fields, ct);
+
+        return mutableRows.Cast<IReadOnlyDictionary<string, object?>>().ToList();
+    }
+
+    public async Task<int> CountArchivedAsync(AppTable table, CancellationToken ct = default)
+    {
+        var sql = $"""
+            SELECT COUNT(1)
+            FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE IsDeleted = 1
+            """;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql, cancellationToken: ct));
+    }
+
     public async Task BulkDeleteByIdsAsync(AppTable table, IReadOnlyList<(long Id, Guid PublicId)> rows, IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
     {
         if (rows.Count == 0) return;
