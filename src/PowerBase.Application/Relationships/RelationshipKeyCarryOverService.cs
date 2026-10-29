@@ -85,8 +85,7 @@ public sealed class RelationshipKeyCarryOverService
             {
                 if (rel.ProxyFieldId == staleLookup.Id)
                 {
-                    var nextProxy = childFields.FirstOrDefault(f => f.TypeCode == "Lookup" && f.Id != staleLookup.Id
-                        && FormulaTypeMap.ParseLookupSettings(f.Settings)?.RelationshipId == rel.Id);
+                    var nextProxy = ReferenceProxyRules.PickDefault(childFields, rel, [staleLookup.Id]);
                     await _relRepo.UpdateProxyFieldAsync(rel.Id, nextProxy?.Id, ct);
                 }
                 await _fieldRepo.DeleteAsync(staleLookup.PublicId, staleLookup.AppTableId, ct);
