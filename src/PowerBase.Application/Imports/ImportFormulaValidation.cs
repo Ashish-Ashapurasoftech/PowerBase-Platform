@@ -18,9 +18,10 @@ public sealed record ImportFormulaColumn(int Fid, string Name);
 /// <param name="FileColumns">A file source: its columns (all text) are what the formula may use.</param>
 /// <param name="VirtualColumns">The import's virtual columns, which the formula may also use.</param>
 /// <param name="OwnFid">When the formula defines a virtual column, that column's id: it cannot use itself, and its result must be one a virtual column can hold.</param>
+/// <param name="Variables">The import's variables, which the formula may also use as <c>[var_name]</c>.</param>
 public sealed record ImportFormulaCheck(
     string Expression, string? ExpectedType, Guid? SourceTableId, List<ImportFormulaColumn>? FileColumns,
-    List<ImportVirtualColumn>? VirtualColumns, int? OwnFid);
+    List<ImportVirtualColumn>? VirtualColumns, int? OwnFid, List<ImportVariable>? Variables = null);
 
 /// <summary>Checks a formula typed on the import screen the way the import will compile it: against the source's fields (a table's, or a
 /// file's columns) and the import's virtual columns. The table formula check only knows a table's own fields, so it cannot serve a file or
@@ -39,7 +40,10 @@ public sealed class ValidateImportFormulaHandler(
 
         // What the formula may also use: every other virtual column that works on its own. A broken one is simply not offered.
         var others = (check.VirtualColumns ?? []).Where(v => check.OwnFid is null || v.Fid != check.OwnFid).ToList();
-        var (virtuals, _) = ImportVirtual.Resolve(others, source, engine, lenient: true);
+        // The variables are checked as a whole when the import is saved; here a broken set is simply not offered.
+        var variables = check.Variables ?? [];
+        var variableSchema = ImportVariables.Check(variables) is null && ImportVariables.Collision(variables, source, others) is null ? ImportVariables.Schema(variables) : null;
+        var (virtuals, _) = ImportVirtual.Resolve(others, source, engine, lenient: true, variables: variableSchema);
         var schema = new AppFieldSchema(virtuals.Count == 0 ? source : source.Concat(virtuals.Select(v => v.Field)).ToList());
 
         var expression = check.Expression ?? string.Empty;
@@ -49,7 +53,7 @@ public sealed class ValidateImportFormulaHandler(
             return Invalid($"The formula is nested too deeply (at most {ImportFormulaGuard.MaxNesting} levels).", expression);
 
         // The import compiles formulas without the cross-table names, so this does too: what passes here passes when the import is saved.
-        var compiled = engine.Compile(expression, schema, FormulaTypeMap.ParseExpected(check.ExpectedType));
+        var compiled = engine.Compile(expression, schema, FormulaTypeMap.ParseExpected(check.ExpectedType), variableSchema: variableSchema);
         var diagnostics = compiled.Diagnostics.Select(FormulaDiagnosticDto.From).ToList();
         var valid = !compiled.HasErrors;
         if (valid && check.OwnFid is not null && ImportVirtual.FieldTypeOf(compiled.ResultType) is null)
