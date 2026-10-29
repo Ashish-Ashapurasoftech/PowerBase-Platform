@@ -16,9 +16,9 @@ public class ResolveHomePageQueryHandlerTests
     private readonly Guid _appPublicId = Guid.NewGuid();
     private const long AppId = 1;
 
-    private readonly Page _appDefault = new() { Id = 10, PublicId = Guid.NewGuid(), PageType = PageTypes.Dashboard, IsDefaultHome = true };
-    private readonly Page _salesHome = new() { Id = 11, PublicId = Guid.NewGuid(), PageType = PageTypes.Dashboard };
-    private readonly Page _opsHome = new() { Id = 12, PublicId = Guid.NewGuid(), PageType = PageTypes.Dashboard };
+    private readonly Page _appDefault = new() { Id = 10, PublicId = Guid.NewGuid(), PageType = PageTypes.Dashboard, IsPublished = true, IsDefaultHome = true };
+    private readonly Page _salesHome = new() { Id = 11, PublicId = Guid.NewGuid(), PageType = PageTypes.Dashboard, IsPublished = true };
+    private readonly Page _opsHome = new() { Id = 12, PublicId = Guid.NewGuid(), PageType = PageTypes.Dashboard, IsPublished = true };
 
     public ResolveHomePageQueryHandlerTests()
     {
@@ -87,6 +87,17 @@ public class ResolveHomePageQueryHandlerTests
 
         ShowPages(_appDefault);
         (await ResolveAsync()).PagePublicId.Should().Be(_appDefault.PublicId);
+    }
+
+    [Fact]
+    public async Task Draft_dashboards_are_never_a_home_page()
+    {
+        UserHasRoles(1);
+        AppHasRoles(Role(1, 1, _salesHome.PublicId));
+        _salesHome.IsPublished = false;
+        _appDefault.IsPublished = false;
+
+        (await ResolveAsync()).PagePublicId.Should().BeNull();
     }
 
     [Fact]

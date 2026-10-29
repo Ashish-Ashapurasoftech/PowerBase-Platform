@@ -1,5 +1,6 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Fields;
 using PowerBase.Application.Imports;
 using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
@@ -114,9 +115,11 @@ public sealed class SnapshotCaptureService : ISnapshotCaptureService
         value = Unwrap(value);
         if (value is null or DBNull) return null;
 
-        // The same type: copied as it is. A compatible one (a number into a text field, …) goes through the import conversion.
-        if (string.Equals(FieldValueTypes.Of(source), snapshot.TypeCode, StringComparison.OrdinalIgnoreCase)) return value;
-        return ImportTypeCompatibility.TryConvert(value, snapshot, out var converted, out _) ? converted : null;
+        // The same type is copied as it is (a User field's stored id, a Multi-user field's list, a Duration …); a compatible one
+        // (a number into a text field, Percent into Number, …) is converted — see SnapshotTypeCompatibility.
+        var sourceType = FieldValueTypes.Of(source);
+        if (sourceType is null || string.Equals(sourceType, snapshot.TypeCode, StringComparison.OrdinalIgnoreCase)) return value;
+        return SnapshotTypeCompatibility.Convert(value, sourceType, snapshot.TypeCode);
     }
 
     private static object? Unwrap(object? value) => value is JsonElement e

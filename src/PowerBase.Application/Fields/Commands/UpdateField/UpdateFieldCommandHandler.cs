@@ -141,7 +141,7 @@ public class UpdateFieldCommandHandler
         var sharedErrors = FieldSharedValuesCapability.Validate(existing.TypeCode, label, existing.IsSystem, isSharedValues && !existing.IsSharedValues);
         if (sharedErrors.Count > 0) throw new ValidationException(new Dictionary<string, string[]>(sharedErrors));
         _guard.ValidateActionButtonTargets(existing.TypeCode, settings, tableFields, existing.Id);
-        _guard.ValidateSnapshot(existing, label, snapshotSourceFid, snapshotEditable, isRequired, isUnique, isEncrypted, command.IsAutoFill && snapshotSourceFid.HasValue, tableFields);
+        _guard.ValidateSnapshot(existing, label, snapshotSourceFid, snapshotEditable, isRequired, isUnique, command.IsAutoFill && snapshotSourceFid.HasValue, tableFields);
 
         // Formula text is stored by field ID so a rename can't break it (see FormulaCanonicalizer).
         // The label being saved right now is also accepted as a name, so a formula can reference a

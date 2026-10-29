@@ -29,12 +29,12 @@ public class ResolveHomePageQueryHandler
     }
 
     /// <summary>A user's home Dashboard: the home page of their best-ranked role that has one (lowest Rank first,
-    /// unranked last), else the app-wide default home. Only Dashboards the user can actually see qualify.</summary>
+    /// unranked last), else the app-wide default home. Only published Dashboards the user can actually see qualify.</summary>
     public async Task<ResolvedHomePage> HandleAsync(ResolveHomePageQuery query, CancellationToken ct = default)
     {
         var appId = await _appRepo.GetIdByPublicIdAsync(query.AppPublicId, ct);
         var visible = (await _pageRepo.ListVisibleByAppAsync(appId, null, ct))
-            .Where(p => p.PageType == PageTypes.Dashboard)
+            .Where(p => p.PageType == PageTypes.Dashboard && p.IsPublished)
             .ToList();
 
         var myRoleIds = (await _appUserRepo.GetUserAppRoleIdsAsync(appId, _queryContext.UserId, ct)).ToHashSet();
