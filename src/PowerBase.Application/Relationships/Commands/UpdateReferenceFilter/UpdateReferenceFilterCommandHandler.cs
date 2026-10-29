@@ -112,10 +112,12 @@ public class UpdateReferenceFilterCommandHandler
     }
 
     /// <summary>The tree filters PARENT records by their stored fields (a calculated one has no column), and a
-    /// "parentField" comparison reads the value of another stored field on this (child) form. As in a
-    /// summary's criteria, a parent Lookup is filtered on the grandparent column it pulls down (not a
-    /// range, not a calculated source). Encrypted parent fields are allowed: the tree is then judged in
-    /// memory over decrypted rows (<see cref="EncryptedRowFilter"/>).</summary>
+    /// "parentField" comparison reads the value of another field on this (child) form — any but the Reference
+    /// itself, Formula and Lookup fields included, as in a summary's criteria (the form submits the value it
+    /// works out live). As in a summary's criteria, a parent Lookup is filtered on the grandparent column it
+    /// pulls down (not a range, not a calculated source), and a "field" comparison compares to another of those
+    /// parent fields on the same record. Encrypted parent fields are allowed: the tree is then judged in memory
+    /// over decrypted rows (<see cref="EncryptedRowFilter"/>).</summary>
     private async Task ValidateTreeAsync(
         FilterGroup? tree, IReadOnlyList<AppField> parentFields, IReadOnlyList<AppField> childFields, AppField referenceField,
         CancellationToken ct)
@@ -137,7 +139,8 @@ public class UpdateReferenceFilterCommandHandler
         // Formula and Summary fields have no column but a value per record: allowed too (judged in memory).
         foreach (var f in parentFields)
             if (f.Fid.HasValue && SummaryComputedTargets.ResultKind(f) is not null) parentFids.Add(f.Fid.Value);
-        var formFids = StoredFids(childFields.Where(f => f.Id != referenceField.Id));
+        var formFids = childFields.Where(f => f.Fid.HasValue && f.Id != referenceField.Id)
+            .Select(f => (long)f.Fid!.Value).ToHashSet();
 
         var errors = new Dictionary<string, string[]>();
         CommonReportValidationHelpers.ValidateFilterGroup(tree, parentFids, errors, validParentFieldIds: formFids, unlimitedDepth: true);
@@ -154,9 +157,8 @@ public class UpdateReferenceFilterCommandHandler
         {
             if (node.Condition is { } c)
             {
-                if (string.Equals(c.ValueMode, "ask", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(c.ValueMode, "field", StringComparison.OrdinalIgnoreCase))
-                    return "A dropdown filter can only compare to a value or to a field on this form.";
+                if (string.Equals(c.ValueMode, "ask", StringComparison.OrdinalIgnoreCase))
+                    return "A dropdown filter can't ask the user for a value.";
             }
             if (node.Group is { } sub && FindUnsupported(sub) is { } problem) return problem;
         }

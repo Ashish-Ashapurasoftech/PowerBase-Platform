@@ -9,9 +9,9 @@ public class DashboardDefinition
 {
     public int Version { get; set; } = 2;
 
-    /// <summary>Page-level filter slots, shared across every tab. Each widget maps a slot to
-    /// a field on its own table via <see cref="DashboardWidget.FilterBindings"/> — a widget
-    /// that doesn't bind a slot simply ignores that filter.</summary>
+    /// <summary>Legacy page-level filter slots (shared by every tab). Filters now live on each
+    /// <see cref="DashboardTab"/>; <see cref="Parse"/> copies any page-level slots into every tab
+    /// and empties this list, so it is never populated after parsing.</summary>
     public List<DashboardFilterSlot> Filters { get; set; } = [];
 
     public List<DashboardTab> Tabs { get; set; } = [];
@@ -50,6 +50,18 @@ public class DashboardDefinition
             def.Tabs = [new DashboardTab { Id = "tab-1", Name = "Tab 1" }];
         }
 
+        // Filters used to be page-wide. Give every tab its own copy so existing dashboards keep
+        // behaving the same until someone edits a tab's filters.
+        if (def.Filters.Count > 0)
+        {
+            foreach (var tab in def.Tabs.Where(t => t.Filters.Count == 0))
+                tab.Filters = def.Filters.Select(f => new DashboardFilterSlot
+                {
+                    Key = f.Key, Label = f.Label, FilterType = f.FilterType, UserMode = f.UserMode, SearchType = f.SearchType,
+                }).ToList();
+            def.Filters = [];
+        }
+
         def.Grid = null;
         def.Widgets = null;
         return def;
@@ -62,6 +74,11 @@ public class DashboardTab
     public string Name { get; set; } = string.Empty;
     public DashboardGrid Grid { get; set; } = new();
     public List<DashboardWidget> Widgets { get; set; } = [];
+
+    /// <summary>Filter slots for this tab only. Each widget on the tab maps a slot to a field on its
+    /// own table via <see cref="DashboardWidget.FilterBindings"/> — a widget that doesn't bind a slot
+    /// simply ignores that filter.</summary>
+    public List<DashboardFilterSlot> Filters { get; set; } = [];
 }
 
 public class DashboardGrid

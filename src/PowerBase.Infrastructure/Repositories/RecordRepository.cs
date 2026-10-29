@@ -798,8 +798,11 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             IReadOnlyList<IReadOnlyDictionary<long, object?>>? computed = null;
             if (readsComputed && _services is not null)
             {
-                var relational = await _services.GetRequiredService<PowerBase.Application.Relationships.IRelationalProjector>().ProjectAsync(parentTable, treeFields, rows, ct);
-                computed = _services.GetRequiredService<PowerBase.Application.Formulas.IFormulaProjector>().Project(treeFields, rows, relational, parentTable);
+                // The table's own fields only: a Reference's stand-in key lookup (negative Fid, see ReferenceKeys) is
+                // filled in below like any other lookup.
+                var tableFields = treeFields.Where(f => f.Fid > 0).ToList();
+                var relational = await _services.GetRequiredService<PowerBase.Application.Relationships.IRelationalProjector>().ProjectAsync(parentTable, tableFields, rows, ct);
+                computed = _services.GetRequiredService<PowerBase.Application.Formulas.IFormulaProjector>().Project(tableFields, rows, relational, parentTable);
             }
             IReadOnlyList<AppField> fields = treeFields;
             foreach (var (lookup, settings, source, sourceTable, sourceFields) in lookups)
@@ -812,8 +815,11 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return result;
     }
 
+    /// <summary>True when a condition filters on <paramref name="fid"/> or compares to it ("the value in the field").</summary>
     private static bool ReadsField(FilterGroup group, int fid) =>
-        group.Nodes.Any(n => n.Condition?.FieldId == fid || (n.Group is { } sub && ReadsField(sub, fid)));
+        group.Nodes.Any(n => n.Condition is { } c && (c.FieldId == fid
+                || (string.Equals(c.ValueMode, "field", StringComparison.OrdinalIgnoreCase) && c.ValueFieldId == fid))
+            || (n.Group is { } sub && ReadsField(sub, fid)));
 
     /// <summary>Dependent-dropdown predicate over the parent table aliased <c>p</c>. Values are always
     /// bound as parameters; column names come from field metadata (integers), never user text.</summary>

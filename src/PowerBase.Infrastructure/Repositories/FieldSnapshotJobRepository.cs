@@ -5,7 +5,7 @@ using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.Repositories;
 
-/// <summary>Control-DB job table for "Reinitialize" of a Snapshot field (see control/015_field_snapshot_job.sql).</summary>
+/// <summary>Control-DB job table for "Reinitialize" of a Snapshot field (see control/016_field_snapshot_job.sql).</summary>
 public sealed class FieldSnapshotJobRepository(IControlConnectionFactory connections, IQueryContext context)
     : ControlRepositoryBase(connections, context), IFieldSnapshotJobRepository
 {

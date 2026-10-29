@@ -296,4 +296,92 @@ public class ImportDefinitionCheckerTests
         await act.Should().ThrowAsync<PowerBase.Domain.Exceptions.UnauthorizedActionException>();
         await _definitions.DidNotReceiveWithAnyArgs().ListByAppAsync(default, default);
     }
+
+    // ---- variables ----
+
+    private static ImportDefinition WithVariables(ImportDefinitionConfig cfg)
+    {
+        var d = Def();
+        ImportConfigMapper.Apply(d, cfg);
+        return d;
+    }
+
+    private static ImportDefinitionConfig VariableConfig(Action<ImportDefinitionConfig> tweak)
+    {
+        var cfg = new ImportDefinitionConfig
+        {
+            Name = "V", SourceTableId = ImportHarness.SourceTableId, ImportType = ImportTypes.Copy,
+            Mappings = [new() { DestFid = 6, SourceFid = 6 }]
+        };
+        tweak(cfg);
+        return cfg;
+    }
+
+    [Fact]
+    public async Task A_fixed_value_that_names_a_variable_is_checked_with_the_variable_s_text()
+    {
+        var number = VariableConfig(c =>
+        {
+            c.Variables = [new ImportVariable { Name = "var_five", Value = "5" }];
+            c.Mappings.Add(new ImportFieldMapping { DestFid = 7, Source = ImportMappingSource.Static, StaticValue = "{{var_five}}" });
+        });
+
+        (await Check(WithVariables(number))).NeedsAttention.Should().BeFalse("5 is a number, and the field is a number");
+
+        var text = VariableConfig(c =>
+        {
+            c.Variables = [new ImportVariable { Name = "var_five", Value = "five" }];
+            c.Mappings.Add(new ImportFieldMapping { DestFid = 7, Source = ImportMappingSource.Static, StaticValue = "{{var_five}}" });
+        });
+        var flagged = await Check(WithVariables(text));
+        flagged.NeedsAttention.Should().BeTrue();
+        flagged.AttentionReason.Should().Contain("Qty");
+    }
+
+    [Fact]
+    public async Task A_formula_using_a_variable_is_not_flagged_and_one_using_an_unknown_name_is()
+    {
+        var known = VariableConfig(c =>
+        {
+            c.Variables = [new ImportVariable { Name = "var_rate", Value = "2" }];
+            c.Mappings.Add(new ImportFieldMapping { DestFid = 7, Source = ImportMappingSource.Formula, Formula = "ToNumber([var_rate])" });
+        });
+        (await Check(WithVariables(known))).NeedsAttention.Should().BeFalse();
+
+        var unknown = VariableConfig(c =>
+        {
+            c.Variables = [new ImportVariable { Name = "var_rate", Value = "2" }];
+            c.Mappings.Add(new ImportFieldMapping { DestFid = 7, Source = ImportMappingSource.Formula, Formula = "ToNumber([var_gone])" });
+        });
+        (await Check(WithVariables(unknown))).AttentionReason.Should().Contain("Qty");
+    }
+
+    [Fact]
+    public async Task A_token_that_names_a_variable_nobody_defined_flags_the_import_with_the_name()
+    {
+        var cfg = VariableConfig(c => c.Mappings.Add(new ImportFieldMapping { DestFid = 7, Source = ImportMappingSource.Static, StaticValue = "{{var_gone}}" }));
+
+        var def = await Check(WithVariables(cfg));
+
+        def.NeedsAttention.Should().BeTrue();
+        def.AttentionReason.Should().Contain("var_gone");
+    }
+
+    [Fact]
+    public async Task A_saved_variable_with_a_bad_name_flags_the_import_and_a_sound_one_does_not()
+    {
+        (await Check(WithVariables(VariableConfig(c => c.Variables = [new ImportVariable { Name = "oops" }])))).AttentionReason.Should().Contain("var_");
+        (await Check(WithVariables(VariableConfig(c => c.Variables = [new ImportVariable { Name = "var_ok", Value = "x" }])))).NeedsAttention.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_variable_in_a_filter_does_not_flag_the_import_and_the_filter_field_is_still_checked()
+    {
+        var group = new FilterGroup { Nodes = [new() { Condition = new() { FieldId = 6, Operator = "eq", Value = "{{var_a}}" } }] };
+        var cfg = VariableConfig(c => { c.Variables = [new ImportVariable { Name = "var_a", Value = "x" }]; c.Conditions = group; });
+        (await Check(WithVariables(cfg))).NeedsAttention.Should().BeFalse();
+
+        _source.RemoveAll(f => f.Fid == 6);
+        (await Check(WithVariables(cfg))).NeedsAttention.Should().BeTrue();
+    }
 }

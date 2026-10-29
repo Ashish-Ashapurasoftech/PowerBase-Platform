@@ -15,6 +15,7 @@ using PowerBase.Application.Pages.Queries.ListNavPages;
 using PowerBase.Application.Pages.Queries.ListPages;
 using PowerBase.Application.Pages.Queries.ListPageVersions;
 using PowerBase.Application.Pages.Commands.SetDefaultHome;
+using PowerBase.Application.Pages.Queries.ResolveHomePage;
 using PowerBase.Application.Pages.Queries.RenderPage;
 using PowerBase.API.Models.Records;
 using PowerBase.API.Models.Reports;
@@ -38,6 +39,7 @@ public class PagesController : ControllerBase
     private readonly RestorePageVersionCommandHandler _restoreHandler;
     private readonly RenderPageQueryHandler _renderHandler;
     private readonly SetDefaultHomeCommandHandler _setDefaultHomeHandler;
+    private readonly ResolveHomePageQueryHandler _resolveHomeHandler;
     private readonly GetPageCodeQueryHandler _getPageCodeHandler;
     private readonly ListNavPagesQueryHandler _listNavPagesHandler;
 
@@ -53,6 +55,7 @@ public class PagesController : ControllerBase
         RestorePageVersionCommandHandler restoreHandler,
         RenderPageQueryHandler renderHandler,
         SetDefaultHomeCommandHandler setDefaultHomeHandler,
+        ResolveHomePageQueryHandler resolveHomeHandler,
         GetPageCodeQueryHandler getPageCodeHandler,
         ListNavPagesQueryHandler listNavPagesHandler)
     {
@@ -67,6 +70,7 @@ public class PagesController : ControllerBase
         _restoreHandler = restoreHandler;
         _renderHandler = renderHandler;
         _setDefaultHomeHandler = setDefaultHomeHandler;
+        _resolveHomeHandler = resolveHomeHandler;
         _getPageCodeHandler = getPageCodeHandler;
         _listNavPagesHandler = listNavPagesHandler;
     }
@@ -86,6 +90,17 @@ public class PagesController : ControllerBase
             Id = p.Id, Name = p.Name, PageType = p.PageType, NavIcon = p.NavIcon, PageNumber = p.PageNumber,
         }).ToList();
         return Ok(new ApiResponse<IReadOnlyList<NavPageResponse>>(mapped));
+    }
+
+    /// <summary>The Dashboard the CURRENT user lands on at App Home: their best-ranked role's home page,
+    /// else the app-wide default, else null (the built-in stats view). Membership-only.</summary>
+    [HttpGet("home")]
+    [RequireAppMember(AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiResponse<ResolvedHomePageResponse>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ResolveHome(Guid appId, CancellationToken ct)
+    {
+        var r = await _resolveHomeHandler.HandleAsync(new ResolveHomePageQuery(appId), ct);
+        return Ok(new ApiResponse<ResolvedHomePageResponse>(new ResolvedHomePageResponse { PageId = r.PagePublicId, Source = r.Source }));
     }
 
     /// <summary>List pages for this app. AllPages=true (App Settings authoring view) also
@@ -258,21 +273,24 @@ public class PagesController : ControllerBase
         return Content(result.Content, $"{mimeType}; charset=utf-8");
     }
 
+    private static DashboardFilterSlotResponse MapFilterSlot(Application.Pages.DashboardFilterSlot f) => new()
+    {
+        Key = f.Key,
+        Label = f.Label,
+        FilterType = f.FilterType,
+        UserMode = f.UserMode,
+        SearchType = f.SearchType,
+    };
+
     private static RenderPageResponse MapRender(Application.Pages.Queries.RenderPage.RenderPageResult r) => new()
     {
-        Filters = r.Filters.Select(f => new DashboardFilterSlotResponse
-        {
-            Key = f.Key,
-            Label = f.Label,
-            FilterType = f.FilterType,
-            UserMode = f.UserMode,
-            SearchType = f.SearchType,
-        }).ToList(),
+        Filters = r.Filters.Select(MapFilterSlot).ToList(),
         Tabs = r.Tabs.Select(t => new RenderedTabResponse
         {
             Id = t.Id,
             Name = t.Name,
             Grid = new DashboardGridResponse { Cols = t.Grid.Cols, RowHeight = t.Grid.RowHeight, Gap = t.Grid.Gap },
+            Filters = t.Filters.Select(MapFilterSlot).ToList(),
             Widgets = t.Widgets.Select(w => new RenderedWidgetResponse
             {
                 WidgetId = w.WidgetId,

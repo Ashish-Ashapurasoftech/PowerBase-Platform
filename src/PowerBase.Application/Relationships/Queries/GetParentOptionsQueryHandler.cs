@@ -109,7 +109,7 @@ public class GetParentOptionsQueryHandler
         var referenceField = childFields.FirstOrDefault(f => f.Id == rel.ReferenceFieldId);
         var filters = await ReferenceFilterResolver.BuildAsync(
             FormulaTypeMap.ParseReferenceSettings(referenceField?.Settings), childFields, parentFields,
-            filterValues ?? new Dictionary<int, string?>(), _tableRepo, _fieldRepo, ct, _queryContext.UserId);
+            filterValues ?? new Dictionary<int, string?>(), _tableRepo, _fieldRepo, ct, _queryContext.UserId, _relRepo, _recordRepo);
 
         // Offer only the parent records the user's role may view: the picker must not reveal records hidden by
         // the parent table's Custom Rules / Own records scope (or any record of a table the role cannot view).

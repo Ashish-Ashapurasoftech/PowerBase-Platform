@@ -11,12 +11,14 @@ public class AppRoleRepository : TenantRepositoryBase, IAppRoleRepository
 {
     private const string ListDetailsByAppIdSql = """
         SELECT r.Id, r.PublicId, r.AppId, r.Name, r.IsDefault, r.IsSystem, r.ManageableRolesType, r.Rank,
+               hp.PublicId AS HomePagePublicId,
                ISNULL(STRING_AGG(p.Code, ','), '') AS PermissionsString
         FROM meta.AppRole r
+        LEFT JOIN meta.Page hp ON hp.Id = r.HomePageId AND hp.IsDeleted = 0
         LEFT JOIN meta.AppRolePermission arp ON arp.AppRoleId = r.Id
         LEFT JOIN meta.Permission p ON p.Id = arp.PermissionId
         WHERE r.AppId = @appId AND r.IsDeleted = 0
-        GROUP BY r.Id, r.PublicId, r.AppId, r.Name, r.IsDefault, r.IsSystem, r.ManageableRolesType, r.Rank
+        GROUP BY r.Id, r.PublicId, r.AppId, r.Name, r.IsDefault, r.IsSystem, r.ManageableRolesType, r.Rank, hp.PublicId
         ORDER BY ISNULL(r.Rank, 999999) ASC, r.Name
         """;
 
@@ -36,7 +38,7 @@ public class AppRoleRepository : TenantRepositoryBase, IAppRoleRepository
         """;
 
     private const string GetByPublicIdSql = """
-        SELECT Id, PublicId, AppId, Name, IsDefault, IsSystem, ManageableRolesType, Rank
+        SELECT Id, PublicId, AppId, Name, IsDefault, IsSystem, ManageableRolesType, Rank, HomePageId
         FROM meta.AppRole
         WHERE PublicId = @publicId AND IsDeleted = 0
         """;
@@ -110,7 +112,8 @@ public class AppRoleRepository : TenantRepositoryBase, IAppRoleRepository
                 ((string)r.PermissionsString).Split(',', StringSplitOptions.RemoveEmptyEntries).ToList(),
                 (string)(r.ManageableRolesType ?? "None"),
                 r.Rank == null ? (int?)null : (int)r.Rank,
-                manageableList
+                manageableList,
+                (Guid?)r.HomePagePublicId
             );
         }).ToList();
     }
@@ -154,6 +157,14 @@ public class AppRoleRepository : TenantRepositoryBase, IAppRoleRepository
             await transaction.RollbackAsync(ct);
             throw;
         }
+    }
+
+    public async Task SetHomePageAsync(long roleId, long? pageId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE meta.AppRole SET HomePageId = @pageId WHERE Id = @roleId AND IsDeleted = 0",
+            new { roleId, pageId }, cancellationToken: ct));
     }
 
     public async Task<(long Id, Guid PublicId)> CreateAsync(AppRole role, IDbTransaction? transaction = null, CancellationToken ct = default)
