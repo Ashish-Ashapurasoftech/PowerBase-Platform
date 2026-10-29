@@ -2018,7 +2018,7 @@ public partial class PipelineEngine : IPipelineEngine
                     var streamAiPlan = aiIndexRead
                         ? new PipelineAiSearchPlan(null, "the index was already read")
                         : workset.DiscoverySource == "Ai" || (workset.DiscoveredCount == 0 && workset.LastRecordId == 0)
-                            ? await PlanAiSearchAsync(table, fields, filterTree, ct)
+                            ? await PlanAiSearchAsync(table, fields, filterTree, recordRepo, ct, applyGates: workset.DiscoverySource != "Ai")
                             : new PipelineAiSearchPlan(null, "the search already started in SQL");
                     if (aiReadComplete && workset.DiscoveredCount > 0)
                     {
@@ -2235,7 +2235,7 @@ public partial class PipelineEngine : IPipelineEngine
             List<IReadOnlyDictionary<string, object?>> resultsList;
             var computedMerged = false;
             List<IReadOnlyDictionary<string, object?>>? aiSearchRows = null;
-            var aiPlan = await PlanAiSearchAsync(table, fields, filterTree, ct);
+            var aiPlan = await PlanAiSearchAsync(table, fields, filterTree, recordRepo, ct);
             if (aiPlan.UseAiSearch)
             {
                 try
@@ -6310,6 +6310,16 @@ public partial class PipelineEngine : IPipelineEngine
             "is-not-empty" => "isNotEmpty",
             "is-true" => "eq",
             "is-false" => "eq",
+            // Spellings the validator and the in-memory evaluator accept (the Condition step's editor emits them) — without
+            // these a saved Search Records rule was passed on unmapped and silently matched every record.
+            "equals" or "=" => "eq",
+            "not-equals" or "<>" or "!=" => "ne",
+            ">" or "after" => "gt",
+            ">=" or "greater-than-or-equal" or "on-or-after" => "gte",
+            "<" or "before" => "lt",
+            "<=" or "less-than-or-equal" or "on-or-before" => "lte",
+            "is-blank" or "is-null" => "isEmpty",
+            "is-not-blank" or "is-not-null" => "isNotEmpty",
             _ => normalized
         };
     }

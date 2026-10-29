@@ -127,7 +127,7 @@ public sealed class PblFormRuleAction
     /// NotRequired, ChangeLabel, SetColor, DisplayMessage, PreventSave.</summary>
     public string ActionType { get; set; } = string.Empty;
 
-    /// <summary>Field, Section, or Block.</summary>
+    /// <summary>Field, Section, Block, or Page.</summary>
     public string TargetType { get; set; } = "Field";
 
     /// <summary>A <see cref="PblFormElement.LogicalRef"/> within the same form — required when TargetType is "Field".</summary>
@@ -138,6 +138,9 @@ public sealed class PblFormRuleAction
 
     /// <summary>A <see cref="PblFormBlock.LogicalRef"/> within the same form — required when TargetType is "Block".</summary>
     public string? TargetBlockRef { get; set; }
+
+    /// <summary>A <see cref="PblFormPage.LogicalRef"/> within the same form - required when TargetType is "Page" (a multi-page form).</summary>
+    public string? TargetPageRef { get; set; }
     public string? ActionValue { get; set; }
     public int DisplayOrder { get; set; }
 
@@ -182,6 +185,11 @@ public sealed class PblFormElement
     /// <summary>For ElementType "Report" (an embedded related-records grid): the PBL report to embed, the table it belongs to, and the source options.</summary>
     public string? EmbeddedReportRef { get; set; }
     public string? EmbeddedReportTableRef { get; set; }
+
+    /// <summary>For a Field element that shows a Quickbase report-link field ("File records"): the child table it lists and that table's reference
+    /// field. PowerBase makes its own link per relationship under another name, so the element is found through these.</summary>
+    public string? ReportLinkChildTableRef { get; set; }
+    public string? ReportLinkReferenceFieldName { get; set; }
     public bool ShowToolbar { get; set; } = true;
     public bool AllowCreateRecords { get; set; } = true;
     public bool OpenInSubForm { get; set; } = true;

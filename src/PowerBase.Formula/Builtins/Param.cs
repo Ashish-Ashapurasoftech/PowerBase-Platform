@@ -17,6 +17,8 @@ internal static class P
     public static readonly Param User = new("User", t => t == FormulaType.User);
     public static readonly Param Time = new("Time", t => t == FormulaType.Time);
     public static readonly Param DateLike = new("Date/DateTime", t => t is FormulaType.Date or FormulaType.DateTime);
+    /// <summary>Hour / Minute / Second read the time of day of a timestamp, of a time, or (as midnight) of a date.</summary>
+    public static readonly Param TimeLike = new("Date/DateTime/Time", t => t is FormulaType.Date or FormulaType.DateTime or FormulaType.Time);
     public static readonly Param TextList = new("Text List", t => t == FormulaType.TextList);
     public static readonly Param RecordList = new("Record List", t => t == FormulaType.RecordList);
     public static readonly Param List = new("List", t => t is FormulaType.TextList or FormulaType.UserList or FormulaType.RecordList);

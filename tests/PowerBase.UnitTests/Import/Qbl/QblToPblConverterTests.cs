@@ -1324,7 +1324,7 @@ public class QblToPblConverterTests
                             Properties:
                               Comparison: IsInRole
                               Role: !Ref
-                                Role: $Role_Administrator
+                                Role: $Role_Ghost
                     Actions:
                       - Type: QB::FormV2::Rule::Action::Show
                         Properties:

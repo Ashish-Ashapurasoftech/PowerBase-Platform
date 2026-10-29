@@ -1,6 +1,7 @@
 using System.Text.Json;
 using PowerBase.Application.Reports;
 using PowerBase.Domain.Entities;
+using PowerBase.Domain.Enums;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Domain.FieldSettings;
 
@@ -55,10 +56,12 @@ public static class SummarySettingsBuilder
         // A lookup's values are its parent field's type (Min of a looked-up date is a date) — for a lookup of a
         // Summary / Formula, the type of value that produces (Max of a looked-up "Min of Salary" is a number).
         // A Reference whose parent shows a key field is summarized as that key: the key's type.
-        var keyType = target is null ? null : ReferenceKeys.KeyTypeCode(target, referenceKeys);
+        var keyType = target is null ? null : ReferenceKeys.KeyTypeCode(target, referenceKeys, function);
+        // Sum / Min / Max of a Reference is the Record ID# it holds: a number.
+        keyType ??= target is not null && ReferenceKeys.ReadsRecordId(target, lookupSources, function) ? "Number" : null;
         var targetValueType = target is null ? null : keyType ?? FieldValueTypes.OfTarget(target, lookupSources);
         var targetTypeCode = target is not null && SummaryLookupSources.IsLookup(target)
-            ? SummaryLookupSources.ReadableSource(target, lookupSources)?.TypeCode ?? targetValueType
+            ? keyType ?? SummaryLookupSources.ReadableSource(target, lookupSources)?.TypeCode ?? targetValueType
             : target is null ? null : keyType ?? target.TypeCode;
 
         return new SummarySettings

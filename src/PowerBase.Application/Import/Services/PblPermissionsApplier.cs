@@ -94,7 +94,7 @@ public class PblPermissionsApplier
 
             if (created.IsSystem)
             {
-                if (role.TablePermissions.Any(p => p.RecordFilter is not null || p.FieldPermissions.Count > 0) || role.DisableAccess || role.EditApp || role.ManageUsers)
+                if (role.TablePermissions.Any(p => p.RecordFilter is not null || p.ModifyRecordFilter is not null || p.FieldPermissions.Count > 0) || role.DisableAccess || role.EditApp || role.ManageUsers)
                     skipped.Add(new ImportSkippedItem { LogicalRef = role.LogicalRef, Name = role.Name,
                         Reason = $"'{role.Name}' is a built-in role: its permission set, record filters and field access were not changed by the import." });
                 continue;
@@ -132,6 +132,16 @@ public class PblPermissionsApplier
                         failedTables.Add((table, problem ?? "filter could not be built"));
                     else
                         filterInputs.Add(new RecordFilterInput(table.PublicId, "AND", [], group));
+                }
+
+                // ---- modify record filter (which records the role may edit or delete) ----
+                if (permission.ModifyRecordFilter is not null)
+                {
+                    var modifyGroup = ToFilterGroup(permission.ModifyRecordFilter, fields, out var modifyProblem);
+                    if (modifyGroup is null)
+                        failedTables.Add((table, $"modify rule could not be built ({modifyProblem ?? "no usable condition"})"));
+                    else
+                        filterInputs.Add(new RecordFilterInput(table.PublicId, "AND", [], modifyGroup, "Modify"));
                 }
 
                 // ---- field-level access ----

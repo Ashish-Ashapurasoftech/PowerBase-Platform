@@ -105,6 +105,8 @@ public class DeleteFieldCommandHandler
                     throw;
                 }
 
+                await ReferenceProxyRules.ReassignIfRemovedAsync(table.Id, [field.Id], _relRepo, _fieldRepo, ct);
+
                 foreach (var pipeline in pipelinesToDeactivate)
                 {
                     await _auditRepo.LogActivityAsync(
@@ -135,6 +137,9 @@ public class DeleteFieldCommandHandler
         var normalAffected = await _fieldRepo.DeleteAsync(field.PublicId, table.Id, ct);
         if (normalAffected == 0)
             throw new NotFoundException("Field", command.FieldPublicId);
+
+        // A deleted reference proxy hands its role to the relationship's next lookup (or clears it).
+        await ReferenceProxyRules.ReassignIfRemovedAsync(table.Id, [field.Id], _relRepo, _fieldRepo, ct);
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, field.PublicId.ToString(), $"Field deleted: {field.Name} From TableName : {table.Name}", appId: table.AppId, ct: ct);

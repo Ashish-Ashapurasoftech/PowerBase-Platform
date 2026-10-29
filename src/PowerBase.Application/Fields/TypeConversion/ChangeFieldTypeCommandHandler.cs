@@ -30,13 +30,15 @@ public sealed class ChangeFieldTypeCommandHandler
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
     private readonly IFieldReferenceIndexer _refIndexer;
+    private readonly IRelationshipRepository? _relRepo;
 
     public ChangeFieldTypeCommandHandler(
         FieldTypeChangePlanner planner, FieldTypeChangeAnalyzer analyzer, IFieldColumnConversionService columns,
         IAppFieldRepository fieldRepo, ISchemaEngineService schemaEngine, IRecordRepository recordRepo,
         IAzureSearchService searchService, IMessagePublisher messagePublisher, IQueryContext queryContext,
-        IAuditRepository auditRepo, IFieldReferenceIndexer? refIndexer = null)
+        IAuditRepository auditRepo, IFieldReferenceIndexer? refIndexer = null, IRelationshipRepository? relRepo = null)
     {
+        _relRepo = relRepo;
         _planner = planner;
         _analyzer = analyzer;
         _columns = columns;
@@ -117,6 +119,12 @@ public sealed class ChangeFieldTypeCommandHandler
         if (impact.BrokenFormulas.Count > 0)
             warnings.Add($"{impact.BrokenFormulas.Count} formula(s) no longer work with the new type: "
                          + string.Join("; ", impact.BrokenFormulas.Select(b => $"{b.TableName} › {b.FieldLabel}")) + ".");
+
+        // A formula that was a reference proxy can't stay one once it is a stored field: the role moves to the
+        // relationship's next lookup (or is cleared).
+        if (kind == ConversionKind.FormulaToScalar && _relRepo is not null)
+            await PowerBase.Application.Relationships.ReferenceProxyRules.ReassignIfRemovedAsync(
+                plan.Table.Id, [field.Id], _relRepo, _fieldRepo, ct);
 
         // 5. Unique index, search, audit, usage index.
         var converted = await _fieldRepo.GetByPublicIdAsync(field.PublicId, ct) ?? field;

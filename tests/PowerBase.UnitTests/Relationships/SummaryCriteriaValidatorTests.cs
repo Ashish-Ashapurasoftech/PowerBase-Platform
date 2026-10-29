@@ -96,6 +96,17 @@ public class SummaryCriteriaValidatorTests
     }
 
     [Fact]
+    public void FindProblem_LookupOfALookupOfAReference_IsAllowed_ReadAsItsKey()
+    {
+        // "User Type - Related User Group" (fid 32) pulls down a lookup of the parent's Reference: no column of its own, judged in memory.
+        var lookup = new AppField { Fid = 32, Name = "User Type - Related User Group", TypeCode = "Lookup", Settings = """{"sourceFid":9,"sourceTypeCode":"Reference"}""" };
+        var sources = new Dictionary<long, AppField> { [32] = new() { Fid = 9, Name = "User Type - Related User Group", TypeCode = "Lookup", Settings = """{"sourceFid":4,"sourceTypeCode":"Reference"}""" } };
+
+        SummaryCriteriaValidator.FindProblem(Group("and", Cond(32, "eq", "3")), [.. ChildFields, lookup], ParentFields, sources)
+            .Should().BeNull();
+    }
+
+    [Fact]
     public void FindProblem_CurrentUser_IsFineAtAnyDepth() =>
         SummaryCriteriaValidator.FindProblem(Group("and", Nested("or", Cond(7, "isCurrentUser", null))), ChildFields, ParentFields)
             .Should().BeNull();

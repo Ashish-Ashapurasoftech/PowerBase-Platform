@@ -18,6 +18,13 @@ public sealed class EvaluationOptions
     /// Returns null when the id is unknown.</summary>
     public Func<string, UserRef?>? UserLookup { get; init; }
 
+    /// <summary>The roles the current user has in the app the formula runs in, for <c>UserRoles()</c>. A function so the host only looks them up
+    /// when a formula uses it. Left null, <c>UserRoles()</c> is blank.</summary>
+    public Func<IReadOnlyList<RoleRef>>? CurrentUserRoles { get; init; }
+
+    /// <summary>The roles of another user (by user id) in the same app, for <c>UserRoles(UserToId(...))</c>.</summary>
+    public Func<string, IReadOnlyList<RoleRef>>? UserRolesOf { get; init; }
+
     public TimeZoneInfo TimeZone { get; init; } = TimeZoneInfo.Utc;
 
     /// <summary>Identifier of the app the formula runs in, surfaced by <c>AppID()</c>. Empty when unknown.</summary>
