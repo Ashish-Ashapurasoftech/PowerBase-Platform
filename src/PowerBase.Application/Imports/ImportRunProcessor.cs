@@ -82,7 +82,7 @@ public sealed class ImportRunProcessor(
             if (snapshot is null) throw new InvalidOperationException("The run has no definition snapshot.");
             // A file import is planned against the columns of the file as it is now; a table import against the live tables.
             var file = snapshot.File is null ? null : await fileAccess.OpenSourceAsync(snapshot, countRows: true, ct);
-            plan = await planBuilder.BuildAsync(snapshot.Config, snapshot.DestinationTableId, ct, file);
+            plan = await planBuilder.BuildAsync(ImportSingleTableFilter.Fold(snapshot.Config), snapshot.DestinationTableId, ct, file);
             await planBuilder.EnsureMergeKeyIsUniqueAsync(plan, ct);
             if (plan.File is { DataRows: 0 }) throw new ImportFileFormatException("The file has no rows to import below its column names.");
         }
@@ -101,6 +101,12 @@ public sealed class ImportRunProcessor(
 
         try
         {
+            // A filter that excludes duplicates needs the values of the whole source counted first (among the rows that pass its other conditions).
+            if (plan.RowFilter is { CountsDuplicates: true } && !await CountFilterDuplicatesAsync(plan, run, maxId, ct))
+            {
+                await EndAsync(run, snapshot, plan, ImportRunStatus.Cancelled, "Cancelled before anything was imported.", null, ct);
+                return;
+            }
             Dictionary<int, HashSet<ulong>>? groups = null;
             var writeFrom = 0;
             if (plan.ConstraintPolicy == ImportConstraintPolicy.ExcludeDuplicateGroups)
@@ -145,6 +151,29 @@ public sealed class ImportRunProcessor(
     {
         IImportChunkReader source = plan.File is null ? reader : await fileAccess.OpenChunkReaderAsync(plan, ct);
         return plan.Virtuals.Count == 0 ? source : new ImportVirtualColumnReader(source, plan, formulaEngine);
+    }
+
+    /// <summary>Reads the whole source once so the filter's "does not have a duplicate" conditions know how often each value occurs (and which row had it first).
+    /// Writes nothing. False when the run was stopped.</summary>
+    private async Task<bool> CountFilterDuplicatesAsync(ImportPlan plan, ImportRun run, long maxId, CancellationToken ct)
+    {
+        var filter = plan.RowFilter!;
+        filter.BeginCountingDuplicates();
+        try
+        {
+            await using var source = await OpenSourceAsync(plan, ct);
+            long cursor = 0;
+            while (true)
+            {
+                ct.ThrowIfCancellationRequested();
+                var chunk = await source.ReadChunkAsync(plan, cursor, maxId, ct);
+                if (chunk.Exhausted) break;
+                cursor = chunk.LastId;
+                if (await runs.AdvanceAsync(run.Id, new ImportChunkResult(0, 0, 0, 0, 0, 0), 0, ct)) return false;
+            }
+            return true;
+        }
+        finally { filter.FinishCountingDuplicates(); }
     }
 
     /// <summary>Reads the whole source once, to learn which unique values occur more than once, so the writing pass can
