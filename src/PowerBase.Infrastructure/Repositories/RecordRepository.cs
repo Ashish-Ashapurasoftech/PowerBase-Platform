@@ -77,7 +77,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
     /// <summary>Reads <paramref name="fields"/> of the rows selected by <paramref name="tail"/> (a WHERE/ORDER clause on alias t). A range
     /// comes back as {start,end}. Encrypted values are decrypted; a value that cannot be decrypted is left out, never indexed as ciphertext.</summary>
-    private async Task<List<(Guid PublicId, Dictionary<long, object?> Values)>> ReadIndexRowsAsync(
+    private async Task<List<(long Id, Guid PublicId, Dictionary<long, object?> Values)>> ReadIndexRowsAsync(
         System.Data.IDbConnection connection, long tableId, long appId, IReadOnlyList<AppField> fields, string tail, object parameters, CancellationToken ct)
     {
         var cols = new List<string>();
@@ -86,10 +86,11 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             cols.Add($"t.{IndexColumn(f)}");
             if (PhysicalNaming.IsRangeTypeCode(f.TypeCode)) cols.Add($"t.{PhysicalNaming.EndColumnName(f.Fid!.Value)}");
         }
-        var sql = $"SELECT t.PublicId{(cols.Count > 0 ? ", " + string.Join(", ", cols) : "")} FROM {PhysicalNaming.FullTableName(tableId)} t {tail}";
+        // The row's id (to page after) comes back as RowId, so it never collides with Record ID#, which reads the same column.
+        var sql = $"SELECT t.Id AS RowId, t.PublicId{(cols.Count > 0 ? ", " + string.Join(", ", cols) : "")} FROM {PhysicalNaming.FullTableName(tableId)} t {tail}";
         var rows = (await connection.QueryAsync<dynamic>(new CommandDefinition(sql, parameters, cancellationToken: ct))).ToList();
 
-        var result = new List<(Guid, Dictionary<long, object?>)>(rows.Count);
+        var result = new List<(long, Guid, Dictionary<long, object?>)>(rows.Count);
         if (rows.Count == 0) return result;
 
         var enc = await GetEncryptionContextAsync(connection, appId, null, ct);
@@ -116,7 +117,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                     values[fid] = v;
                 }
             }
-            result.Add(((Guid)row["PublicId"]!, values));
+            result.Add((Convert.ToInt64(row["RowId"]), (Guid)row["PublicId"]!, values));
         }
         return result;
     }
@@ -138,24 +139,44 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         if (table == null) return result;
 
         foreach (var chunk in recordPublicIds.Distinct().Chunk(1000))
-            foreach (var (publicId, values) in await ReadIndexRowsAsync(connection, tableId, table.Value.AppId, table.Value.Fields,
+            foreach (var (_, publicId, values) in await ReadIndexRowsAsync(connection, tableId, table.Value.AppId, table.Value.Fields,
                          "WHERE t.IsDeleted = 0 AND t.PublicId IN @ids", new { ids = chunk }, ct))
                 result[publicId] = values;
         return result;
     }
 
-    public async Task<IReadOnlyList<PowerBase.Application.Common.Interfaces.SearchIndexDocument>> GetTableIndexBatchAsync(
-        long tenantId, long tableId, int page, int pageSize, CancellationToken ct = default)
+    public async Task<IReadOnlyDictionary<Guid, long>> GetRowVersionsAsync(long tableId, IReadOnlyList<Guid> recordPublicIds, CancellationToken ct = default)
+    {
+        var result = new Dictionary<Guid, long>();
+        if (recordPublicIds.Count == 0) return result;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        if (await connection.QueryFirstOrDefaultAsync<long?>(new CommandDefinition(
+                "SELECT Id FROM meta.AppTable WHERE Id = @tableId AND IsDeleted = 0", new { tableId }, cancellationToken: ct)) == null)
+            return result;
+
+        foreach (var chunk in recordPublicIds.Distinct().Chunk(1000))
+        {
+            var sql = $"SELECT PublicId, CAST(RowVersion AS BIGINT) AS Version FROM {PhysicalNaming.FullTableName(tableId)} WHERE PublicId IN @ids";
+            foreach (var (publicId, version) in await connection.QueryAsync<(Guid, long)>(new CommandDefinition(sql, new { ids = chunk }, cancellationToken: ct)))
+                result[publicId] = version;
+        }
+        return result;
+    }
+
+    public async Task<(IReadOnlyList<PowerBase.Application.Common.Interfaces.SearchIndexDocument> Documents, long LastId)> GetTableIndexPageAsync(
+        long tenantId, long tableId, long afterId, int pageSize, CancellationToken ct = default, int skip = 0)
     {
         if (tenantId > 0) QueryContext.SetTenantId(tenantId);
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var table = await LoadIndexTableAsync(connection, tableId);
-        if (table == null) return [];
+        if (table == null) return ([], afterId);
 
         var rows = await ReadIndexRowsAsync(connection, tableId, table.Value.AppId, table.Value.Fields,
-            "WHERE t.IsDeleted = 0 ORDER BY t.Id OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY",
-            new { offset = Math.Max(0, (page - 1) * pageSize), pageSize }, ct);
-        return rows.Select(r => new PowerBase.Application.Common.Interfaces.SearchIndexDocument(tenantId, table.Value.AppId, tableId, r.PublicId, r.Values)).ToList();
+            "WHERE t.IsDeleted = 0 AND t.Id > @afterId ORDER BY t.Id OFFSET @skip ROWS FETCH NEXT @pageSize ROWS ONLY",
+            new { afterId, skip = Math.Max(0, skip), pageSize }, ct);
+        var docs = rows.Select(r => new PowerBase.Application.Common.Interfaces.SearchIndexDocument(tenantId, table.Value.AppId, tableId, r.PublicId, r.Values)).ToList();
+        return (docs, rows.Count > 0 ? rows[^1].Id : afterId);
     }
 
     public async Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(Guid recordPublicId, CancellationToken ct = default)
@@ -1507,6 +1528,42 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     private Task RecordSearchChangesAsync(IReadOnlyCollection<PowerBase.Application.Common.Models.SearchIndexMessage> changes, IDbTransaction? transaction, CancellationToken ct) =>
         _outbox == null ? Task.CompletedTask : _outbox.AddAsync(changes, transaction, ct);
 
+    /// <summary>
+    /// Sends a write's index message(s) once the write is committed, for a caller that did not take them to send itself. The indexer
+    /// reads the record from the database, so a message sent while the caller's transaction is still open would find the record as it
+    /// was (or not at all), and a rolled-back write must not reach the index. Without a transaction the write has committed already:
+    /// sent now. In the request's unit of work: sent right after it commits, and not at all if it rolls back. In any other transaction
+    /// there is no telling when it commits: nothing is sent here, and the outbox row written in that same transaction is re-published by
+    /// the relay once it is due (only without an outbox, which has nothing to re-publish, is it sent now, as it always was).
+    /// </summary>
+    private void SendWhenCommitted(IDbTransaction? transaction, Func<Task> send) =>
+        SendWhenCommitted(transaction, _outbox != null, _services?.GetService<ITenantUnitOfWork>(), send);
+
+    internal static void SendWhenCommitted(IDbTransaction? transaction, bool hasOutbox, ITenantUnitOfWork? requestUnitOfWork, Func<Task> send)
+    {
+        if (transaction == null || !hasOutbox)
+        {
+            Send(send);
+            return;
+        }
+        if (requestUnitOfWork is UOW.TriggerPublishingTenantUnitOfWork uow && ReferenceEquals(uow.Transaction, transaction))
+            uow.RegisterPostCommitAction(() => { Send(send); return Task.CompletedTask; });
+    }
+
+    /// <summary>Fire and forget, as every write path sends: indexing is not a condition of the save. A failed send is logged by the
+    /// publisher, and the outbox row brings the change in later.</summary>
+    private static void Send(Func<Task> send)
+    {
+        try
+        {
+            _ = send().ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+        }
+        catch
+        {
+            // A publisher that fails before returning its task: same as a failed send.
+        }
+    }
+
     public async Task<Guid> CreateAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyDictionary<long, object?> values, IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
     {
@@ -1629,9 +1686,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         else
         {
-            _ = _messagePublisher.PublishPriorityAsync(msg, default).ContinueWith(
-                t => { /* Observed fire-and-forget: failure handled */ },
-                TaskContinuationOptions.OnlyOnFaulted);
+            SendWhenCommitted(transaction, () => _messagePublisher.PublishPriorityAsync(msg, default));
         }
 
         return insertedPublicId;
@@ -1738,13 +1793,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         if (onIndexMessageCreated != null)
             foreach (var msg in messages) onIndexMessageCreated(msg);
         else if (isPriority || messages.Count <= 100)
-            _ = _messagePublisher.PublishPriorityBatchAsync(messages, default).ContinueWith(
-                t => { /* Observed fire-and-forget: failure handled */ },
-                TaskContinuationOptions.OnlyOnFaulted);
+            SendWhenCommitted(transaction, () => _messagePublisher.PublishPriorityBatchAsync(messages, default));
         else
-            _ = _messagePublisher.PublishBatchAsync(messages, default).ContinueWith(
-                t => { /* Observed fire-and-forget: failure handled */ },
-                TaskContinuationOptions.OnlyOnFaulted);
+            SendWhenCommitted(transaction, () => _messagePublisher.PublishBatchAsync(messages, default));
 
         return publicIds;
     }
@@ -1872,7 +1923,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         else
         {
-            _ = _messagePublisher.PublishAsync(msg, default);
+            SendWhenCommitted(transaction, () => _messagePublisher.PublishAsync(msg, default));
         }
     }
 
@@ -1958,7 +2009,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 }
                 else
                 {
-                    _ = _messagePublisher.PublishAsync(msg, default);
+                    SendWhenCommitted(transaction, () => _messagePublisher.PublishAsync(msg, default));
                 }
             }
 
@@ -2007,7 +2058,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         else
         {
-            _ = _messagePublisher.PublishAsync(msg, default);
+            SendWhenCommitted(transaction, () => _messagePublisher.PublishAsync(msg, default));
         }
     }
 
@@ -2050,7 +2101,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         else
         {
-            _ = _messagePublisher.PublishBatchAsync(deleteMessages, default);
+            SendWhenCommitted(transaction, () => _messagePublisher.PublishBatchAsync(deleteMessages, default));
         }
     }
 
@@ -2097,7 +2148,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         else
         {
-            _ = _messagePublisher.PublishBatchAsync(deleteMessages, default);
+            SendWhenCommitted(transaction, () => _messagePublisher.PublishBatchAsync(deleteMessages, default));
         }
     }
 
@@ -3791,38 +3842,5 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
 
         return updatedCount;
-    }
-    public async Task<IReadOnlyList<PowerBase.Application.Common.Interfaces.SearchIndexDocument>> GetFieldBackfillBatchAsync(long tenantId, long appId, long tableId, long fieldId, bool isNullify, int page, int pageSize, CancellationToken ct = default)
-    {
-        var result = new List<PowerBase.Application.Common.Interfaces.SearchIndexDocument>();
-        if (tenantId > 0)
-        {
-            QueryContext.SetTenantId(tenantId);
-        }
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-
-        var fieldSql = """
-            SELECT af.Id, af.AppTableId, af.Name, ft.Code AS TypeCode, af.PhysicalColumnName, af.Fid, af.IsSystem, af.IsSearchable, af.IsFilterable, af.IsEncrypted
-            FROM meta.AppField af
-            JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
-            WHERE af.Fid = @fieldId AND af.AppTableId = @tableId
-            """;
-        var field = await connection.QueryFirstOrDefaultAsync<AppField>(fieldSql, new { fieldId, tableId });
-        if (field == null || !field.Fid.HasValue) return result;
-        if (await connection.QueryFirstOrDefaultAsync<long?>("SELECT Id FROM meta.AppTable WHERE Id = @tableId", new { tableId }) == null) return result;
-
-        // A field that is switched off (or being nullified) only needs the record ids, to write null into its column(s).
-        var readsValue = !isNullify && IsIndexedField(field);
-        var rows = await ReadIndexRowsAsync(connection, tableId, appId, readsValue ? new[] { field } : Array.Empty<AppField>(),
-            "WHERE t.IsDeleted = 0 ORDER BY t.Id OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY",
-            new { offset = Math.Max(0, (page - 1) * pageSize), pageSize }, ct);
-
-        foreach (var (publicId, values) in rows)
-        {
-            var documentValues = readsValue ? values : new Dictionary<long, object?> { [field.Fid.Value] = null };
-            result.Add(new PowerBase.Application.Common.Interfaces.SearchIndexDocument(tenantId, appId, tableId, publicId, documentValues));
-        }
-
-        return result;
     }
 }

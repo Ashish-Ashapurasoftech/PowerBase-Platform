@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Common.Models;
 using PowerBase.Application.Search;
 using PowerBase.Infrastructure.Persistence;
 using PowerBase.Infrastructure.Services;
@@ -107,6 +108,8 @@ public class SearchOutboxRelay : BackgroundService
         scope.ServiceProvider.GetRequiredService<IQueryContext>().SetTenantId(tenantId);
         var outbox = scope.ServiceProvider.GetRequiredService<ISearchOutbox>();
 
+        await RelayFieldJobsAsync(scope.ServiceProvider, tenantId, ct);
+
         var due = await outbox.ClaimDueAsync(
             _options.BatchSize, TimeSpan.FromSeconds(_options.GraceSeconds), TimeSpan.FromSeconds(_options.RetryAfterSeconds), _options.MaxAttempts, ct);
         if (due.Count == 0) return;
@@ -122,6 +125,30 @@ public class SearchOutboxRelay : BackgroundService
             // The attempt is already counted, so the same rows are not hammered; they are tried again after RetryAfterSeconds.
             _logger.LogError(ex, "Search outbox: could not re-publish {Count} change(s) for tenant {TenantId}.", messages.Count, tenantId);
             await outbox.RecordFailureAsync(due.Select(d => d.Id).ToList(), ex.Message, ct);
+        }
+    }
+
+    /// <summary>Re-sends field jobs whose progress stopped (a page was lost or dead-lettered), from where they stopped.</summary>
+    private async Task RelayFieldJobsAsync(IServiceProvider services, long tenantId, CancellationToken ct)
+    {
+        var jobs = services.GetService<ISearchFieldJobs>();
+        if (jobs == null) return;
+
+        var stalled = await jobs.ClaimStalledAsync(
+            _options.BatchSize, TimeSpan.FromMinutes(Math.Max(1, _options.FieldJobStalledMinutes)), _options.MaxAttempts, ct);
+        if (stalled.Count == 0) return;
+
+        var messages = stalled.Select(j => FieldSlotSync.Message(tenantId, j.AppId, j.TableId, j.FieldId, j.Action == IndexAction.NullifyField,
+            j.Slot != null ? new SlotRef(j.Slot, string.Empty, j.EndSlot) : null, j.AfterId, j.Id)).ToList();
+        try
+        {
+            await services.GetRequiredService<IMessagePublisher>().PublishBatchAsync(messages, ct);
+            _logger.LogWarning("Search field jobs: re-sent {Count} stalled job(s) of tenant {TenantId} from where they stopped.", messages.Count, tenantId);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // The attempt is counted and the jobs are taken again once they look stalled again.
+            _logger.LogError(ex, "Search field jobs: could not re-send {Count} stalled job(s) of tenant {TenantId}.", messages.Count, tenantId);
         }
     }
 
@@ -172,6 +199,14 @@ public class SearchOutboxRelay : BackgroundService
             {
                 var n = await outbox.ReleaseParkedAsync(_options.MaxAttempts, token);
                 Interlocked.Add(ref released, n);
+            }
+
+            // Field jobs that gave up get another round too (a report keeps reading their field from SQL until they finish).
+            if (scope.ServiceProvider.GetService<ISearchFieldJobs>() is { } fieldJobs)
+            {
+                var jobsReleased = await fieldJobs.ReleaseParkedAsync(_options.MaxAttempts, token);
+                if (jobsReleased > 0)
+                    _logger.LogWarning("Search field jobs daily check: tenant {TenantId} had {Count} job(s) that ran out of attempts; released for another round.", tenantId, jobsReleased);
             }
         }, ct);
 

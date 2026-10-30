@@ -31,8 +31,9 @@ public class SearchIndexerWorker : BackgroundService
     private readonly SearchPipelineState? _state;
     private DateTime _lastMissingQueueLogUtc = DateTime.MinValue;
 
-    /// <summary>How long a table's slot map is trusted. Slots themselves never move once stored, so this only bounds how
-    /// long a worker can miss a field that was just added or switched on.</summary>
+    /// <summary>How long a table's slot map is trusted. Slots themselves never move once stored, and a field that was just added or
+    /// switched on reloads the map as soon as a message or a database read names it, so this only bounds other metadata changes.
+    /// Field jobs and reindexes always read the map fresh.</summary>
     internal static readonly TimeSpan SlotMapTtl = TimeSpan.FromSeconds(15);
 
     /// <summary>How often one process re-requests the move of a table that is waiting to go to its own index.</summary>
@@ -188,31 +189,25 @@ public class SearchIndexerWorker : BackgroundService
     /// <summary>Which message(s) produced a document, so a document Azure rejects can be traced back to its message.</summary>
     private sealed record DocOwner(ServiceBusReceivedMessage Message, long TenantId, long TableId);
 
-    /// <summary>An upsert waiting for its values to be decided: the message's own payload (null if it carried none).</summary>
-    private sealed record PendingUpsert(ServiceBusReceivedMessage SbMessage, SearchIndexMessage Message, IReadOnlyDictionary<long, object?>? Payload);
+    /// <summary>An upsert waiting for its record to be read from the database.</summary>
+    private sealed record PendingUpsert(ServiceBusReceivedMessage SbMessage, SearchIndexMessage Message);
 
-    private static IReadOnlyDictionary<long, object?>? ParsePayload(SearchIndexMessage message)
+    /// <summary>Whether a record changed between two version reads: its version moved, or it appeared or vanished.</summary>
+    public static bool RowChanged(IReadOnlyDictionary<Guid, long> before, IReadOnlyDictionary<Guid, long> after, Guid id)
     {
-        if (message.Payload == null || message.Payload.Count == 0) return null;
-        return message.Payload.ToDictionary(
-            kvp => long.Parse(kvp.Key),
-            kvp =>
-            {
-                if (kvp.Value is JsonElement el)
-                {
-                    return el.ValueKind switch
-                    {
-                        JsonValueKind.String => el.GetString(),
-                        JsonValueKind.Number => el.TryGetInt64(out var l) ? l : el.TryGetDouble(out var d) ? (object)d : el.GetRawText(),
-                        JsonValueKind.True => true,
-                        JsonValueKind.False => false,
-                        JsonValueKind.Null => null,
-                        _ => el.GetRawText()
-                    };
-                }
-                return kvp.Value;
-            });
+        var hadBefore = before.TryGetValue(id, out var b);
+        var hasAfter = after.TryGetValue(id, out var a);
+        return hadBefore != hasAfter || (hasAfter && a != b);
     }
+
+    /// <summary>One page of a paging job, by record id. A message queued before paging by id existed carries only a page number: it is
+    /// read by position once, and its follow-up continues by id.</summary>
+    private static Task<(IReadOnlyList<SearchIndexDocument> Documents, long LastId)> ReadPageAsync(
+        IRecordRepository recordRepo, SearchIndexMessage message, CancellationToken ct) =>
+        message.AfterId is long afterId
+            ? recordRepo.GetTableIndexPageAsync(message.TenantId, message.TableId, afterId, SearchWideMigration.PageSize, ct)
+            : recordRepo.GetTableIndexPageAsync(message.TenantId, message.TableId, 0, SearchWideMigration.PageSize, ct,
+                skip: (Math.Max(1, message.Page) - 1) * SearchWideMigration.PageSize);
 
     private async Task ProcessMessageBatchAsync(IReadOnlyList<ServiceBusReceivedMessage> messages, CancellationToken stoppingToken)
     {
@@ -235,6 +230,10 @@ public class SearchIndexerWorker : BackgroundService
         // reindex must not be started before the previous page is searchable, and a failed message will produce its own again.
         var continuations = new List<(ServiceBusReceivedMessage Owner, SearchIndexMessage Next)>();
         var finalizations = new List<(ServiceBusReceivedMessage Owner, long TenantId, long TableId)>();
+        var slotReleases = new List<(ServiceBusReceivedMessage Owner, long TenantId, long TableId, long Fid, string Slot)>();
+        var versionChecks = new List<(long TenantId, long TableId, long AppId, IReadOnlyDictionary<Guid, long> Before, List<PendingUpsert> Upserts)>();
+        // Pages of recorded field jobs: the job moves from FromAfterId to the next page's start (Next), or ends (Next null).
+        var jobSteps = new List<(ServiceBusReceivedMessage Owner, long TenantId, long JobId, long FromAfterId, SearchIndexMessage? Next)>();
         // Changes this batch settles, to be confirmed to the outbox once the index really holds them.
         var pendingAcks = new List<(long TenantId, long TableId, SearchOutboxAck Ack, ServiceBusReceivedMessage Owner)>();
 
@@ -281,8 +280,8 @@ public class SearchIndexerWorker : BackgroundService
 
                 if (message.Action == IndexAction.Upsert)
                 {
-                    // Decided below, per table, once it is known whether this payload can be trusted.
-                    upserts.Add(new PendingUpsert(sbMessage, message, ParsePayload(message)));
+                    // Read below, per table, in one query.
+                    upserts.Add(new PendingUpsert(sbMessage, message));
                 }
                 else if (message.Action == IndexAction.Delete)
                 {
@@ -291,6 +290,9 @@ public class SearchIndexerWorker : BackgroundService
                 }
                 else if (message.Action == IndexAction.BackfillField || message.Action == IndexAction.NullifyField)
                 {
+                    // One page of a field change: every record of the page is rewritten in full (all indexed values, the free-text
+                    // field rebuilt), with the column(s) the field no longer uses emptied. Rewriting the whole record is what removes
+                    // a switched-off or deleted field's text from quick search, and what writes a reused column for every record.
                     using var scope = _serviceProvider.CreateScope();
                     var queryContext = scope.ServiceProvider.GetRequiredService<IQueryContext>();
                     queryContext.SetTenantId(message.TenantId);
@@ -300,35 +302,33 @@ public class SearchIndexerWorker : BackgroundService
                     if (message.FieldId.HasValue)
                     {
                         var fid = message.FieldId.Value;
-                        var docs = await recordRepo.GetFieldBackfillBatchAsync(message.TenantId, message.AppId, message.TableId, fid, isNullify, message.Page, 500, stoppingToken);
-                        if (docs.Count > 0)
+                        // Never a cached copy: a field that was switched on a moment ago must find the column it was just given.
+                        var info = await GetTableSlotInfoAsync(message.TenantId, message.TableId, [], true, stoppingToken);
+                        // A deleted field, or the old column of a converted one, is named by the message: the table no longer tells it.
+                        var clearSlot = message.Slot != null ? new SlotRef(message.Slot, string.Empty, message.EndSlot) : null;
+                        var plan = new FieldSlotSync.Plan(info, (int)fid, isNullify, clearSlot);
+                        SearchIndexMessage? next = null;
+                        if (plan.HasTarget)
                         {
-                            var info = await GetTableSlotInfoAsync(message.TenantId, message.TableId, [fid], false, stoppingToken);
-                            // A deleted field is no longer in the table, so the message names the columns it used.
-                            var explicitClear = isNullify && message.Slot != null;
-                            foreach (var d in docs)
-                                foreach (var doc in (explicitClear
-                                                 ? SearchIndexDocumentBuilder.BuildExplicitClear(info, d, fid, message.Slot!, message.EndSlot)
-                                                 : SearchIndexDocumentBuilder.BuildFieldChange(info, d.TenantId, d.AppId, d.TableId, d.PublicId, d.Values, fid, isNullify))
-                                             .Where(x => x.SlotValues is { Count: > 0 }))
-                                    AddDocument(sbMessage, doc);
+                            var (docs, lastId) = await ReadPageAsync(recordRepo, message, stoppingToken);
+                            foreach (var doc in FieldSlotSync.ToDocuments(docs, plan))
+                                AddDocument(sbMessage, doc);
 
                             // The next page, queued once this one is indexed
-                            if (docs.Count == 500)
-                            {
-                                continuations.Add((sbMessage, new SearchIndexMessage
-                                {
-                                    Action = message.Action,
-                                    TenantId = message.TenantId,
-                                    AppId = message.AppId,
-                                    TableId = message.TableId,
-                                    FieldId = message.FieldId,
-                                    Page = message.Page + 1,
-                                    Slot = message.Slot,
-                                    EndSlot = message.EndSlot
-                                }));
-                            }
+                            if (docs.Count >= SearchWideMigration.PageSize)
+                                next = FieldSlotSync.Message(message.TenantId, message.AppId, message.TableId, fid, isNullify, clearSlot, lastId, message.JobId);
+                            // The last page of emptying a column: once it is in the index no document holds the old values any more,
+                            // so a deleted field's column can go back to the pool (a live field's old column already has).
+                            else if (isNullify && clearSlot != null)
+                                slotReleases.Add((sbMessage, message.TenantId, message.TableId, fid, clearSlot.Slot));
                         }
+
+                        // A recorded job moves forward (or ends) only once this page is in the index; with no column left to write
+                        // it simply ends.
+                        if (message.JobId is long jobId)
+                            jobSteps.Add((sbMessage, message.TenantId, jobId, message.AfterId ?? 0, next));
+                        else if (next != null)
+                            continuations.Add((sbMessage, next));
                     }
                 }
                 else if (message.Action == IndexAction.ReindexTable)
@@ -340,14 +340,13 @@ public class SearchIndexerWorker : BackgroundService
                     var recordRepo = scope.ServiceProvider.GetRequiredService<IRecordRepository>();
 
                     var info = await GetTableSlotInfoAsync(message.TenantId, message.TableId, [], true, stoppingToken);
-                    var page = Math.Max(1, message.Page);
-                    var docs = await recordRepo.GetTableIndexBatchAsync(message.TenantId, message.TableId, page, SearchWideMigration.PageSize, stoppingToken);
+                    var (docs, lastId) = await ReadPageAsync(recordRepo, message, stoppingToken);
                     foreach (var d in docs)
-                        foreach (var doc in SearchIndexDocumentBuilder.Build(info, d.TenantId, d.AppId, d.TableId, d.PublicId, d.Values, null))
+                        foreach (var doc in SearchIndexDocumentBuilder.Build(info, d.TenantId, d.AppId, d.TableId, d.PublicId, d.Values, null, complete: true))
                             AddDocument(sbMessage, doc);
 
                     if (docs.Count >= SearchWideMigration.PageSize)
-                        continuations.Add((sbMessage, SearchWideMigration.Message(message.TenantId, message.AppId, message.TableId, page + 1)));
+                        continuations.Add((sbMessage, SearchWideMigration.Message(message.TenantId, message.AppId, message.TableId, Math.Max(1, message.Page) + 1, lastId)));
                     else
                         finalizations.Add((sbMessage, message.TenantId, message.TableId));
                 }
@@ -360,67 +359,53 @@ public class SearchIndexerWorker : BackgroundService
             }
         }
 
-        // ---- upserts: decide, per table, where each record's values come from.
+        // ---- upserts: every record is read from the database, the source of truth. A message carries ids only and is sent after its
+        // write commits, so the read always sees the change (or a newer one: an old or replayed message can never write old values). The
+        // read holds every indexed field, so the free-text field (quick search) is rebuilt from ALL of the record's searchable text, and
+        // it brings the system fields (Date Modified, Record ID#...), which the database sets.
         foreach (var group in upserts.GroupBy(u => (u.Message.TenantId, u.Message.TableId)))
         {
             var groupMessages = group.Select(u => u.SbMessage).ToList();
             try
             {
                 var (tenantId, tableId) = group.Key;
-                var info = await GetTableSlotInfoAsync(tenantId, tableId, group.Where(u => u.Payload != null).SelectMany(u => u.Payload!.Keys), false, stoppingToken);
+                var info = await GetTableSlotInfoAsync(tenantId, tableId, [], false, stoppingToken);
 
-                // What the index already holds, for first deliveries only: a redelivery is read from the database regardless.
-                IReadOnlyDictionary<Guid, long> indexed = new Dictionary<Guid, long>();
-                if (group.Any(u => u.Payload != null && u.SbMessage.DeliveryCount <= 1))
-                    indexed = await searchService.GetSourceVersionsAsync(tenantId, tableId, info.TargetIndex,
-                        group.Select(u => u.Message.RecordPublicId).Distinct().ToList(), stoppingToken);
-
-                // A payload is a snapshot taken at commit time. It is used only when nothing suggests it is out of date; otherwise the
-                // record's current values are read from the database (the source of truth), so an old or replayed message can never
-                // write old values over newer ones.
-                var authoritative = new HashSet<Guid>();
-                foreach (var u in group)
+                IReadOnlyDictionary<Guid, IReadOnlyDictionary<long, object?>> current;
+                var recordIds = group.Select(u => u.Message.RecordPublicId).Distinct().ToList();
+                using (var scope = _serviceProvider.CreateScope())
                 {
-                    long? indexedVersion = indexed.TryGetValue(u.Message.RecordPublicId, out var iv) ? iv : null;
-                    if (SearchIndexDocumentBuilder.NeedsAuthoritativeRead(u.Payload != null, u.SbMessage.DeliveryCount, u.Message.Version, indexedVersion))
-                        authoritative.Add(u.Message.RecordPublicId);
-                }
-
-                IReadOnlyDictionary<Guid, IReadOnlyDictionary<long, object?>> current = new Dictionary<Guid, IReadOnlyDictionary<long, object?>>();
-                if (authoritative.Count > 0)
-                {
-                    using var scope = _serviceProvider.CreateScope();
                     scope.ServiceProvider.GetRequiredService<IQueryContext>().SetTenantId(tenantId);
                     var recordRepo = scope.ServiceProvider.GetRequiredService<IRecordRepository>();
-                    current = await recordRepo.GetSearchableFieldsBatchAsync(tableId, authoritative.ToList(), stoppingToken);
+                    // Each record's version BEFORE its values are read: if it differs once the documents are written, the record changed
+                    // meanwhile, and another worker may have written the newer state before this one wrote the older (see below).
+                    versionChecks.Add((tenantId, tableId, group.First().Message.AppId,
+                        await recordRepo.GetRowVersionsAsync(tableId, recordIds, stoppingToken), group.ToList()));
+                    current = await recordRepo.GetSearchableFieldsBatchAsync(tableId, recordIds, stoppingToken);
                 }
+
+                // The read lists the fields that are indexed now. One the cached map does not know as eligible was switched on since it
+                // was loaded: reload, or its value would be dropped (and the change confirmed to the outbox without it).
+                if (current.Values.Any(v => v.Keys.Any(fid => !info.EligibleFids.Contains(fid))))
+                    info = await GetTableSlotInfoAsync(tenantId, tableId, [], true, stoppingToken);
 
                 var built = new List<SearchIndexDocument>();
                 foreach (var u in group.OrderBy(u => u.Message.Version))
                 {
                     var id = u.Message.RecordPublicId;
-                    IReadOnlyDictionary<long, object?>? data;
-                    if (authoritative.Contains(id))
+                    if (!current.TryGetValue(id, out var row))
                     {
-                        if (!current.TryGetValue(id, out data))
-                        {
-                            // Gone from the database (deleted): gone from the index too.
-                            recordsToDelete.Add((tenantId, tableId, id));
-                            pendingAcks.Add((tenantId, tableId, new SearchOutboxAck(id, u.Message.Version, true, true), u.SbMessage));
-                            continue;
-                        }
+                        // Gone from the database (deleted): gone from the index too.
+                        recordsToDelete.Add((tenantId, tableId, id));
+                        pendingAcks.Add((tenantId, tableId, new SearchOutboxAck(id, u.Message.Version, true, true), u.SbMessage));
+                        continue;
                     }
-                    else
-                    {
-                        data = u.Payload!;
-                    }
-                    // The outbox row is confirmed when the record is in the index as of this message: everything up to it when the values were
-                    // read from the database, only this very change when they came from a payload (which holds just the fields it touched).
-                    pendingAcks.Add((tenantId, tableId, new SearchOutboxAck(id, u.Message.Version, authoritative.Contains(id), false), u.SbMessage));
-                    if (data.Count == 0) continue; // nothing of this record is indexed
+                    // The record is in the index as of the read, which came after this change committed: every outbox row of the record
+                    // up to this message is confirmed.
+                    pendingAcks.Add((tenantId, tableId, new SearchOutboxAck(id, u.Message.Version, true, false), u.SbMessage));
+                    if (row.Count == 0) continue; // nothing of this record is indexed
 
-                    var version = Math.Max(u.Message.Version, indexed.TryGetValue(id, out var known) ? known : 0);
-                    foreach (var doc in SearchIndexDocumentBuilder.Build(info, tenantId, u.Message.AppId, tableId, id, data, version))
+                    foreach (var doc in SearchIndexDocumentBuilder.Build(info, tenantId, u.Message.AppId, tableId, id, row, u.Message.Version, complete: true))
                     {
                         built.Add(doc);
                         Track(u.SbMessage, doc);
@@ -494,7 +479,53 @@ public class SearchIndexerWorker : BackgroundService
                         settledGroup.Count(), settledGroup.Key.TableId);
                 }
             }
+
+            // A record that changed between its read and now: another worker (or the priority queue) may have written its newer state
+            // first and this batch the older one over it. It is queued once more (outbox row first, so the relay covers a failed send),
+            // and that read is the latest state. A record that did not change is in the index as it is now, whatever the order of writes.
+            foreach (var check in versionChecks)
+            {
+                var written = check.Upserts.Where(u => messagesToComplete.Contains(u.SbMessage)).Select(u => u.Message.RecordPublicId).Distinct().ToList();
+                if (written.Count == 0) continue;
+                try
+                {
+                    using var scope = _serviceProvider.CreateScope();
+                    scope.ServiceProvider.GetRequiredService<IQueryContext>().SetTenantId(check.TenantId);
+                    var after = await scope.ServiceProvider.GetRequiredService<IRecordRepository>().GetRowVersionsAsync(check.TableId, written, stoppingToken);
+                    var changed = written.Where(id => RowChanged(check.Before, after, id)).ToList();
+                    if (changed.Count == 0) continue;
+
+                    var again = changed.Select(id => new SearchIndexMessage
+                    {
+                        Action = IndexAction.Upsert, TenantId = check.TenantId, AppId = check.AppId, TableId = check.TableId, RecordPublicId = id
+                    }).ToList();
+                    await scope.ServiceProvider.GetRequiredService<ISearchOutbox>().AddAsync(again, null, stoppingToken);
+                    await scope.ServiceProvider.GetRequiredService<IMessagePublisher>().PublishBatchAsync(again, stoppingToken);
+                    _logger.LogInformation("{Count} record(s) of table {TableId} changed while being indexed; queued again so the index ends on their latest state.",
+                        changed.Count, check.TableId);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Not fatal: the change that moved the version has its own message, and its outbox row stays until it is indexed.
+                    _logger.LogWarning(ex, "Could not re-check the versions of {Count} indexed record(s) of table {TableId}.", written.Count, check.TableId);
+                }
+            }
             _state?.MarkBatch(GetType().Name, Math.Max(0, documentsToIndex.Count - failedKeys.Count), failedKeys.Count);
+
+            // Recorded field jobs: compare-and-set from the page's start, so a job the relay re-sent and its original never both carry on
+            // (the run that loses stops here). A failure throws out to the batch retry; if the job moved but its next page was not sent,
+            // the relay re-sends it from there once its progress has stopped.
+            foreach (var (owner, tenantId, jobId, fromAfterId, next) in jobSteps)
+            {
+                if (!messagesToComplete.Contains(owner)) continue;
+                using var scope = _serviceProvider.CreateScope();
+                scope.ServiceProvider.GetRequiredService<IQueryContext>().SetTenantId(tenantId);
+                var jobs = scope.ServiceProvider.GetRequiredService<ISearchFieldJobs>();
+                if (next == null)
+                    await jobs.CompleteAsync(jobId, fromAfterId, stoppingToken);
+                else if (await jobs.AdvanceAsync(jobId, fromAfterId, next.AfterId!.Value, stoppingToken))
+                    await scope.ServiceProvider.GetRequiredService<IMessagePublisher>().PublishAsync(next, stoppingToken);
+            }
 
             // Follow-up work for the messages that made it: the next page, and the end of a table move.
             foreach (var (owner, next) in continuations)
@@ -513,6 +544,25 @@ public class SearchIndexerWorker : BackgroundService
                 {
                     _tableSlotCache.TryRemove((tenantId, tableId), out _);
                     _logger.LogInformation("Table {TableId} (tenant {TenantId}) was moved to its own search index {Index}.", tableId, tenantId, SearchSlotResolver.GetTableIndexName(tableId));
+                }
+            }
+            foreach (var (owner, tenantId, tableId, fid, slot) in slotReleases)
+            {
+                if (!messagesToComplete.Contains(owner)) continue;
+                try
+                {
+                    using var scope = _serviceProvider.CreateScope();
+                    scope.ServiceProvider.GetRequiredService<IQueryContext>().SetTenantId(tenantId);
+                    if (await scope.ServiceProvider.GetRequiredService<IAppFieldRepository>().ReleaseDeletedFieldSlotAsync(tableId, fid, slot, stoppingToken) > 0)
+                    {
+                        _tableSlotCache.TryRemove((tenantId, tableId), out _);
+                        _logger.LogInformation("Search column {Slot} of deleted field {Fid} (table {TableId}, tenant {TenantId}) is empty in every document and was freed.", slot, fid, tableId, tenantId);
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Not fatal: the column simply stays reserved, as it was before.
+                    _logger.LogWarning(ex, "Could not free search column {Slot} of deleted field {Fid} in table {TableId}.", slot, fid, tableId);
                 }
             }
 

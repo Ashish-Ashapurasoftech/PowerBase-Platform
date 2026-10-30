@@ -74,8 +74,38 @@ public class RunReportQueryHandler
 
     // GAP #2: Max records returned from Azure AI Search to prevent SQL parameter explosion.
     // Azure AI Search returns GUIDs; injecting >2000 into SQL causes severe performance and
-    // parameter-limit issues. Capped here; UI shows a warning when results are truncated.
+    // parameter-limit issues. A search with more matches than this is answered in SQL instead,
+    // never cut to the first ones.
     private const int AiSearchMaxResults = 2000;
+
+    /// <summary>At most this many records the index has not caught up with are re-checked in SQL next to the index's answer; with
+    /// more, the whole question goes to SQL. While some are re-checked, the index hands over fewer ids (the SQL parameter budget above
+    /// is shared with them and with the re-checked condition).</summary>
+    private const int IndexLagRecheckLimit = 100;
+
+    /// <summary>Azure AI Search makes an indexed document findable shortly after the write is accepted (near-real-time refresh), so a
+    /// record changed within this long is re-checked too, even once the outbox says the index has it.</summary>
+    private static readonly TimeSpan IndexVisibilityDelay = TimeSpan.FromSeconds(5);
+
+    private readonly ISearchOutbox? _searchOutbox;
+
+    /// <summary>How far the search index is behind one table, worked out once per run. <see cref="PendingIds"/>: the records (row ids)
+    /// whose latest change the index may not show yet. <see cref="TooFarBehind"/>: more of them than can be re-checked, or no way to
+    /// tell which, so nothing should be asked of the index.</summary>
+    /// <see cref="FieldsBeingRewritten"/>: fields a field job is still writing into the index (switched on, converted, or the current
+    /// owner of a column being emptied); the index answers for them only once the job is done. Any running job also rewrites the
+    /// free-text field of the records it passes, so quick search waits for it too.
+    private sealed record IndexLag(bool TooFarBehind, IReadOnlyCollection<long> PendingIds, IReadOnlySet<long>? FieldsBeingRewritten = null)
+    {
+        public static readonly IndexLag CaughtUp = new(false, Array.Empty<long>());
+        public static readonly IndexLag Unknown = new(true, Array.Empty<long>());
+        public bool TextBeingRewritten => FieldsBeingRewritten is { Count: > 0 };
+        public bool Any => TooFarBehind || PendingIds.Count > 0 || TextBeingRewritten;
+        public bool Rewrites(FilterGroup? tree) =>
+            FieldsBeingRewritten is { Count: > 0 } && Relationships.SummaryEncryptionGuard.ConditionFieldIds(tree).Any(FieldsBeingRewritten.Contains);
+    }
+
+    private readonly ISearchFieldJobs? _searchFieldJobs;
 
     public RunReportQueryHandler(
         IReportRepository reportRepo,
@@ -90,8 +120,12 @@ public class RunReportQueryHandler
         IAppUserRepository appUserRepo,
         IQueryContext queryContext,
         ILogger<RunReportQueryHandler> logger,
-        IAppRepository? appRepo = null)
+        IAppRepository? appRepo = null,
+        ISearchOutbox? searchOutbox = null,
+        ISearchFieldJobs? searchFieldJobs = null)
     {
+        _searchOutbox = searchOutbox;
+        _searchFieldJobs = searchFieldJobs;
         _reportRepo = reportRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -501,34 +535,98 @@ public class RunReportQueryHandler
         // or user filters / quick search, execute the paging and sorting directly in Azure AI Search.
         // Security requirement: Role ViewFilter must be fully expressible in AI Search, and RestrictToCreatedBy must not be present
         // (CreatedBy is not indexed in AI Search; queries with RestrictToCreatedBy execute via SQL).
+        // The index answers a quick search from the free-text field of every searchable field: an exact match, or a search limited to
+        // some fields (a dashboard Search widget), is a different question that only SQL answers.
+        var quickSearchFitsIndex = string.IsNullOrWhiteSpace(quickSearch)
+            || (!quickSearchExact && quickSearchFieldIds is not { Count: > 0 });
+
+        // Field-level permissions: a quick search may only match in fields this role can see (a match in a hidden field would tell what it
+        // holds). The index's free-text field holds every Searchable field, so for a role that cannot see one of them the index alone
+        // cannot tell where a record matched: its matches are re-checked in SQL against the visible fields, and it never pages the report.
+        var visibleKeys = (access.Unrestricted ? allFields : access.VisibleFields).Select(f => f.Fid.HasValue ? (long)f.Fid.Value : f.Id).ToHashSet();
+        var roleHidesSearchableText = allFields.Any(f => f.IsSearchable && !visibleKeys.Contains(f.Fid.HasValue ? (long)f.Fid.Value : f.Id));
+
         var shouldTryFastAiPaging = _searchService.IsGridSearchEnabled
             && hasSearchableFields
             && canExpressEffectiveFilter
             && canSortInSearch
+            && quickSearchFitsIndex
+            && (string.IsNullOrWhiteSpace(quickSearch) || !roleHidesSearchableText)
             && !access.RestrictToCreatedBy.HasValue
             && !FormulaFilterSorter.TreeContainsFormulaField(effectiveFilterTree, computedFids)
             && (totalCols.Count == 0 || totalsExpressibleInSql)
             && (effectiveFilterTree != null || !string.IsNullOrWhiteSpace(quickSearch) || hasFormulaSorts || hasFormulaFilters || isAppEncrypted);
 
         // Issue 2: Newly created rows indexing latency check.
-        // If there were records inserted/updated in the last 15 seconds in the database for this table,
-        // search indexing may still be catching up. Fall back to standard SQL pipeline to guarantee
-        // newly created child rows are immediately visible.
-        if (shouldTryFastAiPaging)
+        // Which records the index may not show yet: every change whose outbox row the indexer has not confirmed (written in the same
+        // transaction as the change, removed once the record is indexed, so this holds however far behind the indexer is), plus the
+        // records changed within the index's refresh delay. Asked once, and used by every place below that would ask the index (the
+        // fast path, the quick search and the filter pre-search alike). Without an outbox to ask, any change in the last 15 seconds
+        // sends the whole question to SQL, as before.
+        IndexLag? indexLag = null;
+        async Task<IndexLag> IndexLagAsync()
+        {
+            if (indexLag != null) return indexLag;
+            var lag = await RecordLagAsync();
+            var rewriting = await FieldsBeingRewrittenAsync();
+            return indexLag = rewriting.Count == 0 ? lag : lag with { FieldsBeingRewritten = rewriting };
+        }
+
+        async Task<IndexLag> RecordLagAsync()
         {
             try
             {
-                var recentChanged = await _recordRepo.ListRecordsChangedSinceAsync(
-                    table, DateTime.UtcNow.AddSeconds(-15), 0, long.MaxValue, 1, ct);
-                if (recentChanged.Count > 0)
+                var pending = _searchOutbox == null ? null : await _searchOutbox.ListPendingRecordsAsync(table.Id, IndexLagRecheckLimit, ct);
+                if (pending == null)
                 {
-                    shouldTryFastAiPaging = false;
+                    var recentChanged = await _recordRepo.ListRecordsChangedSinceAsync(
+                        table, DateTime.UtcNow.AddSeconds(-15), 0, long.MaxValue, 1, ct);
+                    return recentChanged.Count > 0 ? IndexLag.Unknown : IndexLag.CaughtUp;
                 }
+
+                var justIndexed = await _recordRepo.ListRecordsChangedSinceAsync(
+                    table, DateTime.UtcNow - IndexVisibilityDelay, 0, long.MaxValue, IndexLagRecheckLimit + 1, ct);
+                if (pending.Count > IndexLagRecheckLimit || justIndexed.Count > IndexLagRecheckLimit)
+                    return IndexLag.Unknown;
+
+                var ids = justIndexed.Select(r => r.Id).ToHashSet();
+                if (pending.Count > 0) ids.UnionWith(await _recordRepo.GetIdsByPublicIdsAsync(table, pending, ct));
+                return ids.Count > IndexLagRecheckLimit ? IndexLag.Unknown : new IndexLag(false, ids);
             }
-            catch
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // Proceed if recent check is unavailable
+                _logger.LogWarning(ex, "[RunReport] Could not tell how far the search index is behind table {TableId}; using it as is.", table.Id);
+                return IndexLag.CaughtUp;
             }
+        }
+
+        // The fields a running field job is still writing into the index: the job's own field, and whoever owns a column it is emptying now.
+        async Task<IReadOnlySet<long>> FieldsBeingRewrittenAsync()
+        {
+            if (_searchFieldJobs == null) return new HashSet<long>();
+            try
+            {
+                var jobs = await _searchFieldJobs.ListForTableAsync(table.Id, ct);
+                var fids = jobs.Select(j => j.FieldId).ToHashSet();
+                foreach (var job in jobs.Where(j => !string.IsNullOrEmpty(j.Slot)))
+                    foreach (var owner in allFields.Where(f => f.Fid.HasValue
+                                 && (string.Equals(f.SearchSlot, job.Slot, StringComparison.OrdinalIgnoreCase)
+                                     || string.Equals(f.SearchSlotEnd, job.Slot, StringComparison.OrdinalIgnoreCase))))
+                        fids.Add(owner.Fid!.Value);
+                return fids;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "[RunReport] Could not list the search field jobs of table {TableId}; using the index as is.", table.Id);
+                return new HashSet<long>();
+            }
+        }
+
+        // The fast path pages and sorts in the index itself, so it can't take a SQL re-check of the records the index is behind on.
+        if (shouldTryFastAiPaging && (await IndexLagAsync()).Any)
+        {
+            shouldTryFastAiPaging = false;
         }
 
         if (shouldTryFastAiPaging && await _searchService.IsHealthyAsync(ct))
@@ -606,37 +704,100 @@ public class RunReportQueryHandler
         // Apply Quick Search across searchable text fields (OR) — restricted to
         // quickSearchFieldIds when given (a caller-specified subset, e.g. a dashboard Search
         // widget scoped to "Selected fields"), otherwise every IsSearchable text-ish field.
+        // Whether the index may be asked a question whose answer is then completed in SQL: not when it is too far behind this table,
+        // and, while it is behind on some records, only if SQL can re-check those records with <paramref name="recheck"/> (the same
+        // condition, with nothing in it that has to be worked out in memory).
+        async Task<bool> CanAskIndexAsync(FilterGroup? recheck)
+        {
+            var lag = await IndexLagAsync();
+            if (lag.TooFarBehind) return false;
+            return lag.PendingIds.Count == 0 || (recheck != null && !FormulaFilterSorter.TreeContainsFormulaField(recheck, formulaFids));
+        }
+
+        // How many ids the index may hand over: fewer while some records are re-checked, which share the SQL parameter budget.
+        int IndexHandOverLimit(IndexLag lag) => lag.PendingIds.Count > 0 ? AiSearchMaxResults - 2 * IndexLagRecheckLimit : AiSearchMaxResults;
+
         if (!string.IsNullOrWhiteSpace(quickSearch))
         {
             var hasSearchable = allFields.Any(f => f.IsSearchable);
 
-            var useAiSearch = _searchService.IsGridSearchEnabled && hasSearchable && await _searchService.IsHealthyAsync(ct);
+            // The quick search as SQL asks it: the same fields the index searches (the Searchable ones, when the table has any), or the
+            // caller's chosen fields, and only those this role can see. Used when the index is not, to re-check the records the index has
+            // not caught up with, and to re-check the index's matches for a role that cannot see every Searchable field. A yes/no or
+            // time-of-day field has no text either searches ("1" used to match every ticked box).
+            var textFields = allFields
+                .Where(f => (quickSearchFieldIds is { Count: > 0 } || !hasSearchable || f.IsSearchable) &&
+                            visibleKeys.Contains(f.Fid.HasValue ? (long)f.Fid.Value : f.Id) &&
+                            !f.IsHidden && !PhysicalNaming.IsComputedTypeCode(f.TypeCode) &&
+                            !f.TypeCode.Equals("Boolean", StringComparison.OrdinalIgnoreCase) &&
+                            !f.TypeCode.Equals("Time", StringComparison.OrdinalIgnoreCase) &&
+                            !f.TypeCode.Equals("File", StringComparison.OrdinalIgnoreCase) &&
+                            !f.TypeCode.Equals("Attachment", StringComparison.OrdinalIgnoreCase) &&
+                            !f.TypeCode.Equals("Signature", StringComparison.OrdinalIgnoreCase) &&
+                            !f.TypeCode.Equals("DateRange", StringComparison.OrdinalIgnoreCase) &&
+                            !f.TypeCode.Equals("NumericRange", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (quickSearchFieldIds is { Count: > 0 })
+            {
+                var allowed = quickSearchFieldIds.ToHashSet();
+                textFields = textFields.Where(f => allowed.Contains(f.Fid.HasValue ? (long)f.Fid.Value : f.Id)).ToList();
+            }
+            var searchOperator = quickSearchExact ? "eq" : "contains";
+            FilterGroup? qsGroup = textFields.Count == 0 ? null : new FilterGroup
+            {
+                Logic = "or",
+                Nodes = textFields.Select(f => new FilterNode
+                {
+                    Condition = new FilterCondition { FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id, Operator = searchOperator, Value = quickSearch }
+                }).ToList()
+            };
+
+            // No field this role can see is searched: nothing can match (the search is not dropped, which would list every record).
+            if (qsGroup == null)
+                return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns };
+
+            // Not while the index is too far behind this table (it would miss records it does not hold yet), nor for a question the
+            // index cannot answer the same way SQL does (exact match, chosen fields).
+            var useAiSearch = _searchService.IsGridSearchEnabled && hasSearchable && quickSearchFitsIndex
+                && await CanAskIndexAsync(qsGroup) && !(await IndexLagAsync()).TextBeingRewritten && await _searchService.IsHealthyAsync(ct);
             var aiSearchSucceeded = false;
 
             if (useAiSearch)
             {
                 try
                 {
+                    var lag = await IndexLagAsync();
+                    var handOver = IndexHandOverLimit(lag);
                     var targetIndex = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(allFields)
                         ? PowerBase.Application.Search.SearchSlotResolver.GetTableIndexName(table.Id)
                         : null;
-                    var aiMatches = targetIndex != null
-                        ? await _searchService.SearchRecordsAsync(_queryContext.TenantId, table.Id, quickSearch, targetIndex, ct)
-                        : await _searchService.SearchRecordsAsync(_queryContext.TenantId, table.Id, quickSearch, ct);
-                    if (aiMatches.Count > 0)
+                    var (aiMatches, aiTotal) = await _searchService.SearchRecordsPagedAsync(
+                        _queryContext.TenantId, table.Id, quickSearch, null, 1, handOver, null, targetIndex, ct);
+                    if (aiTotal > aiMatches.Count)
                     {
-                        var cappedMatches = aiMatches.Count > AiSearchMaxResults
-                            ? aiMatches.Take(AiSearchMaxResults).ToList()
-                            : aiMatches;
-
-                        // GAP #2: Use direct chunked IN query instead of OR FilterGroup nodes.
-                        userFilterTree = await BuildAiIdFilterAsync(table, cappedMatches, userFilterTree, ct);
-                        aiSearchSucceeded = true;
+                        // More matches than one ID list can carry: using only the first ones would cut the report (and its count and
+                        // totals) short without saying so. SQL below finds every match instead.
+                        _logger.LogInformation("[QuickSearch] {Total} matches in table {TableId} exceed the {Max} the index hands over; searching in SQL.",
+                            aiTotal, table.Id, handOver);
+                    }
+                    else if (aiMatches.Count == 0 && lag.PendingIds.Count == 0)
+                    {
+                        // Quick search matched nothing, and the index has every change of this table: this is the answer.
+                        return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns };
                     }
                     else
                     {
-                        // Quick search matched nothing.
-                        return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns };
+                        // GAP #2: Use direct chunked IN query instead of OR FilterGroup nodes. The records the index is behind on are
+                        // decided by SQL instead, whatever the index said about them. For a role that cannot see every Searchable field,
+                        // every match must also match in a field it can see (the index may have matched it in a hidden one).
+                        var matchBase = roleHidesSearchableText
+                            ? (userFilterTree == null
+                                ? qsGroup
+                                : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = userFilterTree }, new FilterNode { Group = qsGroup }] })
+                            : userFilterTree;
+                        userFilterTree = await BuildAiIdFilterAsync(table, aiMatches, matchBase, ct,
+                            lag.PendingIds.Count > 0 ? (lag.PendingIds, qsGroup) : null);
+                        aiSearchSucceeded = true;
                     }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -645,35 +806,12 @@ public class RunReportQueryHandler
                 }
             }
 
-
+            // Standard SQL LIKE fallback (used when AI Search is disabled, unhealthy, too far behind, or has more matches than it hands over).
             if (!aiSearchSucceeded)
             {
-                // Standard SQL LIKE fallback (used when AI Search is disabled, unhealthy, or returns 0 matches).
-                var textFields = allFields
-                    .Where(f => !f.IsHidden && !PhysicalNaming.IsComputedTypeCode(f.TypeCode) &&
-                                !f.TypeCode.Equals("File", StringComparison.OrdinalIgnoreCase) &&
-                                !f.TypeCode.Equals("Attachment", StringComparison.OrdinalIgnoreCase) &&
-                                !f.TypeCode.Equals("Signature", StringComparison.OrdinalIgnoreCase) &&
-                                !f.TypeCode.Equals("DateRange", StringComparison.OrdinalIgnoreCase) &&
-                                !f.TypeCode.Equals("NumericRange", StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-                if (quickSearchFieldIds is { Count: > 0 })
-                {
-                    var allowed = quickSearchFieldIds.ToHashSet();
-                    textFields = textFields.Where(f => allowed.Contains(f.Fid.HasValue ? (long)f.Fid.Value : f.Id)).ToList();
-                }
-                if (textFields.Count > 0)
-                {
-                    var searchOperator = quickSearchExact ? "eq" : "contains";
-                    var qsNodes = textFields.Select(f => new FilterNode
-                    {
-                        Condition = new FilterCondition { FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id, Operator = searchOperator, Value = quickSearch }
-                    }).ToList();
-                    var qsGroup = new FilterGroup { Logic = "or", Nodes = qsNodes };
-                    userFilterTree = userFilterTree == null
-                        ? qsGroup
-                        : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = userFilterTree }, new FilterNode { Group = qsGroup }] };
-                }
+                userFilterTree = userFilterTree == null
+                    ? qsGroup
+                    : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = userFilterTree }, new FilterNode { Group = qsGroup }] };
             }
         }
 
@@ -683,32 +821,43 @@ public class RunReportQueryHandler
         // A computed field (Formula / Lookup / Summary) has no stored value, so the search index holds nothing for
         // it: routing a condition on one through AI Search matches no record at all. Such a tree runs through the
         // SQL + in-memory path below instead, which evaluates the formula.
+        // Not while the index is too far behind this table: it would leave out records it does not hold yet. While it is behind on a
+        // few, those are decided by the same filter in SQL.
         if (_searchService.IsGridSearchEnabled && userFilterTree != null && hasSearchableFields
             && OData.ODataFilterBuilder.CanExpress(userFilterTree, allFields)
-            && !FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, computedFids))
+            && !FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, computedFids)
+            && await CanAskIndexAsync(userFilterTree) && !(await IndexLagAsync()).Rewrites(userFilterTree))
         {
             var odata = OData.ODataFilterBuilder.Build(userFilterTree, allFields);
             if (!string.IsNullOrWhiteSpace(odata))
             {
                 try
                 {
+                    var lag = await IndexLagAsync();
+                    var handOver = IndexHandOverLimit(lag);
                     // If wide table (> 150 search fields), query its dedicated index directly
                     var targetIndex = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(allFields)
                         ? $"pb-tbl-{table.Id}"
                         : null;
-                    var aiMatches = targetIndex != null
-                        ? await _searchService.SearchRecordsByFilterAsync(_queryContext.TenantId, table.Id, odata, targetIndex, ct)
-                        : await _searchService.SearchRecordsByFilterAsync(_queryContext.TenantId, table.Id, odata, ct);
-                    var cappedMatches = aiMatches.Count > AiSearchMaxResults
-                        ? aiMatches.Take(AiSearchMaxResults).ToList()
-                        : aiMatches;
+                    var (aiMatches, aiTotal) = await _searchService.SearchRecordsByFilterPagedAsync(
+                        _queryContext.TenantId, table.Id, odata, 1, handOver, targetIndex, ct);
 
-                    if (cappedMatches.Count == 0)
+                    if (aiTotal > aiMatches.Count)
+                    {
+                        // More matches than one ID list can carry: pre-filtering on the first ones would cut the report (and its count and
+                        // totals) short without saying so. The filter runs in SQL instead, over every record.
+                        _logger.LogInformation("[ODataFilter] {Total} matches in table {TableId} exceed the {Max} the index hands over; filtering in SQL.",
+                            aiTotal, table.Id, handOver);
+                    }
+                    else if (aiMatches.Count == 0 && lag.PendingIds.Count == 0)
                     {
                         return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns };
                     }
-
-                    userFilterTree = await BuildAiIdFilterAsync(table, cappedMatches, null, ct);
+                    else
+                    {
+                        userFilterTree = await BuildAiIdFilterAsync(table, aiMatches, null, ct,
+                            lag.PendingIds.Count > 0 ? (lag.PendingIds, userFilterTree) : null);
+                    }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -1002,9 +1151,31 @@ public class RunReportQueryHandler
         return result;
     }
 
-    private async Task<FilterGroup?> BuildAiIdFilterAsync(AppTable table, IReadOnlyList<Guid> aiMatches, FilterGroup? existingFilter, CancellationToken ct)
+    /// <param name="recheck">The records the index has not caught up with, and the condition SQL decides them by instead: they match
+    /// when SQL says so, whether or not the index returned them (its copy of them may be missing or out of date).</param>
+    private async Task<FilterGroup?> BuildAiIdFilterAsync(AppTable table, IReadOnlyList<Guid> aiMatches, FilterGroup? existingFilter, CancellationToken ct,
+        (IReadOnlyCollection<long> Ids, FilterGroup Condition)? recheck = null)
     {
-        var matchedIds = await _recordRepo.GetIdsByPublicIdsAsync(table, aiMatches, ct);
+        var matchedIds = aiMatches.Count == 0 ? Array.Empty<long>() : await _recordRepo.GetIdsByPublicIdsAsync(table, aiMatches, ct);
+        if (recheck is { } r && r.Ids.Count > 0)
+        {
+            static FilterGroup IdIn(IEnumerable<long> ids) => new()
+            {
+                Logic = "and",
+                Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = 3, Operator = "in", Value = JsonSerializer.Serialize(ids) } }]
+            };
+
+            var pending = r.Ids.ToHashSet();
+            var settled = matchedIds.Where(id => !pending.Contains(id)).ToList();
+            var nodes = new List<FilterNode>();
+            if (settled.Count > 0) nodes.Add(new FilterNode { Group = IdIn(settled) });
+            nodes.Add(new FilterNode { Group = new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = IdIn(pending) }, new FilterNode { Group = r.Condition }] } });
+            var withRecheck = new FilterGroup { Logic = "or", Nodes = nodes };
+            return existingFilter == null
+                ? withRecheck
+                : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = existingFilter }, new FilterNode { Group = withRecheck }] };
+        }
+
         if (matchedIds.Count == 0)
         {
             // No matching records found in the database. Return a filter guaranteed to match nothing.

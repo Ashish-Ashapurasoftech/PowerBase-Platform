@@ -389,6 +389,7 @@ builder.Services.AddScoped<IFieldVersionRepository, FieldVersionRepository>();
 builder.Services.AddScoped<IFieldTypeRepository, FieldTypeRepository>();
 builder.Services.AddScoped<IRecordRepository, RecordRepository>();
 builder.Services.AddScoped<ISearchOutbox, SearchOutboxRepository>();
+builder.Services.AddScoped<ISearchFieldJobs, SearchFieldJobRepository>();
 
 // Import (Table-to-Table / file) — see PowerBase.Application/Imports
 builder.Services.AddScoped<PowerBase.Application.Imports.IImportDefinitionRepository, PowerBase.Infrastructure.Imports.ImportDefinitionRepository>();
