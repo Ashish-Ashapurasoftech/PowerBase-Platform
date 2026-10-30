@@ -13,6 +13,8 @@ public interface IFormRepository
     Task<int> UpdateSettingsAsync(Guid publicId, string name, bool autoAddNewFields, bool showBuiltInFields,
         string saveOptions, byte[] rowVersion, bool? isQuickPeekForm = null, bool? isQuickPeekDefault = null, CancellationToken ct = default);
     Task<int> DeleteAsync(Guid publicId, CancellationToken ct = default);
+    /// <summary>The record picker choice of one form element, by the element's PublicId; null when it does not exist.</summary>
+    Task<PowerBase.Application.Common.Models.RecordPickerElementDto?> GetRecordPickerElementAsync(Guid elementPublicId, CancellationToken ct = default);
     Task<IReadOnlyList<FormSection>> GetLayoutAsync(long formId, CancellationToken ct = default);
     Task<IReadOnlyList<FormPage>> GetPagesAsync(long formId, CancellationToken ct = default);
 

@@ -632,18 +632,24 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         FilterGroup? roleFilter = null,
         long? restrictToCreatedBy = null,
         int timeoutSeconds = 30,
-        IReadOnlyList<AppField>? allParentFields = null)
+        IReadOnlyList<AppField>? allParentFields = null,
+        FilterGroup? extraFilter = null,
+        IReadOnlyList<SortSpec>? orderBy = null,
+        AppField? keyField = null)
     {
         take = Math.Clamp(take, 1, 200);
 
         var parameters = new DynamicParameters();
         var where = "IsDeleted = 0";
+        var parentFieldLookup = BuildFieldLookup(allParentFields ?? labelFields);
 
-        if (roleFilter is not null || restrictToCreatedBy.HasValue)
+        if (roleFilter is not null || extraFilter is not null || restrictToCreatedBy.HasValue)
         {
-            var fieldsForRole = allParentFields ?? labelFields;
-            var fieldLookup = BuildFieldLookup(fieldsForRole);
-            var roleWhere = BuildFilterTreeWhere(roleFilter, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
+            // One tree, one builder call: two calls on the same parameter bag would reuse the same parameter names.
+            var tree = roleFilter is not null && extraFilter is not null
+                ? new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = roleFilter }, new FilterNode { Group = extraFilter }] }
+                : roleFilter ?? extraFilter;
+            var roleWhere = BuildFilterTreeWhere(tree, parameters, parentFieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
             where += roleWhere;
         }
 
@@ -687,15 +693,24 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         if (labelFields.Count > 2) selectCols.Add($"{SelectLabelExpr(labelFields[2])} AS Value3");
         
         if (labelFields.Count == 0) selectCols.Add($"{searchColExpr} AS Value1");
+        // The Set Key's text (never a column): what a record read back from the API shows in the Reference field.
+        if (keyField is not null) selectCols.Add($"{SelectLabelExpr(keyField)} AS KeyValue");
 
         var labelExpr = primaryLabelField is not null ? SelectLabelExpr(primaryLabelField) : searchColExpr;
         selectCols.Add($"{labelExpr} AS Label");
+
+        // A report-based picker's own sort; levels on computed fields have no column and are skipped.
+        var physicalSort = orderBy?
+            .Where(s => !parentFieldLookup.TryGetValue(s.FieldId, out var sf) || !PhysicalNaming.IsComputedTypeCode(sf.TypeCode))
+            .ToList();
+        var reportOrderBy = physicalSort is { Count: > 0 } ? BuildReportOrderBy(physicalSort, parentFieldLookup, null) : "Id";
+        var orderByExpr = physicalSort is { Count: > 0 } && reportOrderBy != "Id" ? reportOrderBy : searchColExpr;
 
         var sql = $"""
             SELECT TOP (@take) {string.Join(", ", selectCols)}
             FROM {PhysicalNaming.FullTableName(parentTable.Id)} AS p
             WHERE {where}
-            ORDER BY {searchColExpr}
+            ORDER BY {orderByExpr}
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var enc = await GetEncryptionContextAsync(connection, parentTable.AppId, null, ct);
@@ -704,7 +719,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
         // Decrypt label-field values in place when the parent app has field encryption active.
         // Id is the parent's internal BIGINT row Id (a system column) — it is never encrypted.
-        if (list.Count > 0 && (enc.IsAppEncrypted || labelFields.Any(f => f.IsEncrypted)))
+        if (list.Count > 0 && (enc.IsAppEncrypted || labelFields.Any(f => f.IsEncrypted) || keyField?.IsEncrypted == true))
         {
             var decryptCols = new[]
             {
@@ -713,6 +728,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 (labelFields.Count > 2 ? labelFields[2] : null, (Action<ReferenceOption, string?>)((o, v) => o.Value3 = v)),
                 // Without a primary label field, Label was selected from the first physical label column (searchColExpr above).
                 (primaryLabelField ?? physicalLabelFields.FirstOrDefault(), (Action<ReferenceOption, string?>)((o, v) => o.Label = v)),
+                (keyField, (Action<ReferenceOption, string?>)((o, v) => o.KeyValue = v)),
             };
             foreach (var (field, assign) in decryptCols)
             {
@@ -721,7 +737,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 {
                     var raw = assign == decryptCols[0].Item2 ? opt.Value1 :
                               assign == decryptCols[1].Item2 ? opt.Value2 :
-                              assign == decryptCols[2].Item2 ? opt.Value3 : opt.Label;
+                              assign == decryptCols[2].Item2 ? opt.Value3 :
+                              assign == decryptCols[3].Item2 ? opt.Label : opt.KeyValue;
                     if (raw is not null)
                     {
                         try { assign(opt, await enc.DecryptValueAsync(raw, ct)); }

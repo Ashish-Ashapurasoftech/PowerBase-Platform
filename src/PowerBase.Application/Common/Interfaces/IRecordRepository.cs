@@ -47,7 +47,12 @@ public interface IRecordRepository
     /// <summary>Search parent records for a Reference picker, returning (row Id, display label) pairs.
     /// <paramref name="primaryLabelField"/> is the parent's descriptive/picker field to project as
     /// <see cref="ReferenceOption.Label"/> for the closed-input text; pass null to fall back to
-    /// <paramref name="labelFields"/>[0] (the standard-key case, where they're the same field).</summary>
+    /// <paramref name="labelFields"/>[0] (the standard-key case, where they're the same field).
+    /// <paramref name="extraFilter"/> (a report-based picker's filter, on physical fields only) is AND-ed with
+    /// <paramref name="roleFilter"/>; <paramref name="orderBy"/> (the report's sort) replaces the default order by the first
+    /// label column — sort levels on computed fields are skipped, and when none remain the default order applies.
+    /// <paramref name="keyField"/> (the parent's Set Key / Display Key field, a stored field) is projected as
+    /// <see cref="ReferenceOption.KeyValue"/>, never as a column.</summary>
     Task<IReadOnlyList<ReferenceOption>> SearchForReferenceAsync(
         AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take,
         AppField? primaryLabelField = null, CancellationToken ct = default,
@@ -56,7 +61,10 @@ public interface IRecordRepository
         FilterGroup? roleFilter = null,
         long? restrictToCreatedBy = null,
         int timeoutSeconds = 30,
-        IReadOnlyList<AppField>? allParentFields = null);
+        IReadOnlyList<AppField>? allParentFields = null,
+        FilterGroup? extraFilter = null,
+        IReadOnlyList<SortSpec>? orderBy = null,
+        AppField? keyField = null);
 
     /// <summary>Fast lookup of matching row Ids only (1 column, bounded, with timeout) for security filtering.</summary>
     Task<IReadOnlyList<long>> ListMatchingRowIdsAsync(

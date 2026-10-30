@@ -87,4 +87,7 @@ public class FormElementLayoutRequest
     public int? ContentWidthValue { get; init; }
     public string? ContentWidthUnit { get; init; }
     public string? Name { get; init; }
+    public string? RecordPickerMode { get; init; }
+    public Guid? RecordPickerReportPublicId { get; init; }
+    public long? RecordPickerFieldId { get; init; }
 }

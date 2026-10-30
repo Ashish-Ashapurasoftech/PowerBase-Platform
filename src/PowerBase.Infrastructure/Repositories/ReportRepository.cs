@@ -14,7 +14,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
         r.Id, r.PublicId, r.AppTableId, r.OwnerId, r.Name, r.Description,
         r.ReportType, r.Visibility, r.Definition, r.IsDefault, r.IsDefaultSettingsRecord, r.DisplayOrder,
         r.IsDeleted, r.CreatedOn, r.CreatedBy, r.ModifiedOn, r.ModifiedBy, r.ViewEditFormId,
-        f.PublicId AS ViewEditFormPublicId
+        r.RelationshipId, f.PublicId AS ViewEditFormPublicId
         """;
 
     private const string GetByPublicIdSql = $"""

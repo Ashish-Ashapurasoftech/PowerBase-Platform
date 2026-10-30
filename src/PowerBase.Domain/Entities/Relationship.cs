@@ -49,8 +49,10 @@ public class Relationship
     public bool ReferenceFieldIsExisting { get; set; }
 
     /// <summary>
-    /// The <see cref="AppField.Id"/> of the parent field whose column the reference picker
-    /// uses to display and search parent records (the "display key override"). Null = use the
+    /// The <see cref="AppField.Id"/> of the parent field shown for the Reference in grids and filters, and
+    /// matched on when API / import write by key (the "display key override"). It is not a dropdown column:
+    /// the picker lists the record picker's fields and only carries this key's text as
+    /// <c>ReferenceOption.KeyValue</c>. Null = use the
     /// parent table's global <see cref="AppTable.KeyFieldId"/> / Record ID# (standard behaviour).
     /// This is a display-only setting: storage is always the parent's internal row Id.
     /// </summary>
