@@ -1,3 +1,4 @@
+using PowerBase.Application.Formulas;
 using PowerBase.Application.Imports;
 using PowerBase.Application.Relationships;
 using PowerBase.Domain.Entities;
@@ -14,11 +15,17 @@ public static class FieldSnapshotCapability
 {
     public static bool IsSupportedDestination(string typeCode) => SnapshotTypeCompatibility.IsSupportedDestination(typeCode);
 
-    /// <summary>A field whose value can be captured: a stored field, or a Lookup (whose value is read from the related table at the time the record is created).</summary>
+    /// <summary>A field whose value can be captured: a stored field, a Lookup (read from the related table at the time the record is
+    /// created) or a Formula (evaluated on the record being created). Summaries, Report Links and Action Buttons are not sources, and
+    /// neither are formulas that return a list (their stored form isn't a single value).</summary>
     public static bool IsEligibleSource(AppField f) =>
         f.Fid.HasValue && !f.IsDeleted && !f.IsSystem
-        && (SummaryLookupSources.IsLookup(f) || !PowerBase.Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode))
+        && (SummaryLookupSources.IsLookup(f) || IsSnapshotFormula(f) || !PowerBase.Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode))
         && !string.Equals(f.TypeCode, "File", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsSnapshotFormula(AppField f) =>
+        FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings)
+        && f.TypeCode is not ("Formula_ListUser" or "Formula_MultiSelect");
 
     /// <summary>Validates the Snapshot configuration of <paramref name="destination"/>. Turning it off
     /// (<paramref name="sourceFid"/> null) is always allowed, so a legacy row is never blocked by this.</summary>

@@ -111,7 +111,7 @@ public class CreateReportCommandHandler
                 AggregationFunction = s.AggregationFunction,
                 Desc = s.Desc,
             }).ToList(),
-            FilterTree = command.FilterTree,
+            FilterTree = FilterGroup.NullIfEmpty(command.FilterTree),
             GroupByFieldId = command.GroupByFieldId,
             GroupByMode = string.IsNullOrWhiteSpace(command.GroupByMode) ? "EqualValues" : command.GroupByMode,
             HideTotals = command.HideTotals,

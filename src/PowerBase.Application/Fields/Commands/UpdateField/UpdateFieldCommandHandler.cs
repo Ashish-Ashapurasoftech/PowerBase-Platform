@@ -165,6 +165,7 @@ public class UpdateFieldCommandHandler
         // needed for a legacy Rating field created before Rating's catalog type became
         // DECIMAL(18,4) — see database/migrations/tenant/045_alter_fieldtype_rating_decimal.sql).
         var percentRescaled = false;
+        string? switchedToTypeCode = null;
         if (NumericFamilyTypeCodes.Contains(existing.TypeCode) && !string.IsNullOrWhiteSpace(settings))
         {
             NumericSettings? numericSettings = null;
@@ -225,6 +226,7 @@ public class UpdateFieldCommandHandler
                 {
                     await _fieldRepo.UpdateFieldTypeAsync(existing.Id, targetFieldType.Id, settings, isRequired, ct);
                 }
+                switchedToTypeCode = displayAs;
             }
         }
 
@@ -289,6 +291,10 @@ public class UpdateFieldCommandHandler
             await _uow.RollbackAsync(ct);
             throw;
         }
+
+        // Lookups of this field save the type of value they show; they follow the switch (Number → Currency …).
+        if (switchedToTypeCode is not null)
+            await FieldValueTypes.RefreshLookupsOfAsync(existing, switchedToTypeCode, _relRepo, _fieldRepo, ct);
 
         // Backfill: when an optional field becomes required and a default is supplied, fill existing
         // rows whose value is NULL/empty so they remain valid.

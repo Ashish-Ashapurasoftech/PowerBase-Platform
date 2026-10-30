@@ -128,6 +128,12 @@ public sealed class ChangeFieldTypeCommandHandler
 
         // 5. Unique index, search, audit, usage index.
         var converted = await _fieldRepo.GetByPublicIdAsync(field.PublicId, ct) ?? field;
+
+        // Lookups (and lookups of lookups) save the type of value they show; they follow the field's new type, so e.g. a Snapshot
+        // can still tell what a lookup of this field holds. Only the source type copy was updated above.
+        if (_relRepo is not null && PowerBase.Application.Relationships.FieldValueTypes.Of(converted) is { } newValueType)
+            await PowerBase.Application.Relationships.FieldValueTypes.RefreshLookupsOfAsync(converted, newValueType, _relRepo, _fieldRepo, ct);
+
         if (keepUnique)
         {
             try

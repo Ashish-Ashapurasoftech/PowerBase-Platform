@@ -230,7 +230,8 @@ public class RunReportQueryHandler
         ReportDefinition definition, RunReportQuery query, AppTable table, IReadOnlyList<AppField> allFields, CancellationToken ct)
     {
         // Resolve filter tree — support legacy flat Filters list
-        var filterTree = definition.FilterTree;
+        // A saved empty group (e.g. left behind after removing the last Static Filter) is "no filter", same as null.
+        var filterTree = FilterGroup.NullIfEmpty(definition.FilterTree);
         if (filterTree == null && definition.Filters.Count > 0)
         {
             filterTree = new FilterGroup

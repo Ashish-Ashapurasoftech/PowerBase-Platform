@@ -144,6 +144,13 @@ public class FilterGroup
     /// <summary>"and" or "or"</summary>
     public string Logic { get; set; } = "and";
     public List<FilterNode> Nodes { get; set; } = [];
+
+    /// <summary>Null when the group holds no condition anywhere in it (no nodes, or only empty sub-groups) — such a group
+    /// filters nothing, so callers must see it as "no filter" (a non-null tree makes a report take the search-index path).</summary>
+    public static FilterGroup? NullIfEmpty(FilterGroup? group) => HasCondition(group) ? group : null;
+
+    private static bool HasCondition(FilterGroup? group) =>
+        group is not null && group.Nodes.Any(n => n.Condition is not null || HasCondition(n.Group));
 }
 
 /// <summary>Either Condition or Group is set — never both.</summary>

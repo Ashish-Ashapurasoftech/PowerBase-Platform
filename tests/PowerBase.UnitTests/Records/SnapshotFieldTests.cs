@@ -61,10 +61,36 @@ public class SnapshotFieldTests
     }
 
     [Fact]
-    public void Validate_FormulaSource_IsRejected()
+    public void Validate_SummaryAndListFormulaSources_AreRejected()
     {
-        var source = Field(1, 10, "Formula", "Calc");
         var dest = Field(2, 11, "Text", "Snap");
+        foreach (var typeCode in new[] { "Summary", "ReportLink", "Formula_ListUser", "Formula_MultiSelect" })
+        {
+            var source = Field(1, 10, typeCode, "Calc");
+            FieldSnapshotCapability.Validate(dest, "Snap", 10, false, false, false, false, [source, dest]).Should().ContainKey("SnapshotSourceFid", typeCode);
+        }
+    }
+
+    [Theory]
+    [InlineData("Formula_Date", "Date")]
+    [InlineData("Formula_DateTime", "DateTime")]
+    [InlineData("Formula_Number", "Currency")]
+    [InlineData("Formula_Text", "Text")]
+    [InlineData("Formula_Duration", "Duration")]
+    [InlineData("Formula_Bool", "Boolean")]
+    [InlineData("Formula_User", "User")]
+    public void Validate_FormulaSource_WithMatchingResultType_IsAllowed(string formulaType, string destType)
+    {
+        var source = Field(1, 10, formulaType, "Calc");
+        var dest = Field(2, 11, destType, "Snap");
+        FieldSnapshotCapability.Validate(dest, "Snap", 10, false, false, false, false, [source, dest]).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Validate_FormulaSource_WithMismatchedResultType_IsRejected()
+    {
+        var source = Field(1, 10, "Formula_Text", "Calc");
+        var dest = Field(2, 11, "Date", "Snap");
         FieldSnapshotCapability.Validate(dest, "Snap", 10, false, false, false, false, [source, dest]).Should().ContainKey("SnapshotSourceFid");
     }
 
@@ -413,5 +439,91 @@ public class SnapshotFieldTests
         await sut.ApplyOnCreateAsync(Table, [source, snap], values);
 
         values[11].Should().Be("top secret");
+    }
+
+    // ── Formula sources ───────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task ApplyOnCreate_FormulaSource_EvaluatesTheFormulaOnTheNewRecord()
+    {
+        var start = Field(1, 7, "Date", "Start");
+        var formula = Field(2, 10, "Formula_Date", "Due");
+        var snap = Field(3, 11, "Date", "Due at creation", snapshotSource: 10);
+
+        var relational = Substitute.For<IRelationalProjector>();
+        relational.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(call => (IReadOnlyList<IReadOnlyDictionary<long, object?>>)
+                new List<IReadOnlyDictionary<long, object?>> { new Dictionary<long, object?>() });
+
+        var formulas = Substitute.For<PowerBase.Application.Formulas.IFormulaProjector>();
+        formulas.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(call =>
+            {
+                // The formula must see the values the record is about to be written with.
+                var rows = call.ArgAt<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(1);
+                rows[0]["f_7"].Should().Be(new DateTime(2026, 7, 1));
+                return (IReadOnlyList<IReadOnlyDictionary<long, object?>>)
+                    new List<IReadOnlyDictionary<long, object?>> { new Dictionary<long, object?> { [10] = new DateTime(2026, 7, 31) } };
+            });
+
+        var sut = new SnapshotCaptureService(relational, formulas);
+        var values = new Dictionary<long, object?> { [7] = new DateTime(2026, 7, 1) };
+
+        await sut.ApplyOnCreateAsync(Table, [start, formula, snap], values);
+
+        values[11].Should().Be(new DateTime(2026, 7, 31));
+    }
+
+    [Fact]
+    public async Task ApplyOnCreate_FormulaSourceBlank_WritesBlank()
+    {
+        var formula = Field(2, 10, "Formula_Number", "Calc");
+        var snap = Field(3, 11, "Number", "Calc at creation", snapshotSource: 10);
+        var relational = Substitute.For<IRelationalProjector>();
+        relational.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(call => (IReadOnlyList<IReadOnlyDictionary<long, object?>>)
+                new List<IReadOnlyDictionary<long, object?>> { new Dictionary<long, object?>() });
+        var formulas = Substitute.For<PowerBase.Application.Formulas.IFormulaProjector>();
+        formulas.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(call => (IReadOnlyList<IReadOnlyDictionary<long, object?>>)
+                new List<IReadOnlyDictionary<long, object?>> { new Dictionary<long, object?> { [10] = null } });
+        var sut = new SnapshotCaptureService(relational, formulas);
+        var values = new Dictionary<long, object?>();
+
+        await sut.ApplyOnCreateAsync(Table, [formula, snap], values);
+
+        values.Should().ContainKey(11);
+        values[11].Should().BeNull();
+    }
+
+    [Fact]
+    public async Task CaptureForRows_FormulaSource_EvaluatesEachRow()
+    {
+        var formula = Field(2, 10, "Formula_Number", "Calc");
+        var snap = Field(3, 11, "Number", "Calc at creation", snapshotSource: 10);
+        var relational = Substitute.For<IRelationalProjector>();
+        relational.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(call => (IReadOnlyList<IReadOnlyDictionary<long, object?>>)
+                new List<IReadOnlyDictionary<long, object?>> { new Dictionary<long, object?>(), new Dictionary<long, object?>() });
+        var formulas = Substitute.For<PowerBase.Application.Formulas.IFormulaProjector>();
+        formulas.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(call => (IReadOnlyList<IReadOnlyDictionary<long, object?>>)new List<IReadOnlyDictionary<long, object?>>
+            {
+                new Dictionary<long, object?> { [10] = 5m },
+                new Dictionary<long, object?> { [10] = 9m },
+            });
+        var sut = new SnapshotCaptureService(relational, formulas);
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows =
+            [new Dictionary<string, object?>(), new Dictionary<string, object?>()];
+
+        var result = await sut.CaptureForRowsAsync(Table, [formula, snap], snap, rows);
+
+        result.Should().Equal(new object?[] { 5m, 9m });
     }
 }
