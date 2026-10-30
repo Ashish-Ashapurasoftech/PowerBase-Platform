@@ -74,18 +74,28 @@ public class BackfillSearchIndexCommandHandler
                         var info = SearchTableSlotInfo.From(table.Id, fields);
                         var copiedAllPages = true;
 
-                        int recordPage = 1;
+                        // Columns still held by deleted fields (deleted before their columns were freed after cleanup): emptied in every
+                        // record on the way, and given back to the pool once every page is in, so they are not reserved forever.
+                        var deletedHolders = info.IsWide ? [] : await _fieldRepo.ListDeletedSlotHoldersAsync(table.Id, cancellationToken);
+                        var staleColumns = deletedHolders
+                            .SelectMany(f => new[] { f.SearchSlot, f.SearchSlotEnd })
+                            .Where(s => !string.IsNullOrWhiteSpace(s))
+                            .Select(s => s!)
+                            .ToList();
+
+                        // Paged by record id: deleting records during the run cannot shift others into a page already done.
+                        long afterId = 0;
                         while (true)
                         {
                             IReadOnlyList<SearchIndexDocument> batch;
                             try
                             {
-                                batch = await _recordRepo.GetTableIndexBatchAsync(request.TenantId, table.Id, recordPage, SearchWideMigration.PageSize, cancellationToken);
+                                (batch, afterId) = await _recordRepo.GetTableIndexPageAsync(request.TenantId, table.Id, afterId, SearchWideMigration.PageSize, cancellationToken);
                             }
                             catch (Exception ex)
                             {
                                 copiedAllPages = false;
-                                _logger.LogError(ex, "Failed to read records for Table {TableName} (ID: {TableId}) at page {RecordPage}.", table.Name, table.Id, recordPage);
+                                _logger.LogError(ex, "Failed to read records for Table {TableName} (ID: {TableId}) after record {AfterId}.", table.Name, table.Id, afterId);
                                 break; // Break out of this table's record paging
                             }
 
@@ -95,9 +105,10 @@ public class BackfillSearchIndexCommandHandler
                                 break;
                             }
 
-                            var docsToBatch = batch
-                                .SelectMany(d => SearchIndexDocumentBuilder.Build(info, d.TenantId, d.AppId, d.TableId, d.PublicId, d.Values, null))
-                                .ToList();
+                            // Every record is read in full, so the free-text field is rebuilt (and emptied of text that is gone).
+                            var docsToBatch = SearchIndexDocumentBuilder.ClearColumns(batch
+                                .SelectMany(d => SearchIndexDocumentBuilder.Build(info, d.TenantId, d.AppId, d.TableId, d.PublicId, d.Values, null, complete: true))
+                                .ToList(), info.TargetIndex, staleColumns);
 
                             string? batchError = null;
                             try
@@ -128,9 +139,11 @@ public class BackfillSearchIndexCommandHandler
                             {
                                 break;
                             }
-
-                            recordPage++;
                         }
+
+                        if (copiedAllPages)
+                            foreach (var holder in deletedHolders)
+                                await _fieldRepo.ReleaseDeletedFieldSlotAsync(table.Id, holder.Fid!.Value, holder.SearchSlot!, cancellationToken);
 
                         // Only after every page is in the table's own index: switch queries to it and drop the old documents.
                         if (info.MigratingToWide && copiedAllPages)

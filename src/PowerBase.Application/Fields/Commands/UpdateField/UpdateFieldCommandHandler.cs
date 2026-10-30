@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Fields.Common;
@@ -32,6 +33,8 @@ public class UpdateFieldCommandHandler
     private readonly IFieldReferenceIndexer _refIndexer;
     private readonly IAppVariableRepository? _variableRepo;
     private readonly FieldSnapshotJobService? _snapshotJobs;
+    private readonly ILogger<UpdateFieldCommandHandler>? _logger;
+    private readonly ISearchFieldJobs? _fieldJobs;
 
     /// <summary>The Number/Currency/Percent/Rating family — the only TypeCodes a field's
     /// "Display As" Behavior Setting is allowed to switch between (see NumericDisplayAs).</summary>
@@ -53,9 +56,13 @@ public class UpdateFieldCommandHandler
         IRelationshipRepository relRepo,
         IFieldReferenceIndexer? refIndexer = null,
         IAppVariableRepository? variableRepo = null,
-        FieldSnapshotJobService? snapshotJobs = null)
+        FieldSnapshotJobService? snapshotJobs = null,
+        ILogger<UpdateFieldCommandHandler>? logger = null,
+        ISearchFieldJobs? fieldJobs = null)
     {
         _snapshotJobs = snapshotJobs;
+        _logger = logger;
+        _fieldJobs = fieldJobs;
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _variableRepo = variableRepo;
         _tableRepo = tableRepo;
@@ -299,8 +306,9 @@ public class UpdateFieldCommandHandler
             await _recordRepo.BackfillDefaultAsync(table, existing, defaultValue!, ct);
         }
 
-        // Search Index Sync: when search eligibility (IsSearchable || IsFilterable) changes, trigger a backfill or nullify
-        if (isEligible != wasEligible && existing.Fid.HasValue)
+        // Search Index Sync: when search eligibility (IsSearchable || IsFilterable) changes, trigger a backfill or nullify. Searchable
+        // alone changing on a field that stays filterable also rewrites the records: it adds or removes the field's text in quick search.
+        if ((isEligible != wasEligible || (isEligible && command.IsSearchable != wasSearchable)) && existing.Fid.HasValue)
         {
             await SyncSearchIndexAsync(table, existing.Fid.Value, isNullify: !isEligible, ct);
         }
@@ -329,31 +337,11 @@ public class UpdateFieldCommandHandler
             await _refIndexer.ReindexFieldAsync(existing.PublicId, ct);
     }
 
-    private async Task SyncSearchIndexAsync(AppTable table, int fid, bool isNullify, CancellationToken ct)
-    {
-        var plan = await PowerBase.Application.Search.FieldSlotSync.PlanAsync(_fieldRepo, table.Id, fid, isNullify, ct);
-
-        var docs = await _recordRepo.GetFieldBackfillBatchAsync(_queryContext.TenantId, table.AppId, table.Id, fid, isNullify, page: 1, pageSize: 500, ct);
-
-        if (docs.Count > 0 && plan.HasTarget)
-        {
-            await _searchService.BulkIndexRecordsAsync(PowerBase.Application.Search.FieldSlotSync.ToDocuments(docs, plan), ct);
-        }
-
-        // Switching this field on can push the table past what the shared index takes: start moving it to its own index.
-        await PowerBase.Application.Search.SearchWideMigration.StartIfNeededAsync(_fieldRepo, _messagePublisher, _searchService, _queryContext.TenantId, table.AppId, table.Id, ct);
-
-        var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
-        {
-            Action = isNullify ? PowerBase.Application.Common.Models.IndexAction.NullifyField : PowerBase.Application.Common.Models.IndexAction.BackfillField,
-            TenantId = _queryContext.TenantId,
-            AppId = table.AppId,
-            TableId = table.Id,
-            FieldId = fid,
-            Page = 1
-        };
-        _ = _messagePublisher.PublishAsync(msg, default);
-    }
+    /// <summary>The field is saved by now: this never throws, so the audit entry and formula reindex below still run if the index fails.</summary>
+    private Task SyncSearchIndexAsync(AppTable table, int fid, bool isNullify, CancellationToken ct) =>
+        PowerBase.Application.Search.FieldSlotSync.SyncAsync(
+            _fieldRepo, _recordRepo, _searchService, _messagePublisher, _queryContext.TenantId, table.AppId, table.Id, fid, isNullify,
+            clearSlot: null, (ex, message) => _logger?.LogError(ex, "{Message}", message), ct, _fieldJobs);
 
     private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }

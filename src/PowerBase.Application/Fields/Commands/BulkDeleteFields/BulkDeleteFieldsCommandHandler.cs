@@ -20,6 +20,7 @@ public class BulkDeleteFieldsCommandHandler
     private readonly IRelationshipRepository _relRepo;
     private readonly IFieldReferenceIndexer _refIndexer;
     private readonly IMessagePublisher? _publisher;
+    private readonly ISearchFieldJobs? _fieldJobs;
     private readonly IQueryContext? _queryContext;
 
     public BulkDeleteFieldsCommandHandler(
@@ -32,9 +33,11 @@ public class BulkDeleteFieldsCommandHandler
         IRelationshipRepository relRepo,
         IFieldReferenceIndexer? refIndexer = null,
         IMessagePublisher? publisher = null,
-        IQueryContext? queryContext = null)
+        IQueryContext? queryContext = null,
+        ISearchFieldJobs? fieldJobs = null)
     {
         _publisher = publisher;
+        _fieldJobs = fieldJobs;
         _queryContext = queryContext;
         _relRepo = relRepo;
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
@@ -149,7 +152,7 @@ public class BulkDeleteFieldsCommandHandler
                 appId: table.AppId,
                 ct: ct);
             await RemoveDeletedFieldsAsync(command.FieldPublicIds, ct);
-            await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct);
+            await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct, _fieldJobs);
 
             return;
         }
@@ -167,7 +170,7 @@ public class BulkDeleteFieldsCommandHandler
             appId: table.AppId,
             ct: ct);
         await RemoveDeletedFieldsAsync(command.FieldPublicIds, ct);
-        await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct);
+        await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct, _fieldJobs);
     }
 
     private async Task RemoveDeletedFieldsAsync(IEnumerable<Guid> fieldPublicIds, CancellationToken ct)
