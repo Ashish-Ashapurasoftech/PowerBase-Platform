@@ -947,15 +947,22 @@ public class RunReportQueryHandler
     /// their formula variants) or a checked-count row (checkbox) — the same opt-ins the grid reads.</summary>
     private static bool WantsTotals(AppField f)
     {
-        var isBool = f.TypeCode is "Boolean" or "Formula_Bool";
-        var isNumeric = f.TypeCode is "Number" or "Currency" or "Percent" or "Rating" or "Duration"
+        // A Lookup / Summary totals the type of value it shows, and keeps its opt-ins in its "display" object.
+        var isRelational = f.TypeCode is "Lookup" or "Summary";
+        var valueType = isRelational ? Relationships.FieldValueTypes.Of(f) : f.TypeCode;
+        var isBool = valueType is "Boolean" or "Formula_Bool";
+        var isNumeric = valueType is "Number" or "Currency" or "Percent" or "Rating" or "Duration"
             or "Formula_Number" or "Formula_Duration";
         if ((!isBool && !isNumeric) || string.IsNullOrWhiteSpace(f.Settings)) return false;
         try
         {
             using var doc = JsonDocument.Parse(f.Settings);
-            if (doc.RootElement.ValueKind != JsonValueKind.Object) return false;
-            foreach (var p in doc.RootElement.EnumerateObject())
+            var settings = doc.RootElement;
+            if (isRelational && settings.ValueKind == JsonValueKind.Object
+                && !settings.TryGetProperty(PowerBase.Application.Fields.Settings.RelationshipDisplaySettingsPolicy.PropertyName, out settings))
+                return false;
+            if (settings.ValueKind != JsonValueKind.Object) return false;
+            foreach (var p in settings.EnumerateObject())
             {
                 if (p.Value.ValueKind != JsonValueKind.True) continue;
                 if (isBool
@@ -978,7 +985,8 @@ public class RunReportQueryHandler
         foreach (var col in columns)
         {
             var key = (col.Fid ?? col.Id).ToString();
-            var isBool = col.TypeCode is "Boolean" or "Formula_Bool";
+            var isBool = col.TypeCode is "Boolean" or "Formula_Bool"
+                || (col.TypeCode is "Lookup" or "Summary" && Relationships.FieldValueTypes.Of(col) == "Boolean");
             decimal sum = 0;
             long nonBlank = 0;
             foreach (var row in rows)

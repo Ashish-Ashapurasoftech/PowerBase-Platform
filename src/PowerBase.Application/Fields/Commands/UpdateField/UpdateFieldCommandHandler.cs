@@ -124,6 +124,10 @@ public class UpdateFieldCommandHandler
         var isSharedValues = existing.IsSystem ? false : command.IsSharedValues ?? existing.IsSharedValues;
         var settings = existing.IsSystem
             ? SystemFieldSettingsPolicy.RestrictSettingsJson(existing.TypeCode, command.Settings)
+            // A Reference / Lookup / Summary takes only its Behavior Settings (the "display" object) from the request:
+            // the rest of its settings is the relationship's wiring, which only the relationship commands change.
+            : RelationshipDisplaySettingsPolicy.AppliesTo(existing.TypeCode)
+                ? RelationshipDisplaySettingsPolicy.Merge(existing.TypeCode, existing.Settings, command.Settings)
             // A request that sends no settings leaves them as they are: UpdateFieldSql writes Settings = @settings,
             // so passing null on would silently erase a formula's expression (or any other saved setting).
             : command.Settings ?? existing.Settings;

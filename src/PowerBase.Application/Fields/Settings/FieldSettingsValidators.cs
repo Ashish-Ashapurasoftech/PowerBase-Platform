@@ -134,6 +134,51 @@ public sealed class NumericSettingsValidator : FieldSettingsValidatorBase<Numeri
     }
 }
 
+// ─── Reference / Lookup / Summary Behavior Settings ───────────────────────────
+
+/// <summary>Validates the <c>display</c> object of a Reference, Lookup or Summary field. Not registered by TypeCode:
+/// the rest of those fields' settings is relationship wiring, so RelationshipDisplaySettingsPolicy runs this on the
+/// <c>display</c> object alone. Same rules as the stored types the members come from.</summary>
+public sealed class RelationshipDisplaySettingsValidator : FieldSettingsValidatorBase<RelationshipDisplaySettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => [];
+
+    protected override IDictionary<string, string[]> ValidateTyped(RelationshipDisplaySettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+
+        if (s.Decimals is < 0 or > 10)
+            AddError(errors, "Settings.Display.Decimals", "Decimals must be between 0 and 10.");
+
+        if (s.DisplayAs is not null && !NumericDisplayAs.All.Contains(s.DisplayAs))
+            AddError(errors, "Settings.Display.DisplayAs",
+                $"DisplayAs must be one of: {string.Join(", ", NumericDisplayAs.All)}.");
+
+        if (s.Symbol is not null && s.Symbol.Length > 10)
+            AddError(errors, "Settings.Display.Symbol", "Currency symbol must be 10 characters or fewer.");
+
+        if (s.Position is not null && !CurrencyPositions.All.Contains(s.Position))
+            AddError(errors, "Settings.Display.Position",
+                $"Position must be one of: {string.Join(", ", CurrencyPositions.All)}.");
+
+        if (s.Max is < 1 or > 20)
+            AddError(errors, "Settings.Display.Max", "Rating max must be between 1 and 20.");
+
+        if (s.Display is not null && !DurationDisplays.All.Contains(s.Display))
+            AddError(errors, "Settings.Display.Display",
+                $"Display must be one of: {string.Join(", ", DurationDisplays.All)}.");
+
+        if (s.Format is not null && !TimeFormats.All.Contains(s.Format))
+            AddError(errors, "Settings.Display.Format",
+                $"Format must be one of: {string.Join(", ", TimeFormats.All)}.");
+
+        if (s.ColumnWidth is < 20 or > 2000)
+            AddError(errors, "Settings.Display.ColumnWidth", "Column width must be between 20 and 2000.");
+
+        return errors;
+    }
+}
+
 // ─── Date / DateTime ──────────────────────────────────────────────────────────
 
 public sealed class DateSettingsValidator : FieldSettingsValidatorBase<DateSettings>
