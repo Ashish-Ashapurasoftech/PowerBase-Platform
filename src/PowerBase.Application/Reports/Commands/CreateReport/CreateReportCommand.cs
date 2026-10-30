@@ -27,9 +27,15 @@ public record CreateReportCommand(
     List<RowGroupLevelCommand>? RowGroupLevels = null,
     List<SummarySortFieldCommand>? SummarySortFields = null,
     Guid? RelationshipPublicId = null,
-    List<ReportFormulaCommand>? ReportFormulas = null);
+    List<ReportFormulaCommand>? ReportFormulas = null,
+    List<SummaryVariableCommand>? SummaryVariables = null,
+    List<SummaryFormulaCommand>? SummaryFormulas = null);
 
 public record ReportFormulaCommand(long Id, string Name, string TypeCode, string? DisplayAs, string Expression);
+
+public record SummaryVariableCommand(long FieldId, string Function, string Name);
+
+public record SummaryFormulaCommand(long Id, string Name, string TypeCode, string? DisplayAs, int? DecimalPlaces, string Expression);
 
 public record SummaryAggregationCommand(long FieldId, string Function, string DisplayAs = "Normal");
 

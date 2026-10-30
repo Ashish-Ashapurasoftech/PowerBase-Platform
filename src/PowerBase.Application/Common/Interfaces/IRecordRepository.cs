@@ -260,8 +260,18 @@ public interface IRecordRepository
     /// <summary>Current (decrypted) values of the search-eligible fields for these records, read from the database in one query. A record that is deleted or missing is absent from the result.</summary>
     Task<IReadOnlyDictionary<Guid, IReadOnlyDictionary<long, object?>>> GetSearchableFieldsBatchAsync(long tableId, IReadOnlyList<Guid> recordPublicIds, CancellationToken ct = default);
 
-    /// <summary>One page of the table's live records with all their search-eligible values, in a stable order. Used to reindex a whole table.</summary>
-    Task<IReadOnlyList<SearchIndexDocument>> GetTableIndexBatchAsync(long tenantId, long tableId, int page, int pageSize, CancellationToken ct = default);
+    /// <summary>The row version of each of these records as it is now (deleted ones included: deleting changes it). Any change to a
+    /// record changes its version, so comparing two reads tells whether the record changed in between. Missing records are absent.</summary>
+    Task<IReadOnlyDictionary<Guid, long>> GetRowVersionsAsync(long tableId, IReadOnlyList<Guid> recordPublicIds, CancellationToken ct = default);
+
+    /// <summary>
+    /// Up to <paramref name="pageSize"/> live records whose id is greater than <paramref name="afterId"/>, in id order, with all their
+    /// search-eligible values, and the id of the last one (to continue after). Paging by id never skips or repeats a record when
+    /// records are deleted or added while a job runs, and each page costs the same however far the job has got.
+    /// <paramref name="skip"/> is only for a job queued before paging by id existed, which knows its position by page number.
+    /// </summary>
+    Task<(IReadOnlyList<SearchIndexDocument> Documents, long LastId)> GetTableIndexPageAsync(
+        long tenantId, long tableId, long afterId, int pageSize, CancellationToken ct = default, int skip = 0);
     Task<long> GetRecordIdByPublicIdAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<IReadOnlyDictionary<Guid, long>> GetRecordIdsByPublicIdsAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<long> GetActiveRecordIdByPublicIdAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
@@ -359,5 +369,4 @@ public interface IRecordRepository
         IReadOnlyCollection<long>? onlyRowIds = null, bool dropUndecryptable = false);
 
     Task<int> SanitizeTableEncryptedDataAsync(AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct = default);
-    Task<IReadOnlyList<SearchIndexDocument>> GetFieldBackfillBatchAsync(long tenantId, long appId, long tableId, long fieldId, bool isNullify, int page, int pageSize, CancellationToken ct = default);
 }

@@ -34,6 +34,8 @@ public enum FormulaErrorCode
     // Added later — appended so the numeric values above don't shift.
     /// <summary>A name that is both an app variable and a field; the variable is used (a warning, not an error).</summary>
     AmbiguousReference,
+    /// <summary>The formula is nested more deeply than the parser can safely follow.</summary>
+    FormulaTooComplex,
 }
 
 /// <summary>

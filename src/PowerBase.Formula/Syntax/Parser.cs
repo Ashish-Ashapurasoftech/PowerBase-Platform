@@ -22,6 +22,12 @@ public sealed class Parser
     private readonly IReadOnlyList<Token> _tokens;
     private readonly List<FormulaDiagnostic> _diags;
     private int _pos;
+    private int _depth;
+    private bool _tooDeep;
+
+    /// <summary>Deepest nesting of parentheses, call arguments and unary operators the parser follows. Each level costs about ten
+    /// stack frames, and a stack overflow cannot be caught - it ends the whole process - so deeper formulas are refused instead.</summary>
+    public const int MAX_NESTING_DEPTH = 200;
 
     private Parser(IReadOnlyList<Token> tokens, List<FormulaDiagnostic> diags)
     {
@@ -50,8 +56,28 @@ public sealed class Parser
         return true;
     }
 
+    /// <summary>Called on entry to every recursive step. Returns false (after recording one diagnostic and skipping to the end of the
+    /// input) when the formula is too deeply nested or the stack is nearly used up; the caller then returns an error node.</summary>
+    private bool TryEnter()
+    {
+        if (_tooDeep) return false;
+        if (_depth >= MAX_NESTING_DEPTH || !System.Runtime.CompilerServices.RuntimeHelpers.TryEnsureSufficientExecutionStack())
+        {
+            _tooDeep = true;
+            _diags.Add(new FormulaDiagnostic(FormulaErrorCode.FormulaTooComplex,
+                $"The formula is nested more than {MAX_NESTING_DEPTH} levels deep, which is too complex to read.", Current.Span));
+            _pos = _tokens.Count - 1; // the end-of-input token: every caller unwinds without consuming more
+            return false;
+        }
+        _depth++;
+        return true;
+    }
+
+    private void Leave() => _depth--;
+
     private void Expect(TokenKind kind, string what)
     {
+        if (_tooDeep) return;
         if (Check(kind)) { _pos++; return; }
         _diags.Add(new FormulaDiagnostic(FormulaErrorCode.ExpectedToken, $"Expected '{what}'.", Current.Span));
     }
@@ -74,7 +100,7 @@ public sealed class Parser
             declarations.Add(ParseVariableDeclaration());
 
         Expr expr;
-        if (declarations.Count > 0 && Check(TokenKind.EndOfFile))
+        if (declarations.Count > 0 && Check(TokenKind.EndOfFile) && !_tooDeep)
         {
             // Declarations alone produce no value - the formula needs a result expression after them.
             _diags.Add(new FormulaDiagnostic(FormulaErrorCode.ExpectedToken,
@@ -134,6 +160,14 @@ public sealed class Parser
     }
 
     private Expr ParseOr()
+    {
+        var start = Current.Span;
+        if (!TryEnter()) return new ErrorExpr(start);
+        try { return ParseOrCore(); }
+        finally { Leave(); }
+    }
+
+    private Expr ParseOrCore()
     {
         var left = ParseAnd();
         while (Check(TokenKind.Or))
@@ -240,7 +274,10 @@ public sealed class Parser
                 TokenKind.Plus => UnaryOp.Plus,
                 _ => UnaryOp.Not,
             };
-            var operand = ParseUnary();
+            if (!TryEnter()) return new ErrorExpr(opTok.Span);
+            Expr operand;
+            try { operand = ParseUnary(); }
+            finally { Leave(); }
             return new UnaryExpr(op, operand, TextSpan.FromBounds(opTok.Span.Start, operand.Span.End));
         }
         return ParsePrimary();

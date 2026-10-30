@@ -70,10 +70,22 @@ public class UpdateReportCommandHandler
         {
             Id = f.Id, Name = f.Name?.Trim() ?? string.Empty, TypeCode = f.TypeCode, DisplayAs = f.DisplayAs, Expression = f.Expression ?? string.Empty,
         }).ToList();
+        var summaryVariables = (command.SummaryVariables ?? []).Select(v => new SummaryVariable
+        {
+            FieldId = v.FieldId, Function = v.Function, Name = v.Name?.Trim() ?? string.Empty,
+        }).ToList();
+        var summaryFormulas = (command.SummaryFormulas ?? []).Select(f => new SummaryFormula
+        {
+            Id = f.Id, Name = f.Name?.Trim() ?? string.Empty, TypeCode = f.TypeCode, DisplayAs = f.DisplayAs,
+            DecimalPlaces = f.DecimalPlaces, Expression = f.Expression ?? string.Empty,
+        }).ToList();
         // The report's own formulas count as fields for the checks below (a column/filter/sort/aggregation may use one).
-        IReadOnlyList<AppField> fieldsWithReportFormulas = [.. tableFields, .. ReportFormulaFields.Build(reportFormulas, tableFields.FirstOrDefault()?.AppTableId ?? 0)];
+        var reportTableId = tableFields.FirstOrDefault()?.AppTableId ?? 0;
+        IReadOnlyList<AppField> fieldsWithReportFormulas =
+            [.. tableFields, .. ReportFormulaFields.Build(reportFormulas, reportTableId), .. SummaryFormulaFields.BuildFormulaFields(summaryFormulas, reportTableId)];
         var configErrors = _configValidatorRegistry.Validate(existingReport.ReportType, ReportConfigValidationInput.FromUpdate(command), fieldsWithReportFormulas);
         ReportFormulaValidator.Validate(existingReport.ReportType, command.ColumnsMode, reportFormulas, tableFields, _exprValidator, configErrors);
+        SummaryFormulaValidator.Validate(existingReport.ReportType, summaryVariables, summaryFormulas, tableFields, _exprValidator, configErrors);
         if (configErrors.Count > 0)
             throw new ValidationException(new Dictionary<string, string[]>(configErrors));
 
@@ -90,6 +102,8 @@ public class UpdateReportCommandHandler
                 GroupByMode = string.IsNullOrWhiteSpace(l.GroupByMode) ? "EqualValues" : l.GroupByMode,
             }).ToList(),
             ReportFormulas = reportFormulas,
+            SummaryVariables = summaryVariables,
+            SummaryFormulas = summaryFormulas,
             RowGroupLevels = (command.RowGroupLevels ?? []).Select(l => new RowGroupLevel
             {
                 FieldId = l.FieldId,
@@ -103,7 +117,7 @@ public class UpdateReportCommandHandler
                 AggregationFunction = s.AggregationFunction,
                 Desc = s.Desc,
             }).ToList(),
-            FilterTree = command.FilterTree,
+            FilterTree = FilterGroup.NullIfEmpty(command.FilterTree),
             GroupByFieldId = command.GroupByFieldId,
             GroupByMode = string.IsNullOrWhiteSpace(command.GroupByMode) ? "EqualValues" : command.GroupByMode,
             HideTotals = command.HideTotals,

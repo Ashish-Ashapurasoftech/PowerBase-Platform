@@ -1,5 +1,7 @@
+using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.FieldReferences;
+using PowerBase.Application.Search;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -31,13 +33,18 @@ public sealed class ChangeFieldTypeCommandHandler
     private readonly IAuditRepository _auditRepo;
     private readonly IFieldReferenceIndexer _refIndexer;
     private readonly IRelationshipRepository? _relRepo;
+    private readonly ILogger<ChangeFieldTypeCommandHandler>? _logger;
+    private readonly ISearchFieldJobs? _fieldJobs;
 
     public ChangeFieldTypeCommandHandler(
         FieldTypeChangePlanner planner, FieldTypeChangeAnalyzer analyzer, IFieldColumnConversionService columns,
         IAppFieldRepository fieldRepo, ISchemaEngineService schemaEngine, IRecordRepository recordRepo,
         IAzureSearchService searchService, IMessagePublisher messagePublisher, IQueryContext queryContext,
-        IAuditRepository auditRepo, IFieldReferenceIndexer? refIndexer = null, IRelationshipRepository? relRepo = null)
+        IAuditRepository auditRepo, IFieldReferenceIndexer? refIndexer = null, IRelationshipRepository? relRepo = null,
+        ILogger<ChangeFieldTypeCommandHandler>? logger = null, ISearchFieldJobs? fieldJobs = null)
     {
+        _logger = logger;
+        _fieldJobs = fieldJobs;
         _relRepo = relRepo;
         _planner = planner;
         _analyzer = analyzer;
@@ -97,6 +104,12 @@ public sealed class ChangeFieldTypeCommandHandler
             keepUnique,
             keepRequired);
 
+        // The index column(s) the field uses now: a change to another column family (Text to Number, say) moves it to a new column,
+        // and the old one, which still holds the old values in every document, must be emptied before another field can use it.
+        SlotRef? oldSlot = null;
+        if (field.Fid is int oldFid)
+            SearchTableSlotInfo.From(plan.Table.Id, plan.TableFields).StoredSlots.TryGetValue(oldFid, out oldSlot);
+
         // 3. Data + field type, all-or-nothing.
         var result = kind switch
         {
@@ -128,6 +141,12 @@ public sealed class ChangeFieldTypeCommandHandler
 
         // 5. Unique index, search, audit, usage index.
         var converted = await _fieldRepo.GetByPublicIdAsync(field.PublicId, ct) ?? field;
+
+        // Lookups (and lookups of lookups) save the type of value they show; they follow the field's new type, so e.g. a Snapshot
+        // can still tell what a lookup of this field holds. Only the source type copy was updated above.
+        if (_relRepo is not null && PowerBase.Application.Relationships.FieldValueTypes.Of(converted) is { } newValueType)
+            await PowerBase.Application.Relationships.FieldValueTypes.RefreshLookupsOfAsync(converted, newValueType, _relRepo, _fieldRepo, ct);
+
         if (keepUnique)
         {
             try
@@ -142,8 +161,8 @@ public sealed class ChangeFieldTypeCommandHandler
             }
         }
 
-        if (field.IsSearchable && field.Fid is int fid && !PhysicalNaming.IsComputedTypeCode(plan.TargetTypeCode))
-            await RefreshSearchIndexAsync(plan.Table, fid, ct);
+        if ((field.IsSearchable || field.IsFilterable) && field.Fid is int fid)
+            await RefreshSearchIndexAsync(plan.Table, fid, plan.TargetTypeCode, oldSlot, ct);
 
         var label = string.IsNullOrWhiteSpace(field.Label) ? field.Name : field.Label!;
         await _auditRepo.LogActivityAsync(
@@ -169,24 +188,15 @@ public sealed class ChangeFieldTypeCommandHandler
         return new ColumnConversionResult(0, 0, 0, []);
     }
 
-    /// <summary>Stored values changed, so their indexed copies are stale — same refresh UpdateFieldCommandHandler
-    /// does after a Percent rescale.</summary>
-    private async Task RefreshSearchIndexAsync(AppTable table, int fid, CancellationToken ct)
+    /// <summary>Stored values changed, so their indexed copies are stale — same refresh UpdateFieldCommandHandler does after a Percent
+    /// rescale, through the same slots and documents the indexer writes. A field that became a formula (no stored value) or a time of
+    /// day (not indexed) is cleared instead, and a field that moved to another column has its old column emptied. Never throws: the
+    /// type change itself succeeded.</summary>
+    private Task RefreshSearchIndexAsync(AppTable table, int fid, string targetTypeCode, SlotRef? oldSlot, CancellationToken ct)
     {
-        try
-        {
-            var docs = await _recordRepo.GetFieldBackfillBatchAsync(_queryContext.TenantId, table.AppId, table.Id, fid, false, page: 1, pageSize: 500, ct);
-            if (docs.Count > 0) await _searchService.BulkIndexRecordsAsync(docs, ct);
-            _ = _messagePublisher.PublishAsync(new PowerBase.Application.Common.Models.SearchIndexMessage
-            {
-                Action = PowerBase.Application.Common.Models.IndexAction.BackfillField,
-                TenantId = _queryContext.TenantId, AppId = table.AppId, TableId = table.Id, FieldId = fid, Page = 1,
-            }, default);
-        }
-        catch (Exception ex)
-        {
-            // The type change itself succeeded; search catches up on the next backfill.
-            Console.WriteLine($"[ChangeFieldType] search refresh for table {table.Id} field {fid} failed: {ex.Message}");
-        }
+        var notIndexed = PhysicalNaming.IsComputedTypeCode(targetTypeCode) || !SearchSlotResolver.IsIndexableType(targetTypeCode);
+        return FieldSlotSync.SyncAsync(
+            _fieldRepo, _recordRepo, _searchService, _messagePublisher, _queryContext.TenantId, table.AppId, table.Id, fid,
+            isNullify: notIndexed, clearSlot: oldSlot, (ex, message) => _logger?.LogError(ex, "{Message}", message), ct, _fieldJobs);
     }
 }

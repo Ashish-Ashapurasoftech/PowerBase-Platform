@@ -355,6 +355,66 @@ public class ImportAppFromPblCommandHandlerTests
         definition.SortFields.Should().ContainSingle(s => s.Desc);
     }
 
+    private const string PblWithDefaultReportSettings = """
+    {
+      "version": "1.0",
+      "app": { "logicalRef": "$App_Test", "name": "Imported App" },
+      "tables": [
+        {
+          "logicalRef": "$Table_Clients",
+          "name": "Clients",
+          "fields": [
+            { "logicalRef": "$Field_Qty", "name": "Qty", "typeCode": "Number" },
+            { "logicalRef": "$Field_Price", "name": "Price", "typeCode": "Currency" },
+            { "logicalRef": "$Field_Total", "name": "Total", "typeCode": "Formula", "resultType": "Number", "formulaExpression": "[Qty] * [Price]" }
+          ],
+          "defaultReportSettings": {
+            "columnFieldNames": ["Qty", "Total", "Gone"],
+            "dynamicFilterType": "Custom",
+            "dynamicFilterFieldNames": ["Price"],
+            "allowQuickSearch": false,
+            "sortFieldName": "Total",
+            "sortDescending": true
+          }
+        }
+      ]
+    }
+    """;
+
+    [Fact]
+    public async Task HandleAsync_DefaultReportSettings_AreWrittenToTheTablesDefaultSettingsRecord()
+    {
+        var sut = CreateSut();
+        var record = new Report { PublicId = Guid.NewGuid(), Name = "Default Report Settings", Visibility = "Shared", Definition = "{}", IsDefaultSettingsRecord = true };
+        _reportRepo.GetDefaultSettingsRecordAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(record);
+        string? savedDefinition = null;
+        _reportRepo.UpdateAsync(record.PublicId, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<string>(), Arg.Do<string>(d => savedDefinition = d), Arg.Any<CancellationToken>())
+            .Returns(1);
+
+        var report = await sut.HandleAsync(new ImportAppFromPblCommand(PblWithDefaultReportSettings));
+
+        savedDefinition.Should().NotBeNull();
+        var definition = JsonSerializer.Deserialize<ReportDefinition>(savedDefinition!)!;
+        var fidOf = (string name) => _fieldsByTable.Values.SelectMany(f => f).Single(f => f.Name == name).Fid!.Value;
+        definition.Columns.Should().Equal(fidOf("Qty"), fidOf("Total"));
+        definition.ColumnsMode.Should().Be("Custom");
+        definition.DynamicFilterType.Should().Be("Custom");
+        definition.CustomDynamicFilterFields.Should().Equal(fidOf("Price"));
+        definition.AllowQuickSearch.Should().BeFalse();
+        definition.SortFields.Should().ContainSingle(s => s.FieldId == fidOf("Total") && s.Desc);
+        report.Skipped.Should().ContainSingle(s => s.Reason.Contains("'Gone'"));
+    }
+
+    [Fact]
+    public async Task HandleAsync_NoDefaultReportSettingsInTheFile_LeavesTheDefaultRecordAlone()
+    {
+        var sut = CreateSut();
+
+        await sut.HandleAsync(new ImportAppFromPblCommand(PblWithFormulaAndReport));
+
+        await _reportRepo.DidNotReceive().UpdateAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+
     private const string PblWithFormulaReferencingUnknownField = """
     {
       "version": "1.0",

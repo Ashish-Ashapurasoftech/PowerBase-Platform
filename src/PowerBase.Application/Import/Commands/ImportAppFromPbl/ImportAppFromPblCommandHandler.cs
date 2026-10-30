@@ -99,6 +99,8 @@ public class ImportAppFromPblCommandHandler
     private readonly PblSettingsApplier _settingsApplier;
     private readonly PblPermissionsApplier _permissionsApplier;
     private readonly PblConnectedTablesApplier? _connectedTablesApplier;
+    private readonly RelationshipFieldFactory? _reportLinkFactory;
+    private readonly PowerBase.Application.FieldReferences.IFieldReferenceIndexer _refIndexer;
 
     public ImportAppFromPblCommandHandler(
         PblValidator validator,
@@ -127,9 +129,13 @@ public class ImportAppFromPblCommandHandler
         ImportFieldSanitizer fieldSanitizer,
         PblSettingsApplier settingsApplier,
         PblPermissionsApplier permissionsApplier,
-        PblConnectedTablesApplier? connectedTablesApplier = null)
+        PblConnectedTablesApplier? connectedTablesApplier = null,
+        RelationshipFieldFactory? reportLinkFactory = null,
+        PowerBase.Application.FieldReferences.IFieldReferenceIndexer? refIndexer = null)
     {
         _connectedTablesApplier = connectedTablesApplier;
+        _reportLinkFactory = reportLinkFactory;
+        _refIndexer = refIndexer ?? PowerBase.Application.FieldReferences.NullFieldReferenceIndexer.Instance;
         _validator = validator;
         _createAppHandler = createAppHandler;
         _deleteAppHandler = deleteAppHandler;
@@ -433,7 +439,15 @@ public class ImportAppFromPblCommandHandler
                 Floor(rel.ParentTableRef, sm.SourceId);
                 Expect(rel.ParentTableRef, sm.Label ?? sm.Name, sm.SourceId);
             }
+            // The parent's report link is created on its own number (see CreateRelationshipCommand.ReportLinkFid); the floor keeps
+            // fields PowerBase numbers by itself from taking it first.
+            if (rel.ExplicitLinks)
+                Floor(rel.ParentTableRef, rel.ReportLink?.SourceId);
         }
+
+        foreach (var table in document.Tables ?? [])
+            foreach (var link in table.ReportLinks ?? [])
+                Floor(table.LogicalRef, link.SourceId);
     }
 
     /// <summary>Message a person importing may see. Internal detail only outside production-like settings.</summary>
@@ -660,7 +674,7 @@ public class ImportAppFromPblCommandHandler
         ImportRuntime.Variables = await LoadVariableSchemaAsync(appPublicId, ct);
 
         var hasFormulasReportsRelationshipsFormsOrRoles = relationships.Count > 0 || forms.Count > 0 || roles.Count > 0 || (document.Tables ?? []).Any(t =>
-            (t.Fields ?? []).Any(IsFormulaField) || (t.Reports ?? []).Count > 0);
+            (t.Fields ?? []).Any(IsFormulaField) || (t.Reports ?? []).Count > 0 || (t.ReportLinks ?? []).Count > 0);
 
         if (hasFormulasReportsRelationshipsFormsOrRoles)
         {
@@ -679,6 +693,10 @@ public class ImportAppFromPblCommandHandler
             if (relationships.Count > 0)
                 ImportProgress.Report("Creating relationships", 42);
                 relationshipsCreated = await CreateRelationshipsAsync(relationships, tableNameByRef, tableByName, appPublicId, deferredLookups, deferredSummaries, skipped, ct);
+
+            // Source report links that are not a relationship's own, once the reference fields they match on exist.
+            if (ImportRuntime.Fids is not null && (document.Tables ?? []).Any(t => (t.ReportLinks ?? []).Count > 0))
+                fieldsCreated += await CreateStandaloneReportLinksAsync(document, tableNameByRef, tableByName, appPublicId, skipped, ct);
 
             // Formula fields must exist before forms and reports are built: a form element or
             // report column referencing a formula field can only resolve once that field has a
@@ -723,6 +741,9 @@ public class ImportAppFromPblCommandHandler
             }
 
             fieldsCreated += await CreatePlaceholderFieldsAsync(document, relationships, tableNameByRef, tableByName, skipped, formulaTranslations, ct);
+
+            // Every field now exists, so the table's default columns, dynamic filters and sort can name their real Fids.
+            await ApplyDefaultReportSettingsAsync(document, tableByName, skipped, ct);
 
             ImportProgress.Report("Creating reports", 68);
             // Role refs → the roles this app has now, for report visibility.
@@ -1201,6 +1222,157 @@ public class ImportAppFromPblCommandHandler
     /// field to real Fids first (both already exist from Pass 1 — <see cref="PblValidator"/>
     /// guarantees these names resolve before import ever reaches this point, so a lookup miss
     /// here reflects a table/field that itself failed to create, not a validator gap).</summary>
+    /// <summary>Fills each table's hidden Default Report Settings record (what the "Default report" page edits) with the source table's
+    /// default columns, default dynamic filters, quick search and default sort. A name that did not become a field is reported and left out;
+    /// a part the source does not state keeps PowerBase's default.</summary>
+    private async Task ApplyDefaultReportSettingsAsync(
+        PblDocument document, Dictionary<string, AppTable> tableByName, List<ImportSkippedItem> skipped, CancellationToken ct)
+    {
+        // New-app imports only: updating an existing app must not overwrite the default report its owner has set up.
+        if (ImportRuntime.Fids is null)
+            return;
+
+        foreach (var table in document.Tables ?? [])
+        {
+            var wanted = table.DefaultReportSettings;
+            if (wanted is null || !tableByName.TryGetValue(table.Name, out var created))
+                continue;
+
+            try
+            {
+                var record = await _reportRepo.GetDefaultSettingsRecordAsync(created.PublicId, ct);
+                if (record is null)
+                {
+                    skipped.Add(new ImportSkippedItem { LogicalRef = table.LogicalRef, Name = table.Name, Reason = "Default report settings not applied: the table has no Default Report Settings record." });
+                    continue;
+                }
+
+                var fidByName = FidByNameOrLabel(await _fieldRepo.ListByTableAsync(created.Id, ct));
+                var missing = new List<string>();
+                List<long> Resolve(IEnumerable<string> names)
+                {
+                    var fids = new List<long>();
+                    foreach (var name in names)
+                    {
+                        if (fidByName.TryGetValue(name, out var fid)) fids.Add(fid);
+                        else missing.Add(name);
+                    }
+                    return fids;
+                }
+
+                var definition = string.IsNullOrWhiteSpace(record.Definition)
+                    ? new Reports.ReportDefinition()
+                    : JsonSerializer.Deserialize<Reports.ReportDefinition>(record.Definition) ?? new Reports.ReportDefinition();
+
+                if (wanted.ColumnFieldNames is { Count: > 0 } columnNames)
+                {
+                    var columns = Resolve(columnNames);
+                    if (columns.Count > 0)
+                    {
+                        definition.Columns = columns;
+                        definition.ColumnsMode = "Custom";
+                    }
+                }
+
+                if (wanted.DynamicFilterType is { Length: > 0 } filterType)
+                {
+                    definition.DynamicFilterType = filterType;
+                    definition.CustomDynamicFilterFields = filterType == "Custom" ? Resolve(wanted.DynamicFilterFieldNames) : [];
+                    definition.CustomDynamicFilterItems = [];
+                }
+                if (wanted.AllowQuickSearch is { } quickSearch)
+                    definition.AllowQuickSearch = quickSearch;
+
+                if (wanted.SortFieldName is { Length: > 0 } sortName)
+                {
+                    var sort = Resolve([sortName]);
+                    if (sort.Count > 0)
+                        definition.SortFields = [new Reports.SortSpec { FieldId = sort[0], Desc = wanted.SortDescending }];
+                }
+
+                await _reportRepo.UpdateAsync(record.PublicId, record.Name, record.Description, record.Visibility, JsonSerializer.Serialize(definition), ct);
+                await _refIndexer.ReindexReportAsync(record.PublicId, ct);
+
+                if (missing.Count > 0)
+                    skipped.Add(new ImportSkippedItem { LogicalRef = table.LogicalRef, Name = table.Name, Reason = $"Default report settings: {string.Join(", ", missing.Distinct().Select(m => $"'{m}'"))} did not become a field, so it is not among the default columns, dynamic filters or sort." });
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                skipped.Add(new ImportSkippedItem { LogicalRef = table.LogicalRef, Name = table.Name, Reason = $"Default report settings not applied: {ex.Message}" });
+            }
+        }
+    }
+
+    /// <summary>Creates the source report links that are not a relationship's own (they match on an ordinary field, or are a second link
+    /// to the same child), each on its source number. A link whose target or source field was not created is reported, not guessed.</summary>
+    private async Task<int> CreateStandaloneReportLinksAsync(
+        PblDocument document,
+        Dictionary<string, string> tableNameByRef,
+        Dictionary<string, AppTable> tableByName,
+        Guid appPublicId,
+        List<ImportSkippedItem> skipped,
+        CancellationToken ct)
+    {
+        var created = 0;
+        foreach (var table in document.Tables ?? [])
+        {
+            foreach (var link in table.ReportLinks ?? [])
+            {
+                if (_reportLinkFactory is null)
+                {
+                    skipped.Add(new ImportSkippedItem { LogicalRef = link.LogicalRef, Name = link.Name, Reason = "Report link not created: this import is not set up to create report links." });
+                    continue;
+                }
+
+                if (!tableByName.TryGetValue(table.Name, out var ownTable)
+                    || !tableNameByRef.TryGetValue(link.TargetTableRef, out var targetName) || !tableByName.TryGetValue(targetName, out var targetTable))
+                {
+                    skipped.Add(new ImportSkippedItem { LogicalRef = link.LogicalRef, Name = link.Name, Reason = "Report link not created: the table it opens was not created." });
+                    continue;
+                }
+
+                var targetFids = FidByNameOrLabel(await _fieldRepo.ListByTableAsync(targetTable.Id, ct));
+                if (!targetFids.TryGetValue(link.TargetFieldName, out var targetFid))
+                {
+                    skipped.Add(new ImportSkippedItem { LogicalRef = link.LogicalRef, Name = link.Name, Reason = $"Report link not created: its field '{link.TargetFieldName}' on '{targetName}' was not created." });
+                    continue;
+                }
+
+                int? sourceFid = null;
+                if (link.SourceFieldName is { Length: > 0 } sourceName)
+                {
+                    var ownFids = FidByNameOrLabel(await _fieldRepo.ListByTableAsync(ownTable.Id, ct));
+                    if (!ownFids.TryGetValue(sourceName, out var found))
+                    {
+                        skipped.Add(new ImportSkippedItem { LogicalRef = link.LogicalRef, Name = link.Name, Reason = $"Report link not created: the field '{sourceName}' it matches on was not created." });
+                        continue;
+                    }
+                    sourceFid = (int)found;
+                }
+
+                try
+                {
+                    await _reportLinkFactory.CreateAsync(ownTable, nameof(PowerBase.Domain.Enums.FieldTypeCode.ReportLink), (link.Label ?? link.Name).Trim(), false,
+                        new ReportLinkSettings
+                        {
+                            TargetAppPublicId = appPublicId.ToString(),
+                            TargetTablePublicId = targetTable.PublicId.ToString(),
+                            TargetFid = (int)targetFid,
+                            SourceFid = sourceFid,
+                            LinkText = string.IsNullOrWhiteSpace(link.LinkText) ? (link.Label ?? link.Name) : link.LinkText.Trim(),
+                            OpenInNewWindow = false,
+                        }, ct, explicitFid: link.SourceId);
+                    created++;
+                }
+                catch (DomainException ex)
+                {
+                    skipped.Add(new ImportSkippedItem { LogicalRef = link.LogicalRef, Name = link.Name, Reason = $"Report link not created: {ex.Message}" });
+                }
+            }
+        }
+        return created;
+    }
+
     private async Task<int> CreateRelationshipsAsync(
         List<PblRelationship> relationships,
         Dictionary<string, string> tableNameByRef,
@@ -1232,6 +1404,11 @@ public class ImportAppFromPblCommandHandler
             // as skipped if it never becomes possible.
             var pendingLookups = new List<PblLookupField>();
             var pendingSummaries = new List<PblSummaryField>();
+
+            // A file that lists the parent's link fields (a Quickbase file) gets exactly those, on their own numbers. Only a new-app import
+            // keeps source numbers (the update flow adds to an app that has its own numbering).
+            var explicitLinks = rel.ExplicitLinks && ImportRuntime.Fids is not null;
+            var reportLink = explicitLinks ? rel.ReportLink : null;
 
             var lookupSpecs = new List<CreateLookupSpec>();
             foreach (var lookup in rel.Lookups)
@@ -1326,7 +1503,12 @@ public class ImportAppFromPblCommandHandler
                         rel.ReferenceFieldLabel ?? rel.ReferenceFieldName,
                         rel.IsReferenceRequired,
                         lookupSpecs,
-                        summarySpecs), ct);
+                        summarySpecs,
+                        ReportLinkFid: reportLink?.SourceId,
+                        ReportLinkLabel: reportLink?.Label,
+                        ReportLinkText: reportLink?.LinkText,
+                        CreateReportLink: !explicitLinks || reportLink is not null,
+                        CreateAddRecordLink: !explicitLinks), ct);
                 }
                 catch (ValidationException) when (summarySpecs.Count > 0)
                 {
@@ -1335,7 +1517,12 @@ public class ImportAppFromPblCommandHandler
                     // summary and leaves a repairable placeholder.
                     createdRel = await _createRelationshipHandler.HandleAsync(new CreateRelationshipCommand(
                         appPublicId, parentTable.PublicId, childTable.PublicId,
-                        rel.ReferenceFieldLabel ?? rel.ReferenceFieldName, rel.IsReferenceRequired, lookupSpecs, []), ct);
+                        rel.ReferenceFieldLabel ?? rel.ReferenceFieldName, rel.IsReferenceRequired, lookupSpecs, [],
+                        ReportLinkFid: reportLink?.SourceId,
+                        ReportLinkLabel: reportLink?.Label,
+                        ReportLinkText: reportLink?.LinkText,
+                        CreateReportLink: !explicitLinks || reportLink is not null,
+                        CreateAddRecordLink: !explicitLinks), ct);
                     pendingSummaries.AddRange(summarySpecs.Select(sp => summaryBySpec[sp]));
                 }
 

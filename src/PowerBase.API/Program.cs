@@ -389,6 +389,7 @@ builder.Services.AddScoped<IFieldVersionRepository, FieldVersionRepository>();
 builder.Services.AddScoped<IFieldTypeRepository, FieldTypeRepository>();
 builder.Services.AddScoped<IRecordRepository, RecordRepository>();
 builder.Services.AddScoped<ISearchOutbox, SearchOutboxRepository>();
+builder.Services.AddScoped<ISearchFieldJobs, SearchFieldJobRepository>();
 
 // Import (Table-to-Table / file) — see PowerBase.Application/Imports
 builder.Services.AddScoped<PowerBase.Application.Imports.IImportDefinitionRepository, PowerBase.Infrastructure.Imports.ImportDefinitionRepository>();
@@ -635,6 +636,7 @@ builder.Services.AddScoped<PowerBase.Application.Reports.DeleteJobs.RecordDelete
 builder.Services.AddHostedService<PowerBase.API.Workers.RecordDeleteJobWorker>();
 builder.Services.AddScoped<PowerBase.Application.Fields.SnapshotJobs.IFieldSnapshotJobRepository, PowerBase.Infrastructure.Repositories.FieldSnapshotJobRepository>();
 builder.Services.AddScoped<PowerBase.Application.Fields.SnapshotJobs.FieldSnapshotJobProcessor>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.LookupResultTypeRepairService>();
 builder.Services.AddScoped<PowerBase.Application.Fields.SnapshotJobs.FieldSnapshotJobService>();
 builder.Services.AddHostedService<PowerBase.API.Workers.FieldSnapshotJobWorker>();
 builder.Services.AddScoped<DeleteReportCommandHandler>();

@@ -240,6 +240,9 @@ public static class QblToPblConverter
         var tableNameByRef = tables.ToDictionary(t => t.LogicalRef, t => t.Name, StringComparer.Ordinal);
         ResolveRelationshipLookupsAndSummaries(relationships, relFieldsPerTable, fieldNameByRefPerTable, seenFieldNamesByTableRef, tableNameByRef, addressSubComponentOwnerByTableRef, issues);
 
+        AttachReportLinks(tables, relationships, tableNodeByRef, relFieldsPerTable, fieldNameByRefPerTable, issues);
+        ApplyTableDefaultReportSettings(tables, relationships, tableNodeByRef, fieldNameByRefPerTable, issues);
+
         // Dependent dropdowns, now that every field of both tables has a name.
         foreach (var rel in relationships)
         {
@@ -1369,6 +1372,176 @@ public static class QblToPblConverter
             issues.Add(Warning("QBL_SUMMARY_FIELD_UNRESOLVED", $"Summary field '{summary.Name}' references a child field not available in this import phase; skipped.", summary.FieldRef));
     }
 
+    /// <summary>Quickbase lists a table's report links as fields of their own, numbered like any other field. A link that opens a child
+    /// through its reference field becomes that relationship's own report link (same label, same number); any other becomes a standalone
+    /// report link of the table. Every relationship is marked as having an explicit list of links, so PowerBase generates none of its own.
+    /// Runs after lookups and summaries are resolved (a link can target one) and before relationship refs are table-qualified.</summary>
+    private static void AttachReportLinks(
+        List<PblTable> tables,
+        List<PblRelationship> relationships,
+        Dictionary<string, QblResourceNode> tableNodeByRef,
+        Dictionary<string, RelationshipFieldCollector> relFieldsPerTable,
+        Dictionary<string, Dictionary<string, string>> fieldNameByRefPerTable,
+        List<PblIssue> issues)
+    {
+        foreach (var rel in relationships)
+            rel.ExplicitLinks = true;
+
+        foreach (var table in tables)
+        {
+            var ownerFields = tableNodeByRef[table.LogicalRef].ChildMap("Fields");
+            foreach (var (linkRef, linkNode) in ownerFields.Where(x => x.Value.Type == "QB::Field::ReportLink"))
+            {
+                var label = NullIfBlank(ResolveScalar(linkNode, "Label"));
+                var name = InferFieldName(linkRef, label);
+
+                var target = NestedRef(linkNode, "FieldRelationship", "Target");
+                if (target?["Table"] is not { } targetTableRef || target["Field"] is not { } targetFieldRef
+                    || !fieldNameByRefPerTable.TryGetValue(targetTableRef, out var targetNames) || !targetNames.TryGetValue(targetFieldRef, out var targetFieldName))
+                {
+                    issues.Add(Warning("QBL_REPORT_LINK_TARGET_UNAVAILABLE",
+                        target?["Field"] is null
+                            ? $"Report link '{name}' on '{table.Name}' has no target: the field it opened no longer exists in the source; skipped."
+                            : $"Report link '{name}' on '{table.Name}' opens a field that was not converted; skipped.", linkRef));
+                    continue;
+                }
+
+                var sourceRef = NestedRef(linkNode, "FieldRelationship", "Source")?["Field"];
+                var matchesOnRecordId = sourceRef is null || (ownerFields.TryGetValue(sourceRef, out var sourceNode) && sourceNode.Type == "QB::Field::RecordID");
+                var linkText = NullIfBlank(ResolveScalar(linkNode, "LinkText"));
+                var description = NullIfBlank(ResolveScalar(linkNode, "Comments"));
+
+                // A link that opens the child through its reference field is the relationship's own report link whatever it matches on in
+                // Quickbase (Record ID#, or the table's key field): a PowerBase reference always holds the parent's record id.
+                var relationship = relationships.FirstOrDefault(r => r.ReportLink is null && r.ParentTableRef == table.LogicalRef && r.ChildTableRef == targetTableRef
+                    && relFieldsPerTable.TryGetValue(r.ChildTableRef, out var childFields)
+                    && childFields.References.TryGetValue(r.LogicalRef, out var referenceInfo) && referenceInfo.FieldRef == targetFieldRef);
+                if (relationship is not null)
+                {
+                    relationship.ReportLink = new PblReportLinkField
+                    {
+                        LogicalRef = Qualify(table.LogicalRef, linkRef),
+                        Label = label,
+                        LinkText = linkText,
+                        SourceId = linkNode.SourceId,
+                        Description = description,
+                    };
+                    continue;
+                }
+
+                string? sourceFieldName = null;
+                if (!matchesOnRecordId && (!fieldNameByRefPerTable.TryGetValue(table.LogicalRef, out var ownNames) || !ownNames.TryGetValue(sourceRef!, out sourceFieldName)))
+                {
+                    issues.Add(Warning("QBL_REPORT_LINK_SOURCE_UNAVAILABLE", $"Report link '{name}' matches on a field that was not converted; skipped.", linkRef));
+                    continue;
+                }
+
+                table.ReportLinks.Add(new PblStandaloneReportLink
+                {
+                    LogicalRef = Qualify(table.LogicalRef, linkRef),
+                    Name = name,
+                    Label = label,
+                    LinkText = linkText,
+                    SourceId = linkNode.SourceId,
+                    Description = description,
+                    TargetTableRef = targetTableRef,
+                    TargetFieldName = targetFieldName,
+                    SourceFieldName = sourceFieldName,
+                });
+            }
+        }
+    }
+
+    /// <summary>A Quickbase table's "Default report": its default columns are the fields flagged "add to all new reports" (in the file's field
+    /// order); <c>DefaultReportSettings</c> adds the default dynamic filters, quick search and sort. They go to the table's Default Report
+    /// Settings record, so the "Default report" page shows the same as Quickbase instead of every field. Runs after relationship fields and
+    /// report links have their names.</summary>
+    private static void ApplyTableDefaultReportSettings(
+        List<PblTable> tables,
+        List<PblRelationship> relationships,
+        Dictionary<string, QblResourceNode> tableNodeByRef,
+        Dictionary<string, Dictionary<string, string>> fieldNameByRefPerTable,
+        List<PblIssue> issues)
+    {
+        foreach (var table in tables)
+        {
+            var node = tableNodeByRef[table.LogicalRef];
+            var names = fieldNameByRefPerTable[table.LogicalRef];
+            var settings = new PblDefaultReportSettings();
+
+            // Report links are not fields of the table's own list; they keep their source label.
+            var linkLabels = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var rel in relationships.Where(r => r.ParentTableRef == table.LogicalRef && r.ReportLink?.Label is not null))
+                linkLabels[rel.ReportLink!.LogicalRef] = rel.ReportLink.Label!;
+            foreach (var link in table.ReportLinks)
+                linkLabels[link.LogicalRef] = link.Label ?? link.Name;
+
+            var columns = new List<string>();
+            foreach (var (fieldRef, fieldNode) in node.ChildMap("Fields"))
+            {
+                if (!fieldNode.PropertyBool("AddToAllNewReports") || QblFieldTypeMap.AddressSubComponentTypes.Contains(fieldNode.Type))
+                    continue;
+                if (names.TryGetValue(fieldRef, out var columnName))
+                    columns.Add(columnName);
+                else if (linkLabels.TryGetValue(Qualify(table.LogicalRef, fieldRef), out var linkLabel))
+                    columns.Add(linkLabel);
+                else
+                    issues.Add(Warning("QBL_DEFAULT_COLUMN_UNAVAILABLE", $"Default column '{InferFieldName(fieldRef, NullIfBlank(ResolveScalar(fieldNode, "Label")))}' of table '{table.Name}' was not converted; left out of the default columns.", fieldRef));
+            }
+            if (columns.Count > 0)
+                settings.ColumnFieldNames = columns;
+
+            if (node.Properties.TryGetValue("DefaultReportSettings", out var rawSettings) && rawSettings is IReadOnlyDictionary<string, object?> defaults)
+            {
+                if (defaults.TryGetValue("DefaultFilters", out var rawFilters) && rawFilters is IReadOnlyDictionary<string, object?> filters)
+                {
+                    // A scalar in a nested block can arrive as a bool or as its text.
+                    if (filters.TryGetValue("AllowQuickSearch", out var quickSearch) && bool.TryParse(quickSearch?.ToString(), out var quick))
+                        settings.AllowQuickSearch = quick;
+
+                    if (filters.TryGetValue("DynamicFields", out var dynamic))
+                    {
+                        if (dynamic is IEnumerable<object?> list && dynamic is not string)
+                        {
+                            var requested = 0;
+                            foreach (var item in list)
+                            {
+                                requested++;
+                                if ((item as QblRef)?["Field"] is { } dynamicRef && names.TryGetValue(dynamicRef, out var dynamicName))
+                                    settings.DynamicFilterFieldNames.Add(dynamicName);
+                                else
+                                    issues.Add(Warning("QBL_DEFAULT_DYNAMIC_FILTER_UNAVAILABLE", $"A default dynamic filter of table '{table.Name}' points at a field that was not converted; left out.", table.LogicalRef));
+                            }
+                            // An empty list is Quickbase's "no dynamic filters"; a list whose fields all failed keeps PowerBase's default instead.
+                            if (settings.DynamicFilterFieldNames.Count > 0) settings.DynamicFilterType = "Custom";
+                            else if (requested == 0) settings.DynamicFilterType = "None";
+                        }
+                        else if (string.Equals(dynamic?.ToString(), "None", StringComparison.OrdinalIgnoreCase))
+                        {
+                            settings.DynamicFilterType = "None";
+                        }
+                        else if (string.Equals(dynamic?.ToString(), "Default", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Quickbase's "set automatically", the same as PowerBase's "Default".
+                            settings.DynamicFilterType = "Default";
+                        }
+                    }
+                }
+
+                // A sort on a field that no longer exists is a broken reference in the file: nothing to sort by.
+                if (defaults.TryGetValue("DefaultSortOrder", out var rawSort) && rawSort is IReadOnlyDictionary<string, object?> sort
+                    && (sort.GetValueOrDefault("TargetField") as QblRef)?["Field"] is { } sortRef && names.TryGetValue(sortRef, out var sortName))
+                {
+                    settings.SortFieldName = sortName;
+                    settings.SortDescending = string.Equals(sort.GetValueOrDefault("SortOrder")?.ToString(), "Descending", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+
+            if (settings.ColumnFieldNames is not null || settings.DynamicFilterType is not null || settings.AllowQuickSearch is not null || settings.SortFieldName is not null)
+                table.DefaultReportSettings = settings;
+        }
+    }
+
     /// <summary><paramref name="name"/>, or "name (2)", "name (3)"… when it is already in <paramref name="seen"/>; the returned name is added to the set.</summary>
     private static string NumberedName(HashSet<string> seen, string name)
     {
@@ -2427,7 +2600,7 @@ public static class QblToPblConverter
             var dropped = false;
             foreach (var conditionNode in leaves)
             {
-                var condition = ConvertFormRuleCondition(conditionNode, fieldNameByRef, roleNameByRef, order, name, ruleRef, issues);
+                var condition = ConvertFormRuleCondition(conditionNode, fieldNameByRef, roleNameByRef, fieldTypeByName, order, name, ruleRef, issues);
                 if (condition is null)
                 {
                     dropped = true;
@@ -2485,7 +2658,7 @@ public static class QblToPblConverter
                 continue;
             }
 
-            var action = ConvertFormRuleAction(actionNode, fieldNameByRef, elementRefByFieldName, qualifiedSectionRefByRaw, qualifiedBlockRefByRaw, actionOrder, name, ruleRef, issues);
+            var action = ConvertFormRuleAction(actionNode, fieldNameByRef, fieldTypeByName, elementRefByFieldName, qualifiedSectionRefByRaw, qualifiedBlockRefByRaw, actionOrder, name, ruleRef, issues);
             if (action is null)
                 continue;
 
@@ -2823,7 +2996,7 @@ public static class QblToPblConverter
     /// PowerBase's real operator vocabulary (below) has no role-membership or date-relative
     /// operators at all.</summary>
     private static PblFormRuleCondition? ConvertFormRuleCondition(
-        QblResourceNode conditionNode, Dictionary<string, string> fieldNameByRef, Dictionary<string, string> roleNameByRef, int order, string ruleName, string ruleRef, List<PblIssue> issues)
+        QblResourceNode conditionNode, Dictionary<string, string> fieldNameByRef, Dictionary<string, string> roleNameByRef, IReadOnlyDictionary<string, string> fieldTypeByName, int order, string ruleName, string ruleRef, List<PblIssue> issues)
     {
         if (IsType(conditionNode, ROLE_CONDITION))
         {
@@ -2907,6 +3080,10 @@ public static class QblToPblConverter
             return null;
         }
 
+        // Quickbase writes a checked box as 1 (and Yes/No for a yes/no field); PowerBase's rule editor and form read true/false.
+        if (valueType is null)
+            value = RuleLiteralFor(fieldTypeByName.GetValueOrDefault(fieldName), value);
+
         return new PblFormRuleCondition
         {
             FieldName = fieldName,
@@ -2917,6 +3094,36 @@ public static class QblToPblConverter
             DisplayOrder = order,
         };
     }
+
+    /// <summary>A literal a rule compares with or writes, spelled the way PowerBase keeps the field's value: a checkbox as true/false, a time as
+    /// HH:mm:ss. Any other type, and anything not recognised, is returned unchanged.</summary>
+    private static string? RuleLiteralFor(string? fieldType, string? value)
+    {
+        if (IsBooleanFieldType(fieldType)) return BooleanRuleValue(value);
+        if (string.Equals(fieldType, "Time", StringComparison.OrdinalIgnoreCase)) return TimeRuleValue(value);
+        return value;
+    }
+
+    private static readonly string[] TimeLiteralFormats = ["h:mm tt", "h:mm:ss tt", "hh:mm tt", "hh:mm:ss tt", "H:mm", "HH:mm", "H:mm:ss", "HH:mm:ss"];
+
+    /// <summary>A time of day as <c>HH:mm:ss</c> ("12:00 AM" gives "00:00:00"); null or unrecognised text is returned unchanged.</summary>
+    private static string? TimeRuleValue(string? value) =>
+        value is not null && DateTime.TryParseExact(value.Trim(), TimeLiteralFormats, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var time)
+            ? time.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)
+            : value;
+
+    /// <summary>A checkbox, or a formula that gives yes/no (its result type is Bool).</summary>
+    private static bool IsBooleanFieldType(string? typeCode) =>
+        string.Equals(typeCode, "Boolean", StringComparison.OrdinalIgnoreCase) || string.Equals(typeCode, "Bool", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>A checkbox value as PowerBase keeps it: <c>true</c> or <c>false</c>. Anything that is not one of Quickbase's spellings of those
+    /// (blank = "is empty" stays blank) is returned unchanged.</summary>
+    private static string? BooleanRuleValue(string? value) => value?.Trim().ToLowerInvariant() switch
+    {
+        "1" or "true" or "yes" or "checked" => "true",
+        "0" or "false" or "no" or "unchecked" => "false",
+        _ => value,
+    };
 
     private static readonly Dictionary<string, string> DateComparisonOperators = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -3008,6 +3215,7 @@ public static class QblToPblConverter
     private static PblFormRuleAction? ConvertFormRuleAction(
         QblResourceNode actionNode,
         Dictionary<string, string> fieldNameByRef,
+        IReadOnlyDictionary<string, string> fieldTypeByName,
         Dictionary<string, string> elementRefByFieldName,
         Dictionary<string, string> qualifiedSectionRefByRaw,
         Dictionary<string, string> qualifiedBlockRefByRaw,
@@ -3072,7 +3280,7 @@ public static class QblToPblConverter
         }
 
         string targetType;
-        string? targetElementRef = null, targetSectionRef = null, targetBlockRef = null;
+        string? targetElementRef = null, targetSectionRef = null, targetBlockRef = null, targetFieldName = null;
 
         if (target["Field"] is { } fieldRef)
         {
@@ -3082,6 +3290,7 @@ public static class QblToPblConverter
                 issues.Add(Warning("QBL_FORM_RULE_ACTION_TARGET_UNAVAILABLE", $"Form rule '{ruleName}' action targets a field with no form element on this form; skipped.", ruleRef));
                 return null;
             }
+            targetFieldName = fieldName;
             targetType = "Field";
         }
         else if (target["FormV2Section"] is { } sectionRef)
@@ -3108,6 +3317,11 @@ public static class QblToPblConverter
             return null;
         }
 
+        // Setting a checkbox: Quickbase says 1 / 0, PowerBase's rule editor and server read true / false (anything else cannot be saved).
+        var literalValue = ResolveScalar(actionNode, "Value");
+        if (isChangeValue && targetFieldName is not null)
+            literalValue = RuleLiteralFor(fieldTypeByName.GetValueOrDefault(targetFieldName), literalValue);
+
         return new PblFormRuleAction
         {
             ActionType = actionType,
@@ -3115,7 +3329,7 @@ public static class QblToPblConverter
             TargetElementRef = targetElementRef,
             TargetSectionRef = targetSectionRef,
             TargetBlockRef = targetBlockRef,
-            ActionValue = sourceFieldName is null ? ResolveScalar(actionNode, "Value") : null,
+            ActionValue = sourceFieldName is null ? literalValue : null,
             ValueSource = sourceFieldName is null ? null : "field",
             SourceFieldName = sourceFieldName,
             DisplayOrder = order,
