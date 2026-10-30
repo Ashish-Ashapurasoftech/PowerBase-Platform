@@ -20,15 +20,18 @@ public static class EncryptedRowFilter
     public static bool IsEncrypted(AppField field, bool appEncrypted) =>
         !field.IsSystem && !PhysicalNaming.IsEncryptionExemptTypeCode(field.TypeCode) && (appEncrypted || field.IsEncrypted);
 
-    /// <summary>True when any condition in the tree reads an encrypted field.</summary>
+    /// <summary>True when any condition in the tree reads an encrypted field — the one it filters on, or the other
+    /// field of a "the value in the field" comparison.</summary>
     public static bool TouchesEncrypted(FilterGroup? tree, IReadOnlyList<AppField> fields, bool appEncrypted)
     {
         if (tree is null) return false;
+        bool Encrypted(long fid) => fields.FirstOrDefault(f => f.Fid == fid) is { } field && IsEncrypted(field, appEncrypted);
         foreach (var node in tree.Nodes)
         {
             if (node.Condition is { } c
-                && fields.FirstOrDefault(f => f.Fid == c.FieldId) is { } field
-                && IsEncrypted(field, appEncrypted)) return true;
+                && (Encrypted(c.FieldId)
+                    || (string.Equals(c.ValueMode, "field", StringComparison.OrdinalIgnoreCase) && c.ValueFieldId is long other && Encrypted(other))))
+                return true;
             if (TouchesEncrypted(node.Group, fields, appEncrypted)) return true;
         }
         return false;

@@ -57,10 +57,10 @@ public class FieldSettingsGuard
     /// Unique / Encrypted / Auto-fill). Throws ValidationException. A no-op when <paramref name="sourceFid"/> is null.</summary>
     public void ValidateSnapshot(
         AppField existing, string label, int? sourceFid, bool editable,
-        bool isRequired, bool isUnique, bool isEncrypted, bool isAutoFill, IReadOnlyList<AppField> tableFields)
+        bool isRequired, bool isUnique, bool isAutoFill, IReadOnlyList<AppField> tableFields)
     {
         var errors = FieldSnapshotCapability.Validate(
-            existing, label, sourceFid, editable, isRequired, isUnique, isEncrypted, isAutoFill, tableFields);
+            existing, label, sourceFid, editable, isRequired, isUnique, isAutoFill, tableFields);
         if (errors.Count > 0)
             throw new ValidationException(errors.AsReadOnly());
     }

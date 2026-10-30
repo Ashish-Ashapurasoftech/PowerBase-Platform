@@ -27,4 +27,6 @@ public record UpdateReportCommand(
     ReportOptionsCommand? Options = null,
     List<RowGroupLevelCommand>? RowGroupLevels = null,
     List<SummarySortFieldCommand>? SummarySortFields = null,
-    List<ReportFormulaCommand>? ReportFormulas = null);
+    List<ReportFormulaCommand>? ReportFormulas = null,
+    List<SummaryVariableCommand>? SummaryVariables = null,
+    List<SummaryFormulaCommand>? SummaryFormulas = null);

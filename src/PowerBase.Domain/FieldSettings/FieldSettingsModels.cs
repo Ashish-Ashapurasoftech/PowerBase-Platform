@@ -582,6 +582,10 @@ public sealed class ReferenceSettings
     /// field whose Fid is its valueFieldId (the dependent-dropdown case) instead of a literal. Applied
     /// together with <see cref="FilterConditions"/>. Null = no tree filter.</summary>
     public string? FilterTree { get; set; }
+
+    /// <summary>Show this field's value as a link that opens the parent record (Quickbase's DisplayAsLinkToParent).
+    /// Off by default.</summary>
+    public bool DisplayAsLinkToParent { get; set; }
 }
 
 /// <summary>
@@ -637,6 +641,10 @@ public sealed class LookupSettings
     /// of its value (one of <see cref="AddressSubFields.All"/>) instead of the whole address —
     /// e.g. just the city. Null for an ordinary (non-Address, or whole-Address) lookup.</summary>
     public string? SourceSubField { get; set; }
+
+    /// <summary>Show this field's value as a link that opens the parent record (Quickbase's DisplayAsLinkToParent).
+    /// Off by default.</summary>
+    public bool DisplayAsLinkToParent { get; set; }
 }
 
 /// <summary>

@@ -238,6 +238,23 @@ public class FieldsController : ControllerBase
         return Ok(new ApiResponse<FieldSnapshotJobResponse>(MapToSnapshotJobResponse(result)));
     }
 
+    /// <summary>Repairs the saved value type of this table's Lookup fields: a lookup whose parent field's type was changed
+    /// earlier can still say the old type (a Date lookup of what is now a Number), which hides it from places that read it —
+    /// such as a Snapshot's source list. Safe to run any time; returns how many lookups were corrected.</summary>
+    [HttpPost("tables/{tableId:guid}/fields/refresh-lookup-types")]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<int>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> RefreshLookupTypes(
+        [FromServices] IAppTableRepository tableRepo, [FromServices] IAppFieldRepository fieldRepo,
+        [FromServices] PowerBase.Application.Relationships.LookupResultTypeRepairService repair,
+        Guid tableId, CancellationToken ct)
+    {
+        var table = await tableRepo.GetByPublicIdAsync(tableId, ct);
+        var repaired = await repair.RepairTableAsync(await fieldRepo.ListByTableAsync(table.Id, ct), ct);
+        return Ok(new ApiResponse<int>(repaired));
+    }
+
     /// <summary>Paginated audit/version history for a field, newest first.</summary>
     [HttpGet("tables/{tableId:guid}/fields/{publicId:guid}/versions")]
     [RequireAppPermission(PermissionCodes.FieldsRead, AppAccessResolver.ByTableId)]

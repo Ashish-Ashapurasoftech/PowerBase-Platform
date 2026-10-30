@@ -8,6 +8,10 @@ public sealed class ValidateFormulaRequest
 
     /// <summary>Optional expected result type (e.g. a formula field's declared type, or "Bool" for rule conditions).</summary>
     public string? ExpectedType { get; set; }
+
+    /// <summary>Set when authoring a report's summary formula: the formula is then checked against these named aggregates instead
+    /// of the table's fields (an empty list means "no variables defined yet", so every [reference] is unknown).</summary>
+    public List<PowerBase.API.Models.Reports.SummaryVariableRequest>? SummaryVariables { get; set; }
 }
 
 public sealed class EvaluateFormulaRequest

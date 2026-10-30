@@ -183,6 +183,9 @@ public sealed class SummaryReportConfigValidator : IReportConfigValidator
                 continue;
             }
 
+            // A summary formula shows its own value; there is no Summarize-By function to check.
+            if (SummaryFormulaFields.IsSummaryFormulaFid(agg.FieldId) && agg.Function == SummaryFormulaFields.AggregationFunction) continue;
+
             var formulaResultType = GetFormulaResultType(field);
             var allowed = FieldTypeCategoryHelper.GetAllowedSummarizeByFunctions(field.TypeCode, formulaResultType);
             if (!allowed.Contains(agg.Function, StringComparer.OrdinalIgnoreCase))

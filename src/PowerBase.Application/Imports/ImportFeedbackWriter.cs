@@ -28,6 +28,7 @@ public sealed class ImportFeedbackWriter : IAsyncDisposable
         [ImportReason.ConstraintViolation] = "Rule violation",
         [ImportReason.WriteFailed] = "Could not be saved",
         [ImportReason.MergeKeyMissing] = "Match key missing",
+        [ImportReason.RecordIdNotFound] = "Record ID not found",
         [ImportReason.NoChanges] = "Nothing to update",
     };
 

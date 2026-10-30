@@ -145,7 +145,9 @@ public class ReportsController : ControllerBase
             request.RowGroupLevels.Select(l => new RowGroupLevelCommand(l.FieldId, l.GroupByMode)).ToList(),
             request.SummarySortFields.Select(s => new SummarySortFieldCommand(s.Target, s.LevelIndex, s.AggregationFieldId, s.AggregationFunction, s.Desc)).ToList(),
             request.RelationshipId,
-            request.ReportFormulas.Select(f => new ReportFormulaCommand(f.Id, f.Name, f.TypeCode, f.DisplayAs, f.Expression)).ToList());
+            request.ReportFormulas.Select(f => new ReportFormulaCommand(f.Id, f.Name, f.TypeCode, f.DisplayAs, f.Expression)).ToList(),
+            request.SummaryVariables.Select(v => new SummaryVariableCommand(v.FieldId, v.Function, v.Name)).ToList(),
+            request.SummaryFormulas.Select(f => new SummaryFormulaCommand(f.Id, f.Name, f.TypeCode, f.DisplayAs, f.DecimalPlaces, f.Expression)).ToList());
         var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<ReportResponse>(MapToResponse(result)));
     }
@@ -378,7 +380,9 @@ public class ReportsController : ControllerBase
             MapOptions(request.Options),
             request.RowGroupLevels.Select(l => new RowGroupLevelCommand(l.FieldId, l.GroupByMode)).ToList(),
             request.SummarySortFields.Select(s => new SummarySortFieldCommand(s.Target, s.LevelIndex, s.AggregationFieldId, s.AggregationFunction, s.Desc)).ToList(),
-            request.ReportFormulas.Select(f => new ReportFormulaCommand(f.Id, f.Name, f.TypeCode, f.DisplayAs, f.Expression)).ToList());
+            request.ReportFormulas.Select(f => new ReportFormulaCommand(f.Id, f.Name, f.TypeCode, f.DisplayAs, f.Expression)).ToList(),
+            request.SummaryVariables.Select(v => new SummaryVariableCommand(v.FieldId, v.Function, v.Name)).ToList(),
+            request.SummaryFormulas.Select(f => new SummaryFormulaCommand(f.Id, f.Name, f.TypeCode, f.DisplayAs, f.DecimalPlaces, f.Expression)).ToList());
         await _updateHandler.HandleAsync(command, ct);
         return NoContent();
     }
@@ -739,6 +743,14 @@ public class ReportsController : ControllerBase
             ReportFormulas = r.Definition.ReportFormulas.Select(f => new ReportFormulaDto
             {
                 Id = f.Id, Name = f.Name, TypeCode = f.TypeCode, DisplayAs = f.DisplayAs, Expression = f.Expression,
+            }).ToList(),
+            SummaryVariables = r.Definition.SummaryVariables.Select(v => new SummaryVariableDto
+            {
+                FieldId = v.FieldId, Function = v.Function, Name = v.Name,
+            }).ToList(),
+            SummaryFormulas = r.Definition.SummaryFormulas.Select(f => new SummaryFormulaDto
+            {
+                Id = f.Id, Name = f.Name, TypeCode = f.TypeCode, DisplayAs = f.DisplayAs, DecimalPlaces = f.DecimalPlaces, Expression = f.Expression,
             }).ToList(),
             SummarySortFields = r.Definition.SummarySortFields.Select(s => new SummarySortFieldDto
             {

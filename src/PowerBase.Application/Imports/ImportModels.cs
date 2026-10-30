@@ -78,6 +78,8 @@ public static class ImportReason
     public const string ConstraintViolation = "ConstraintViolation";
     public const string WriteFailed = "WriteFailed";
     public const string MergeKeyMissing = "MergeKeyMissing";
+    /// <summary>A merge on the Record ID# found no record with it: the system assigns Record IDs, so a row is never inserted under one it does not have.</summary>
+    public const string RecordIdNotFound = "RecordIdNotFound";
     /// <summary>A merge matched a record but every mapped value was a blank that "Ignore blanks" skips.</summary>
     public const string NoChanges = "NoChanges";
 }
@@ -184,6 +186,10 @@ public sealed class ImportDefinitionConfig
     /// as its source, and other virtual columns' formulas may refer to one by name. None for an import saved before they existed.</summary>
     public List<ImportVirtualColumn> VirtualColumns { get => _virtualColumns; set => _virtualColumns = value ?? new(); }
     private List<ImportVirtualColumn> _virtualColumns = new();
+    /// <summary>Named values usable anywhere in the import: <c>[var_name]</c> in a formula, <c>{{var_name}}</c> in a filter value or a fixed value,
+    /// for every table the import fills (see <see cref="ImportVariable"/>). None for an import saved before they existed.</summary>
+    public List<ImportVariable> Variables { get => _variables; set => _variables = value ?? new(); }
+    private List<ImportVariable> _variables = new();
     /// <summary>The same as <see cref="ImportTargetConfig.Conditions"/>, for the import's own table (the one the fields above belong to).
     /// Only for an import that fills several tables: with one table, <see cref="Conditions"/> already says which rows go in.</summary>
     public FilterGroup? TableConditions { get; set; }
@@ -230,7 +236,7 @@ public sealed record ImportDefinitionDetail(
     string ConstraintPolicy, IReadOnlyList<string> NotifyEmails, bool NeedsAttention, string? AttentionReason,
     ImportSchedule? Schedule, DateTime? NextRunOn, string SourceKind = ImportSourceKinds.Table, ImportFileOptions? File = null,
     IReadOnlyList<ImportTargetConfig>? AdditionalTargets = null, IReadOnlyList<ImportVirtualColumn>? VirtualColumns = null, FilterGroup? TableConditions = null,
-    IReadOnlyList<ImportSheetMapping>? SheetMappings = null, bool OnlyChangedSinceLastRun = false);
+    IReadOnlyList<ImportSheetMapping>? SheetMappings = null, bool OnlyChangedSinceLastRun = false, IReadOnlyList<ImportVariable>? Variables = null);
 
 public sealed record ImportRunListItem(
     Guid PublicId, string TriggeredBy, string Status, byte Progress, long RowsRead, long Inserted, long Updated,

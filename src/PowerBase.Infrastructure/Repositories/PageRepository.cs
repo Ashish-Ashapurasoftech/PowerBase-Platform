@@ -25,6 +25,12 @@ public class PageRepository : TenantRepositoryBase, IPageRepository
                 JOIN meta.AppUser au ON au.AppRoleId = arp.AppRoleId
                 WHERE arp.PageId = p.Id AND au.UserId = @userId AND au.IsDeleted = 0
             ))
+            -- A Dashboard an admin made the home page of one of the user's roles is always visible to them.
+            OR EXISTS (
+                SELECT 1 FROM meta.AppRole hr
+                JOIN meta.AppUser hau ON hau.AppRoleId = hr.Id
+                WHERE hr.HomePageId = p.Id AND hr.IsDeleted = 0 AND hau.UserId = @userId AND hau.IsDeleted = 0
+            )
         )
         """;
 

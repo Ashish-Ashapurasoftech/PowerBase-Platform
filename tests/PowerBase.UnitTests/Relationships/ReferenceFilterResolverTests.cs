@@ -22,6 +22,7 @@ public class ReferenceFilterResolverTests
     private static readonly List<AppField> TaskFields =
     [
         new() { Id = 30, Fid = 12, Name = "TaskType", TypeCode = "Reference" },
+        new() { Id = 31, Fid = 13, Name = "Task Code", TypeCode = "Formula_Text" },
     ];
 
     private static readonly AppTable Junction = new() { Id = 99, PublicId = Guid.NewGuid() };
@@ -131,6 +132,32 @@ public class ReferenceFilterResolverTests
         nodes[1].Condition!.Value.Should().Be("5");
         nodes[1].Condition!.FieldId.Should().Be(7);
         clauses[0].TreeFields.Should().BeSameAs(StatusFields);
+    }
+
+    [Fact]
+    public async Task Tree_SameRecordFieldComparison_IsKeptAsIs_AndNeedsNoFormValue()
+    {
+        // "Name is equal to the value in a Status field: Type" — both sides are on the parent record.
+        var sameRecord = new FilterCondition { FieldId = 6, Operator = "eq", ValueMode = "field", ValueFieldId = 7 };
+
+        var clauses = await Build(Tree(And(sameRecord)), new());
+
+        var cond = clauses.Should().ContainSingle().Subject.Tree!.Nodes.Should().ContainSingle().Subject.Condition!;
+        cond.ValueMode.Should().Be("field");
+        cond.ValueFieldId.Should().Be(7);
+        ReferenceFilterResolver.ControllingFids(Tree(And(sameRecord))).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Tree_FormFormulaComparison_UsesTheValueTheFormWorkedOut()
+    {
+        // Name is equal to the value in a Task field: Task Code (a formula the form computes live).
+        var clauses = await Build(Tree(And(FromForm(6, "eq", 13))), new() { [13] = "ENG-1" });
+
+        var cond = clauses.Should().ContainSingle().Subject.Tree!.Nodes.Should().ContainSingle().Subject.Condition!;
+        cond.FieldId.Should().Be(6);
+        cond.ValueMode.Should().Be("literal");
+        cond.Value.Should().Be("ENG-1");
     }
 
     [Fact]

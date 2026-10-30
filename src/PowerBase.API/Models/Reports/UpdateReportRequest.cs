@@ -42,4 +42,10 @@ public class UpdateReportRequest
     public ReportOptionsRequest? Options { get; set; }
 
     public List<ReportFormulaRequest> ReportFormulas { get; set; } = [];
+
+    /// <summary>Summary/Chart only: the named aggregates (field + Summarize-by + name) that summary formulas read.</summary>
+    public List<SummaryVariableRequest> SummaryVariables { get; set; } = [];
+
+    /// <summary>Summary/Chart only: up to 3 virtual columns calculated per group from the summary variables.</summary>
+    public List<SummaryFormulaRequest> SummaryFormulas { get; set; } = [];
 }

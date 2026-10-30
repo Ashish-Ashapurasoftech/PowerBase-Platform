@@ -11,6 +11,7 @@ using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Domain.ValueObjects;
 using PowerBase.Formula;
+using PowerBase.Formula.Binding;
 using PowerBase.Formula.Diagnostics;
 using PowerBase.Formula.Evaluation;
 using PowerBase.Formula.Types;
@@ -125,6 +126,12 @@ public sealed class ImportPlanBuilder(
     /// definition's column references are pointed at them. Null for a table import, which behaves exactly as before.</param>
     public async Task<ImportPlan> BuildAsync(ImportDefinitionConfig cfg, Guid destinationTableId, CancellationToken ct, ImportFileSource? file = null, DateTime? runClock = null)
     {
+        // The import's variables: checked on their own, then {{var_name}} in a filter or a fixed value is replaced by the variable's text, so everything
+        // below sees plain values. [var_name] in a formula is resolved by the formula engine through the schema.
+        var variables = cfg.Variables;
+        if (ImportVariables.Check(variables) is { } variableProblem) throw Invalid(variableProblem);
+        var variableSchema = ImportVariables.Schema(variables);
+        cfg = ImportVariables.Apply(cfg);
         if (file is not null) cfg = ImportFileRemap.Apply(cfg, file);
         if (string.IsNullOrWhiteSpace(cfg.Name)) throw Invalid("Give the import a name.");
         if (cfg.Name.Length > 200) throw Invalid("The import name is too long.");
@@ -171,7 +178,8 @@ public sealed class ImportPlanBuilder(
         var visibleSource = sourceAccess is null || sourceAccess.Unrestricted ? sourceFields : sourceAccess.VisibleFields;
         var mappings = new List<ResolvedMapping>(active.Count);
         // Virtual columns are sources like any other, but exist only inside the import: they are added after what the user can see.
-        var (virtuals, virtualError) = ImportVirtual.Resolve(cfg.VirtualColumns, visibleSource, formulaEngine);
+        if (ImportVariables.Collision(variables, visibleSource, cfg.VirtualColumns) is { } variableClash) throw Invalid(variableClash);
+        var (virtuals, virtualError) = ImportVirtual.Resolve(cfg.VirtualColumns, visibleSource, formulaEngine, variables: variableSchema);
         if (virtualError is not null) throw Invalid(virtualError);
         var sourceWithVirtuals = virtuals.Count == 0 ? visibleSource : visibleSource.Concat(virtuals.Select(v => v.Field)).ToList();
         var sourceSchema = new AppFieldSchema(sourceWithVirtuals);
@@ -195,7 +203,7 @@ public sealed class ImportPlanBuilder(
             {
                 ImportMappingSource.Dynamic => ResolveDynamic(m, dest, sourceWithVirtuals, anySourceType: file is not null || (m.SourceFid is { } sf && ImportVirtual.IsVirtualFid(sf)), cfg.RunTimeZone),
                 ImportMappingSource.Static => ResolveStatic(m, dest, dest.Fid == mergeKey?.Fid),
-                ImportMappingSource.Formula => ResolveFormula(m, dest, sourceSchema),
+                ImportMappingSource.Formula => ResolveFormula(m, dest, sourceSchema, variableSchema),
                 _ => throw Invalid($"'{ImportTypeCompatibility.DisplayName(dest)}' has an unknown value source.")
             });
         }
@@ -525,13 +533,13 @@ public sealed class ImportPlanBuilder(
 
     /// <summary>A formula is the platform's own formula language, compiled against the source table's fields the user can see.
     /// Its result type must be one the destination can safely take, which is checked here, before any row is read.</summary>
-    private ResolvedMapping ResolveFormula(ImportFieldMapping m, AppField dest, AppFieldSchema sourceSchema)
+    private ResolvedMapping ResolveFormula(ImportFieldMapping m, AppField dest, AppFieldSchema sourceSchema, IVariableSchema? variables)
     {
         var name = ImportTypeCompatibility.DisplayName(dest);
         if (string.IsNullOrWhiteSpace(m.Formula)) throw Invalid($"Enter the formula for '{name}'.");
         if (m.Formula.Length > MaxFormulaLength) throw Invalid($"The formula for '{name}' is too long (at most {MaxFormulaLength} characters).");
         if (ImportFormulaGuard.IsTooDeep(m.Formula)) throw Invalid($"The formula for '{name}' is nested too deeply (at most {ImportFormulaGuard.MaxNesting} levels).");
-        var compiled = formulaEngine.Compile(m.Formula, sourceSchema);
+        var compiled = formulaEngine.Compile(m.Formula, sourceSchema, variableSchema: variables);
         if (compiled.Diagnostics.FirstOrDefault(d => d.Severity == FormulaSeverity.Error) is { } error)
             throw Invalid($"The formula for '{name}' has an error: {error.Message}");
         var problem = ImportTypeCompatibility.CheckFormulaResult(compiled.ResultType, dest);
