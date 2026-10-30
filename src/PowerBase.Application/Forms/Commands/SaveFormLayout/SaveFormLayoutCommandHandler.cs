@@ -13,15 +13,21 @@ public class SaveFormLayoutCommandHandler
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
     private readonly IFieldReferenceIndexer _refIndexer;
+    private readonly IRelationshipRepository? _relRepo;
+    private readonly IReportRepository? _reportRepo;
 
     public SaveFormLayoutCommandHandler(
         IFormRepository formRepo,
         IAppFieldRepository fieldRepo,
         IQueryContext queryContext,
         IAuditRepository auditRepo,
-        IFieldReferenceIndexer? refIndexer = null)
+        IFieldReferenceIndexer? refIndexer = null,
+        IRelationshipRepository? relRepo = null,
+        IReportRepository? reportRepo = null)
     {
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
+        _relRepo = relRepo;
+        _reportRepo = reportRepo;
         _formRepo = formRepo;
         _fieldRepo = fieldRepo;
         _queryContext = queryContext;
@@ -56,6 +62,20 @@ public class SaveFormLayoutCommandHandler
             {
                 ["Elements"] = [$"AppFieldId(s) {string.Join(", ", invalidIds)} do not belong to this table."]
             });
+
+        // "Select using record picker": only a Reference field element (or its proxy) keeps its choice, and only when the
+        // target is a shared Table report on the parent table / a lookup of this relationship (see RecordPickerRules).
+        var childRelationships = _relRepo is null ? [] : await _relRepo.ListByChildTableAsync(form.AppTableId, ct);
+        var pickerChoices = new Dictionary<FormElementLayout, RecordPickerRules.Choice>(ReferenceEqualityComparer.Instance);
+        foreach (var e in command.Sections.SelectMany(s => s.Blocks).SelectMany(b => b.Elements))
+        {
+            var elementField = e.ElementType == "Field" && e.AppFieldId.HasValue
+                ? tableFields.FirstOrDefault(f => f.Fid.HasValue && f.Fid.Value == e.AppFieldId.Value)
+                : null;
+            pickerChoices[e] = await RecordPickerRules.NormalizeAsync(
+                e.ElementType, e.RecordPickerMode, e.RecordPickerReportPublicId, e.RecordPickerFieldId,
+                elementField, tableFields, childRelationships, _reportRepo, ct);
+        }
 
         // PublicId is carried through so a caller can keep a saved section/block/element's
         // identity across this save — the layout is re-inserted wholesale, so without it every
@@ -127,6 +147,9 @@ public class SaveFormLayoutCommandHandler
                     ContentWidthValue = e.ContentWidthValue,
                     ContentWidthUnit  = e.ContentWidthUnit,
                     Name              = e.Name,
+                    RecordPickerMode           = pickerChoices[e].Mode,
+                    RecordPickerReportPublicId = pickerChoices[e].ReportPublicId,
+                    RecordPickerFieldId        = pickerChoices[e].FieldId,
                 }).ToList(),
             }).ToList(),
         }).ToList();

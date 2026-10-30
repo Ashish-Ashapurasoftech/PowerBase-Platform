@@ -1,5 +1,6 @@
 using Dapper;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Infrastructure.Persistence;
@@ -10,6 +11,21 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
 {
     public FormRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
+
+    public async Task<RecordPickerElementDto?> GetRecordPickerElementAsync(Guid elementPublicId, CancellationToken ct = default)
+    {
+        const string sql = """
+            SELECT f.AppTableId, fe.AppFieldId AS AppFieldFid, fe.RecordPickerMode AS Mode,
+                   fe.RecordPickerReportPublicId AS ReportPublicId, fe.RecordPickerFieldId AS FieldId
+            FROM meta.FormElement fe
+            JOIN meta.FormSection fs ON fs.Id = fe.FormSectionId
+            JOIN meta.Form f ON f.Id = fs.FormId
+            WHERE fe.PublicId = @elementPublicId AND f.IsDeleted = 0
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.QuerySingleOrDefaultAsync<RecordPickerElementDto>(
+            new CommandDefinition(sql, new { elementPublicId }, cancellationToken: ct));
+    }
 
     public async Task<long?> GetTableIdByFormIdAsync(long formId, CancellationToken ct = default)
     {
@@ -215,7 +231,8 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                fe.IsRequired, fe.DisplayAs, fe.DisplayOrder,
                fe.ColStart, fe.RowStart, fe.ColSpan, fe.RowSpan, fe.GroupId, fe.CloneGroupId,
                fe.FormPageId, fe.TextStyle, fe.BackgroundColor, fe.BorderColor, fe.BorderWidth,
-               fe.ContentWidthMode, fe.ContentWidthValue, fe.ContentWidthUnit, fe.Name
+               fe.ContentWidthMode, fe.ContentWidthValue, fe.ContentWidthUnit, fe.Name,
+               fe.RecordPickerMode, fe.RecordPickerReportPublicId, fe.RecordPickerFieldId
         FROM meta.FormElement fe
         JOIN meta.FormSection fs ON fs.Id = fe.FormSectionId
         JOIN meta.Form f ON f.Id = fs.FormId
@@ -336,7 +353,8 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
              WidthMode, WidthValue, HelpTextOverride, IsReadOnly, IsRequired, DisplayAs, DisplayOrder,
              ColStart, RowStart, ColSpan, RowSpan, GroupId, CloneGroupId, FormPageId,
              TextStyle, BackgroundColor, BorderColor, BorderWidth,
-             ContentWidthMode, ContentWidthValue, ContentWidthUnit, Name)
+             ContentWidthMode, ContentWidthValue, ContentWidthUnit, Name,
+             RecordPickerMode, RecordPickerReportPublicId, RecordPickerFieldId)
         OUTPUT INSERTED.Id
         VALUES
             (ISNULL(@publicId, NEWID()), @formSectionId, @formSectionBlockId, @appFieldId, @elementType, @elementContent,
@@ -344,7 +362,8 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
              @widthMode, @widthValue, @helpTextOverride, @isReadOnly, @isRequired, @displayAs, @displayOrder,
              @colStart, @rowStart, @colSpan, @rowSpan, @groupId, @cloneGroupId, @formPageId,
              @textStyle, @backgroundColor, @borderColor, @borderWidth,
-             @contentWidthMode, @contentWidthValue, @contentWidthUnit, @name)
+             @contentWidthMode, @contentWidthValue, @contentWidthUnit, @name,
+             @recordPickerMode, @recordPickerReportPublicId, @recordPickerFieldId)
         """;
 
     private const string AppendFieldSql = """
@@ -712,6 +731,9 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                         contentWidthValue  = el.ContentWidthValue,
                         contentWidthUnit   = el.ContentWidthUnit,
                         name               = el.Name,
+                        recordPickerMode            = el.RecordPickerMode,
+                        recordPickerReportPublicId  = el.RecordPickerReportPublicId,
+                        recordPickerFieldId         = el.RecordPickerFieldId,
                     }, tx, cancellationToken: ct));
 
                     if (el.PublicId != Guid.Empty)
@@ -887,6 +909,9 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                     contentWidthValue  = el.ContentWidthValue,
                     contentWidthUnit   = el.ContentWidthUnit,
                     name               = el.Name,
+                    recordPickerMode            = el.RecordPickerMode,
+                    recordPickerReportPublicId  = el.RecordPickerReportPublicId,
+                    recordPickerFieldId         = el.RecordPickerFieldId,
                 }, tx, cancellationToken: ct));
             }
         }

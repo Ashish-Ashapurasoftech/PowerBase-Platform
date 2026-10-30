@@ -118,4 +118,9 @@ public class FormElementDetail
     public int? ContentWidthValue { get; init; }
     public string? ContentWidthUnit { get; init; }
     public string? Name { get; init; }
+
+    // Reference / reference-proxy elements only: which parent fields the dropdown shows.
+    public string? RecordPickerMode { get; init; }
+    public Guid? RecordPickerReportPublicId { get; init; }
+    public long? RecordPickerFieldId { get; init; }
 }
