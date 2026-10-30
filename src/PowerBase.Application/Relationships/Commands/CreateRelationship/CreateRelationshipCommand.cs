@@ -19,7 +19,15 @@ public record CreateRelationshipCommand(
     /// Null = standard key (Record ID# / table's global KeyFieldId).
     /// This is purely a display choice — storage is always the parent's internal row Id.
     /// </summary>
-    int? DisplayKeyFieldFid = null);
+    int? DisplayKeyFieldFid = null,
+    /// <summary>Import only: the Fid and label to give the parent's "{child} records" report link (the source file's own), and its link text.</summary>
+    int? ReportLinkFid = null,
+    string? ReportLinkLabel = null,
+    string? ReportLinkText = null,
+    /// <summary>Import only: false when the source has no report link for this relationship, so none is generated.</summary>
+    bool CreateReportLink = true,
+    /// <summary>Import only: false when the source file carries its own "Add {child}" formula, so PowerBase does not add a second one.</summary>
+    bool CreateAddRecordLink = true);
 
 
 /// <summary>A parent field to pull down onto the child as a Lookup. <paramref name="SourceFid"/> is the parent field's Fid.

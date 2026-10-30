@@ -67,6 +67,10 @@ public class ImportFormRuleGapsTests
                     Type: QB::Field::Checkbox
                     Properties:
                       Label: Active
+                  $Field_Opens:
+                    Type: QB::Field::TimeOfDay
+                    Properties:
+                      Label: Opens
                 Forms:
                   Resources:
                     $FormV2_Main_Form:
@@ -357,5 +361,65 @@ public class ImportFormRuleGapsTests
         var (rule, _, _) = Convert(1, Rule(Group("All", RoleClerk, Field("Field_Start", "OnOrBefore", "Value: !Ref\n  Field: $Field_End"), Field("Field_End", "OnOrAfter", "Value: 09-01-2024"))));
 
         rule.ExpressionText.Should().Contain("[Start] <= [End]").And.NotContain("ToText([Start])");
+    }
+
+    [Theory]
+    [InlineData("IsEqualTo", "1", "eq", "true")]
+    [InlineData("IsNotEqualTo", "1", "ne", "true")]
+    [InlineData("IsEqualTo", "0", "eq", "false")]
+    [InlineData("IsEqualTo", "Yes", "eq", "true")]
+    [InlineData("IsEqualTo", "No", "eq", "false")]
+    public void CheckboxCondition_ValueIsWrittenAsTrueOrFalse(string comparison, string quickbaseValue, string expectedOperator, string expectedValue)
+    {
+        var (rule, _, _) = Convert(1, Rule(Group("All", Field("Field_Active", comparison, $"Value: {quickbaseValue}"))));
+
+        var condition = rule.Conditions.Should().ContainSingle().Subject;
+        (condition.Operator, condition.Value).Should().Be((expectedOperator, expectedValue));
+    }
+
+    [Fact]
+    public void CheckboxCondition_WithNoValue_StaysBlank()
+    {
+        var (rule, _, _) = Convert(1, Rule(Group("All", Field("Field_Active", "IsEqualTo"))));
+
+        rule.Conditions.Should().ContainSingle().Which.Value.Should().BeNull();
+    }
+
+    [Fact]
+    public void TextCondition_WithTheValueOne_KeepsItAsText()
+    {
+        var (rule, _, _) = Convert(1, Rule(Group("All", Field("Field_Name", "IsEqualTo", "Value: 1"))));
+
+        rule.Conditions.Should().ContainSingle().Which.Value.Should().Be("1");
+    }
+
+    [Theory]
+    [InlineData("12:00 AM", "00:00:00")]
+    [InlineData("1:30 PM", "13:30:00")]
+    [InlineData("09:15:30", "09:15:30")]
+    public void TimeCondition_ValueIsWrittenAsHoursMinutesSeconds(string quickbaseValue, string expected)
+    {
+        var (rule, _, _) = Convert(1, Rule(Group("All", Field("Field_Opens", "IsEqualTo", $"Value: {quickbaseValue}"))));
+
+        rule.Conditions.Should().ContainSingle().Which.Value.Should().Be(expected);
+    }
+
+    [Theory]
+    [InlineData("1", "true")]
+    [InlineData("0", "false")]
+    public void ChangeActionOnACheckbox_ValueIsWrittenAsTrueOrFalse(string quickbaseValue, string expected)
+    {
+        // the form's one element is the checkbox, so the action has a target on this form
+        var action = $"""
+            - Type: QB::FormV2::Rule::Action::Change
+              Properties:
+                Field: !Ref
+                  Field: $Field_Active
+                Value: {quickbaseValue}
+            """;
+        var yaml = App(1, Rule(Group("All", Field("Field_Name", "IsEqualTo", "Value: x")), action)).Replace("Field: $Field_Name", "Field: $Field_Active");
+        var rule = QblToPblConverter.Convert(QblSerializer.Deserialize(yaml)).Document.Forms[0].Rules.Single();
+
+        rule.Actions.Should().ContainSingle().Which.ActionValue.Should().Be(expected);
     }
 }

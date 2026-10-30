@@ -271,20 +271,25 @@ public class CreateRelationshipCommandHandler
         }
 
         // 5. Auto-create a Report Link on the parent: "See {child.Name}" — navigates to filtered child records.
+        //    An import from a file that lists the parent's link fields (command.CreateReportLink / CreateAddRecordLink) creates only
+        //    those, on the file's own label and number.
         var appPublicId = await _appRepo.GetPublicIdByIdAsync(parent.AppId, ct);
-        var reportLinkLabel = $"{child.Name} records";
-        var reportLink = await _fieldFactory.CreateAsync(parent, FieldTypeCodeNames.ReportLink, reportLinkLabel, false,
-            new ReportLinkSettings
-            {
-                RelationshipId = relId,
-                TargetAppPublicId = appPublicId.ToString(),
-                TargetTablePublicId = child.PublicId.ToString(),
-                TargetFid = refField.Fid!.Value,
-                SourceFid = null, // null = use Record ID# (Fid 3)
-                LinkText = $"See related {child.Name}",
-                OpenInNewWindow = false,
-            }, ct);
-        createdFields.Add(new(reportLink.PublicId, reportLink.Fid!.Value, reportLink.Label ?? reportLink.Name, "reportlink", reportLink.TypeCode));
+        if (command.CreateReportLink)
+        {
+            var reportLinkLabel = string.IsNullOrWhiteSpace(command.ReportLinkLabel) ? $"{child.Name} records" : command.ReportLinkLabel.Trim();
+            var reportLink = await _fieldFactory.CreateAsync(parent, FieldTypeCodeNames.ReportLink, reportLinkLabel, false,
+                new ReportLinkSettings
+                {
+                    RelationshipId = relId,
+                    TargetAppPublicId = appPublicId.ToString(),
+                    TargetTablePublicId = child.PublicId.ToString(),
+                    TargetFid = refField.Fid!.Value,
+                    SourceFid = null, // null = use Record ID# (Fid 3)
+                    LinkText = string.IsNullOrWhiteSpace(command.ReportLinkText) ? $"See related {child.Name}" : command.ReportLinkText.Trim(),
+                    OpenInNewWindow = false,
+                }, ct, explicitFid: command.ReportLinkFid);
+            createdFields.Add(new(reportLink.PublicId, reportLink.Fid!.Value, reportLink.Label ?? reportLink.Name, "reportlink", reportLink.TypeCode));
+        }
         // No longer appended to forms automatically: the "{child} details" section (added by the wizard via
         // AddRelationshipFormSectionCommandHandler) shows the child records, so the link field itself stays off the form.
         // parentAddFids.Add(reportLink.Fid!.Value);
@@ -292,17 +297,20 @@ public class CreateRelationshipCommandHandler
         // 6. Auto-create a Formula URL on the parent: "Add {child.Name}" — opens a new child record with the
         //    reference pre-filled to this parent (Quickbase's "Add Child" URL formula). Not appended to forms:
         //    the embedded child records there already have their own Add button.
-        var addRecordLabel = $"Add {child.Name}";
-        var addRecordLink = await _fieldFactory.CreateAsync(parent, FieldTypeCodeNames.FormulaUrl, addRecordLabel, false,
-            new FormulaUrlSettings
-            {
-                RelationshipId = relId,
-                Template = AddRecordUrlTemplate(child, refField.Fid!.Value, parentFields),
-                LinkText = addRecordLabel,
-                DisplayAsButton = true,
-                OpenTarget = UrlOpenTargets.SamePage,
-            }, ct);
-        createdFields.Add(new(addRecordLink.PublicId, addRecordLink.Fid!.Value, addRecordLink.Label ?? addRecordLink.Name, "addrecord", addRecordLink.TypeCode));
+        if (command.CreateAddRecordLink)
+        {
+            var addRecordLabel = $"Add {child.Name}";
+            var addRecordLink = await _fieldFactory.CreateAsync(parent, FieldTypeCodeNames.FormulaUrl, addRecordLabel, false,
+                new FormulaUrlSettings
+                {
+                    RelationshipId = relId,
+                    Template = AddRecordUrlTemplate(child, refField.Fid!.Value, parentFields),
+                    LinkText = addRecordLabel,
+                    DisplayAsButton = true,
+                    OpenTarget = UrlOpenTargets.SamePage,
+                }, ct);
+            createdFields.Add(new(addRecordLink.PublicId, addRecordLink.Fid!.Value, addRecordLink.Label ?? addRecordLink.Name, "addrecord", addRecordLink.TypeCode));
+        }
 
         // 7. Auto-append new fields to forms that opt in.
         await _fieldFactory.AppendToAutoAddFormsAsync(child.PublicId, childAddFids, ct);
