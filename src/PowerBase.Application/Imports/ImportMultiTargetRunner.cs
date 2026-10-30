@@ -135,6 +135,14 @@ public sealed class ImportMultiTargetRunner(
                 foreach (var t in targets.Where(t => t.TableIndex == table.TableIndex)) t.Gate = gate;
             }
 
+            // A filter (the import's, a table's or a sheet's) that excludes duplicates needs the values of its source counted first.
+            if (sourceGroups.Any(g => g.ReadPlan.RowFilter is { CountsDuplicates: true } || g.Targets.Any(t => t.Plan.TableFilter is { CountsDuplicates: true }))
+                && !await CountFilterDuplicatesAsync(sourceGroups, run, ct))
+            {
+                await FinishAsync(run, snapshot, home, ImportRunStatus.Cancelled, "Cancelled before anything was imported.", null, end, ct);
+                return;
+            }
+
             List<Dictionary<int, HashSet<ulong>>?>? duplicateGroups = null;
             var writeFrom = 0;
             var policy = home.ConstraintPolicy;
@@ -186,6 +194,36 @@ public sealed class ImportMultiTargetRunner(
     /// <summary>The part of the run's progress a source group covers: the groups share the pass's range evenly.</summary>
     private static (int From, int To) GroupRange(int from, int to, int index, int count) =>
         (from + (to - from) * index / count, from + (to - from) * (index + 1) / count);
+
+    /// <summary>Reads every source group once so each "does not have a duplicate" condition (in the import's filter, a table's or a sheet's) knows how often every value
+    /// occurs and which row had it first: a table's filter counts the rows that reach it, after the import's filter. Writes nothing. False when the run was stopped.</summary>
+    private async Task<bool> CountFilterDuplicatesAsync(List<SourceGroup> groups, ImportRun run, CancellationToken ct)
+    {
+        var filters = groups.SelectMany(g => new[] { g.ReadPlan.RowFilter }.Concat(g.Targets.Select(t => t.Plan.TableFilter)))
+            .Where(f => f is { CountsDuplicates: true }).Select(f => f!).Distinct().ToList();
+        foreach (var f in filters) f.BeginCountingDuplicates();
+        try
+        {
+            foreach (var group in groups)
+            {
+                var own = group.Targets.Select(t => t.Plan.TableFilter).Where(f => f is { CountsDuplicates: true }).Select(f => f!).ToList();
+                if (group.ReadPlan.RowFilter is not { CountsDuplicates: true } && own.Count == 0) continue;
+                await using var source = await OpenSourceAsync(group, ct);
+                long cursor = 0;
+                while (true)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var chunk = await source.ReadChunkAsync(group.ReadPlan, cursor, group.MaxId, ct);
+                    if (chunk.Exhausted) break;
+                    foreach (var filter in own) foreach (var row in chunk.Rows) filter.Matches(row);
+                    cursor = chunk.LastId;
+                    if (await runs.AdvanceAsync(run.Id, new ImportChunkResult(0, 0, 0, 0, 0, 0), 0, ct)) return false;
+                }
+            }
+            return true;
+        }
+        finally { foreach (var f in filters) f.FinishCountingDuplicates(); }
+    }
 
     /// <summary>Reads every source group once and, for every table, learns which unique values occur more than once (across all the sheets the
     /// table reads), so the writing pass can leave out each such group entirely. Writes nothing. Null when the run was stopped.</summary>
