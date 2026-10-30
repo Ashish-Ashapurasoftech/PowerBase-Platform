@@ -227,12 +227,12 @@ public class ReportLargeTableTests
     {
         var sut = Handler();
         SearchIsOnAndMatches(totalMatches: 5_000);
-        _searchService.SearchRecordsAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns(new List<Guid>());   // nothing matched: the standard path answers with an empty page
 
         await sut.HandleAsync(new RunReportQuery(ReportId, 1, 20, QuickSearch: "Eng"));
 
-        await _searchService.DidNotReceiveWithAnyArgs().SearchRecordsPagedAsync(default, default, default, default, default, default, default, default, default);
+        // The fast path would ask the index for the report's page (20 rows); the standard path only asks it for the list of matches.
+        await _searchService.DidNotReceive().SearchRecordsPagedAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string?>(), Arg.Any<string?>(),
+            Arg.Any<int>(), 20, Arg.Any<IReadOnlyList<string>?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
     }
 
     // ── Lookups in SQL ─────────────────────────────────────────────────────────────────────────

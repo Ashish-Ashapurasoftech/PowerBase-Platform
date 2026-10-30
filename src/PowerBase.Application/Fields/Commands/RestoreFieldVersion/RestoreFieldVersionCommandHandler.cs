@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Fields.Common;
@@ -32,6 +33,8 @@ public class RestoreFieldVersionCommandHandler
     private readonly IAzureSearchService _searchService;
     private readonly IFieldReferenceIndexer _refIndexer;
     private readonly IAppVariableRepository? _variableRepo;
+    private readonly ILogger<RestoreFieldVersionCommandHandler>? _logger;
+    private readonly ISearchFieldJobs? _fieldJobs;
 
     public RestoreFieldVersionCommandHandler(
         IAppTableRepository tableRepo,
@@ -47,8 +50,12 @@ public class RestoreFieldVersionCommandHandler
         IQueryContext queryContext,
         IAzureSearchService searchService,
         IFieldReferenceIndexer? refIndexer = null,
-        IAppVariableRepository? variableRepo = null)
+        IAppVariableRepository? variableRepo = null,
+        ILogger<RestoreFieldVersionCommandHandler>? logger = null,
+        ISearchFieldJobs? fieldJobs = null)
     {
+        _logger = logger;
+        _fieldJobs = fieldJobs;
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _variableRepo = variableRepo;
         _tableRepo = tableRepo;
@@ -167,31 +174,13 @@ public class RestoreFieldVersionCommandHandler
             await _recordRepo.BackfillDefaultAsync(table, existing, target.DefaultValue!, ct);
         }
 
-        if (isEligible != wasEligible && existing.Fid.HasValue)
+        // Same rule as an ordinary save: eligibility changing, or Searchable alone changing on a field that stays filterable.
+        if ((isEligible != wasEligible || (isEligible && target.IsSearchable != wasSearchable)) && existing.Fid.HasValue)
         {
-            var isNullify = !isEligible;
-            var plan = await PowerBase.Application.Search.FieldSlotSync.PlanAsync(_fieldRepo, table.Id, existing.Fid.Value, isNullify, ct);
-
-            var docs = await _recordRepo.GetFieldBackfillBatchAsync(_queryContext.TenantId, table.AppId, table.Id, existing.Fid.Value, isNullify, page: 1, pageSize: 500, ct);
-
-            if (docs.Count > 0 && plan.HasTarget)
-            {
-                await _searchService.BulkIndexRecordsAsync(PowerBase.Application.Search.FieldSlotSync.ToDocuments(docs, plan), ct);
-            }
-
-            await PowerBase.Application.Search.SearchWideMigration.StartIfNeededAsync(_fieldRepo, _messagePublisher, _searchService, _queryContext.TenantId, table.AppId, table.Id, ct);
-
-            var action = isEligible ? PowerBase.Application.Common.Models.IndexAction.BackfillField : PowerBase.Application.Common.Models.IndexAction.NullifyField;
-            var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
-            {
-                Action = action,
-                TenantId = _queryContext.TenantId,
-                AppId = table.AppId,
-                TableId = table.Id,
-                FieldId = existing.Fid.Value,
-                Page = 1
-            };
-            _ = _messagePublisher.PublishAsync(msg, default);
+            // Never throws: the restore is saved by now, and the audit entry below must still be written.
+            await PowerBase.Application.Search.FieldSlotSync.SyncAsync(
+                _fieldRepo, _recordRepo, _searchService, _messagePublisher, _queryContext.TenantId, table.AppId, table.Id, existing.Fid.Value,
+                isNullify: !isEligible, clearSlot: null, (ex, message) => _logger?.LogError(ex, "{Message}", message), ct, _fieldJobs);
         }
 
         await _auditRepo.LogActivityAsync(

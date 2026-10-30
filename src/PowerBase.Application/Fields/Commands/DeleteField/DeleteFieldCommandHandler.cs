@@ -17,6 +17,7 @@ public class DeleteFieldCommandHandler
     private readonly IRelationshipRepository _relRepo;
     private readonly IFieldReferenceIndexer _refIndexer;
     private readonly IMessagePublisher? _publisher;
+    private readonly ISearchFieldJobs? _fieldJobs;
     private readonly IQueryContext? _queryContext;
 
     public DeleteFieldCommandHandler(
@@ -28,9 +29,11 @@ public class DeleteFieldCommandHandler
         IRelationshipRepository relRepo,
         IFieldReferenceIndexer? refIndexer = null,
         IMessagePublisher? publisher = null,
-        IQueryContext? queryContext = null)
+        IQueryContext? queryContext = null,
+        ISearchFieldJobs? fieldJobs = null)
     {
         _publisher = publisher;
+        _fieldJobs = fieldJobs;
         _queryContext = queryContext;
         _relRepo = relRepo;
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
@@ -116,7 +119,7 @@ public class DeleteFieldCommandHandler
                 await _auditRepo.LogActivityAsync(
                     AuditActions.SchemaChanged, AuditEntityTypes.AppField, field.PublicId.ToString(), $"Field deleted: {field.Name} From TableName : {table.Name}", appId: table.AppId, ct: ct);
                 await _refIndexer.RemoveSourceAsync(FieldReferenceSourceTypes.Field, field.PublicId, ct);
-                await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct);
+                await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct, _fieldJobs);
 
                 return;
             }
@@ -144,6 +147,6 @@ public class DeleteFieldCommandHandler
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, field.PublicId.ToString(), $"Field deleted: {field.Name} From TableName : {table.Name}", appId: table.AppId, ct: ct);
         await _refIndexer.RemoveSourceAsync(FieldReferenceSourceTypes.Field, field.PublicId, ct);
-        await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct);
+        await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct, _fieldJobs);
     }
 }

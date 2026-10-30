@@ -220,12 +220,20 @@ public class ServiceBusPublisher : IMessagePublisher
     private void LogSendFailure<T>(Exception ex, T message, string queue) =>
         _logger?.LogError(ex, "Failed to publish search index message to {Queue}: {Message}. The index will not reflect it until the record is reindexed.", queue, Describe(message));
 
+    /// <summary>
+    /// One id per change, not per record: with duplicate detection on the queue, an id without the version made a second edit of the
+    /// same record inside the detection window look like a resend of the first, and it was dropped. The same change sent twice (the
+    /// outbox relay re-publishing it) keeps its version, so it is still recognised as a duplicate.
+    /// </summary>
+    internal static string MessageIdFor(PowerBase.Application.Common.Models.SearchIndexMessage sim) =>
+        $"{sim.TenantId}_{sim.TableId}_{sim.RecordPublicId}_{sim.Action}_{sim.Version}";
+
     private static ServiceBusMessage CreateServiceBusMessage<T>(T message, byte[] bodyBytes)
     {
         var msg = new ServiceBusMessage(bodyBytes);
         if (message is PowerBase.Application.Common.Models.SearchIndexMessage sim && sim.RecordPublicId != Guid.Empty)
         {
-            msg.MessageId = $"{sim.TenantId}_{sim.TableId}_{sim.RecordPublicId}_{sim.Action}";
+            msg.MessageId = MessageIdFor(sim);
             msg.CorrelationId = sim.RecordPublicId.ToString();
         }
         else

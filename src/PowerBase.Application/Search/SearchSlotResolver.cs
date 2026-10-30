@@ -66,9 +66,20 @@ public static class SearchSlotResolver
     public static bool IsWideTable(IReadOnlyList<AppField> tableFields) =>
         tableFields.Any(f => !f.IsDeleted && IsWideSlot(f.SearchSlot));
 
-    /// <summary>True when the table has outgrown the shared index but has not been moved yet (the migration is due or running).</summary>
-    public static bool ShouldBeWide(IReadOnlyList<AppField> tableFields) =>
-        !IsWideTable(tableFields) && tableFields.Count(f => !f.IsDeleted && IsSearchEligible(f)) > WideTableThreshold;
+    /// <summary>
+    /// True when the table has outgrown the shared index but has not been moved yet (the migration is due or running): more eligible
+    /// fields than <see cref="WideTableThreshold"/>, or more eligible fields of one column family than that family has slots. Without the
+    /// second rule a table with 61 searchable text fields stayed in the shared index and the 61st was never found by quick search.
+    /// </summary>
+    public static bool ShouldBeWide(IReadOnlyList<AppField> tableFields)
+    {
+        if (IsWideTable(tableFields)) return false;
+        var eligible = tableFields.Where(f => !f.IsDeleted && IsSearchEligible(f)).ToList();
+        if (eligible.Count > WideTableThreshold) return true;
+        return eligible
+            .GroupBy(f => SlotPrefix(f.TypeCode))
+            .Any(g => g.Sum(f => IsRange(f.TypeCode) ? 2 : 1) > MaxSlots(g.Key));
+    }
 
     public static string GetTableIndexName(long tableId) =>
         $"pb-tbl-{tableId}";

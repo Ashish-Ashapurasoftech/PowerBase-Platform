@@ -24,6 +24,7 @@ public class CreateRelationshipCommandHandler
     private readonly PowerBase.Application.Formulas.IFormulaProjector _formulaProjector;
     private readonly IRelationalProjector _relationalProjector;
     private readonly IMessagePublisher? _publisher;
+    private readonly ISearchFieldJobs? _fieldJobs;
     private readonly IQueryContext? _queryContext;
 
     public CreateRelationshipCommandHandler(
@@ -39,9 +40,11 @@ public class CreateRelationshipCommandHandler
         PowerBase.Application.Formulas.IFormulaProjector formulaProjector,
         IRelationalProjector relationalProjector,
         IMessagePublisher? publisher = null,
-        IQueryContext? queryContext = null)
+        IQueryContext? queryContext = null,
+        ISearchFieldJobs? fieldJobs = null)
     {
         _publisher = publisher;
+        _fieldJobs = fieldJobs;
         _queryContext = queryContext;
         _schemaEngine = schemaEngine;
         _recordRepo = recordRepo;
@@ -437,7 +440,7 @@ public class CreateRelationshipCommandHandler
         }
 
         // The conversion rewrote the column's values with a set-based UPDATE, which no record write saw: push the field to the index again.
-        await PowerBase.Application.Search.SearchFieldReindex.RequestAsync(_publisher, _queryContext, child, existing, ct);
+        await PowerBase.Application.Search.SearchFieldReindex.RequestAsync(_publisher, _queryContext, child, existing, ct, _fieldJobs);
         return (warning, originalField?.Fid);
     }
 

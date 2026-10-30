@@ -23,6 +23,17 @@ public interface IAppFieldRepository
     /// the table's own index. Call it only after the table's documents have been copied there.
     /// </summary>
     Task MarkTableWideAsync(long tableId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Frees the index column(s) a DELETED field still holds, once its values have been emptied from every document, so another field
+    /// can use them (a deleted field keeps them reserved until then, because old documents still carry its values). Only a deleted field
+    /// that still holds exactly <paramref name="slot"/> is changed; a live field never is. Returns how many fields were changed.
+    /// </summary>
+    Task<int> ReleaseDeletedFieldSlotAsync(long tableId, long fid, string slot, CancellationToken ct = default);
+
+    /// <summary>The deleted fields of a table that still hold a column of the shared index (Fid, SearchSlot and SearchSlotEnd filled):
+    /// their values may still be in old documents, so the columns stay reserved until a cleanup empties and frees them.</summary>
+    Task<IReadOnlyList<AppField>> ListDeletedSlotHoldersAsync(long tableId, CancellationToken ct = default);
     /// <summary>Slim, paged, searchable (by Label), sortable, filterable listing for the fields grid.
     /// <paramref name="filter"/> accepts either a dropdown value (e.g. "System Fields", "Required Fields")
     /// or a category name (Text/Numeric/Date/Other/User/Formula/Relationship/Action); null/"All Fields"
