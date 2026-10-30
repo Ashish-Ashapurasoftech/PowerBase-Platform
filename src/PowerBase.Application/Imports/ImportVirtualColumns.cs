@@ -3,6 +3,7 @@ using PowerBase.Application.Imports.Files;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Formula;
+using PowerBase.Formula.Binding;
 using PowerBase.Formula.Diagnostics;
 using PowerBase.Formula.Evaluation;
 using PowerBase.Formula.Types;
@@ -43,7 +44,7 @@ public static class ImportVirtual
     /// result a column cannot hold are reported with the column's name. Null error means all is well. With <paramref name="lenient"/> a
     /// column that has a problem is left out instead of failing the lot: used to see what a formula being typed may refer to.</summary>
     public static (IReadOnlyList<ResolvedVirtual> Items, string? Error) Resolve(
-        IReadOnlyList<ImportVirtualColumn> columns, IReadOnlyList<AppField> sourceFields, FormulaEngine engine, bool lenient = false)
+        IReadOnlyList<ImportVirtualColumn> columns, IReadOnlyList<AppField> sourceFields, FormulaEngine engine, bool lenient = false, IVariableSchema? variables = null)
     {
         if (columns.Count == 0) return ([], null);
         if (columns.Count > MaxColumns)
@@ -85,7 +86,7 @@ public static class ImportVirtual
             string? firstError = null;
             foreach (var c in pending.ToList())
             {
-                var compiled = engine.Compile(c.Formula!, schema);
+                var compiled = engine.Compile(c.Formula!, schema, variableSchema: variables);
                 if (compiled.Diagnostics.FirstOrDefault(d => d.Severity == FormulaSeverity.Error) is { } error)
                 {
                     firstError ??= $"The formula for the virtual column '{c.Name.Trim()}' has an error: {error.Message}";

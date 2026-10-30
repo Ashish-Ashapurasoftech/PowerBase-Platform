@@ -59,6 +59,7 @@ public class RenderedTabResult
     public string Id { get; init; } = string.Empty;
     public string Name { get; init; } = string.Empty;
     public DashboardGrid Grid { get; init; } = new();
+    public IReadOnlyList<DashboardFilterSlot> Filters { get; init; } = [];
     public IReadOnlyList<RenderedWidgetResult> Widgets { get; init; } = [];
 }
 
@@ -136,6 +137,7 @@ public class RenderPageQueryHandler
                 Id = tab.Id,
                 Name = tab.Name,
                 Grid = tab.Grid,
+                Filters = tab.Filters,
                 Widgets = widgetResults,
             });
         }

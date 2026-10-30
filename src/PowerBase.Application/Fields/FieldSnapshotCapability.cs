@@ -12,16 +12,7 @@ namespace PowerBase.Application.Fields;
 /// </summary>
 public static class FieldSnapshotCapability
 {
-    private static readonly HashSet<string> SupportedDestinationTypeCodes = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "Text", "TextMultiLine",
-        "Number", "Currency", "Percent",
-        "Date", "DateTime", "Time",
-        "Boolean",
-        "Phone", "Email", "Url",
-    };
-
-    public static bool IsSupportedDestination(string typeCode) => SupportedDestinationTypeCodes.Contains(typeCode);
+    public static bool IsSupportedDestination(string typeCode) => SnapshotTypeCompatibility.IsSupportedDestination(typeCode);
 
     /// <summary>A field whose value can be captured: a stored field, or a Lookup (whose value is read from the related table at the time the record is created).</summary>
     public static bool IsEligibleSource(AppField f) =>
@@ -33,7 +24,7 @@ public static class FieldSnapshotCapability
     /// (<paramref name="sourceFid"/> null) is always allowed, so a legacy row is never blocked by this.</summary>
     public static IDictionary<string, string[]> Validate(
         AppField destination, string label, int? sourceFid, bool editable,
-        bool isRequired, bool isUnique, bool isEncrypted, bool isAutoFill,
+        bool isRequired, bool isUnique, bool isAutoFill,
         IReadOnlyList<AppField> tableFields)
     {
         var errors = new Dictionary<string, string[]>();
@@ -57,17 +48,18 @@ public static class FieldSnapshotCapability
             return errors;
         }
 
-        var mismatch = ImportTypeCompatibility.CheckMapping(source, destination);
-        if (mismatch is not null)
+        // Encrypted fields are fine: only text-like types can be encrypted, the value is captured as plain text in memory and
+        // encrypted by the record writer like any other write.
+        var sourceType = FieldValueTypes.Of(source);
+        if (!SnapshotTypeCompatibility.IsCompatible(sourceType, destination.TypeCode))
         {
-            errors["SnapshotSourceFid"] = [mismatch.Replace("cannot be imported into", "cannot be captured into")];
+            errors["SnapshotSourceFid"] =
+                [$"'{ImportTypeCompatibility.DisplayName(source)}' ({sourceType ?? source.TypeCode}) cannot be captured into '{label}' ({destination.TypeCode})."];
             return errors;
         }
 
         if (isUnique)
             errors["IsUnique"] = ["A Snapshot field cannot also be unique."];
-        if (isEncrypted)
-            errors["IsEncrypted"] = ["A Snapshot field cannot be encrypted."];
         if (isAutoFill)
             errors["IsAutoFill"] = ["A Snapshot field cannot use Auto-fill — a copied record takes a fresh snapshot instead."];
         // A blank source would fail every record create if the snapshot had to be non-empty.
