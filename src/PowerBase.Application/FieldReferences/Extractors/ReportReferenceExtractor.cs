@@ -43,6 +43,7 @@ public static class ReportReferenceExtractor
         foreach (var filter in definition.Filters) Add(filter.FieldId, FieldReferenceUsages.Filter);
 
         foreach (var aggregation in definition.Aggregations) Add(aggregation.FieldId, FieldReferenceUsages.Aggregation);
+        foreach (var variable in definition.SummaryVariables) Add(variable.FieldId, FieldReferenceUsages.Aggregation);
 
         foreach (var fid in definition.CustomDynamicFilterFields) Add(fid, FieldReferenceUsages.DynamicFilter);
         foreach (var item in definition.CustomDynamicFilterItems) Add(item.FieldId, FieldReferenceUsages.DynamicFilter);

@@ -1746,19 +1746,30 @@ public class RunReportQueryHandler
             ? visibleAggregations
             : [.. visibleAggregations, gaugeGoalAggregation];
 
-        var summarySort = ResolveSummarySort(definition, rowGroupSpecs, aggregationsForQuery);
+        // Summary formulas: the aggregates their variables read join the same grouped query (the formulas themselves are
+        // calculated per output row afterwards). A summary formula can't be ordered by in SQL, see the sort below.
+        var summaryFormulaPlan = SummaryFormulaEvaluator.CreatePlan(definition, allFields, table.Id, visibleFieldIds, aggregationsForQuery);
+        List<SummaryAggregation> queryAggregations = [.. aggregationsForQuery, .. summaryFormulaPlan.ExtraAggregations];
+        var displayAggregations = definition.Aggregations
+            .Where(a => visibleFieldIds.Contains(a.FieldId) || summaryFormulaPlan.Has(a.FieldId))
+            .ToList();
+
+        var summarySort = ResolveSummarySort(definition, rowGroupSpecs, queryAggregations);
         var seriesMode = definition.Chart?.SeriesMode ?? "EqualValues";
         // A Formula/Lookup/Summary field has no column, so SQL can't group by or aggregate it (it fails with
         // "Invalid column name" and the report never loads) — those reports are summarized in memory instead.
-        var rows = InMemorySummarizer.IsRequired(rowGroupSpecs, aggregationsForQuery, seriesField, allFields, summaryFilterTree)
+        var rows = InMemorySummarizer.IsRequired(rowGroupSpecs, queryAggregations, seriesField, allFields, summaryFilterTree)
             ? await InMemorySummarizer.SummarizeAsync(
                 _recordRepo, _relationalProjector, _formulaProjector,
-                table, rowGroupSpecs, aggregationsForQuery, allFields,
+                table, rowGroupSpecs, queryAggregations, allFields,
                 summaryFilterTree, access.RestrictToCreatedBy, seriesField, seriesMode, summarySort, ct)
             : await _recordRepo.SummarizeAsync(
-                table, rowGroupSpecs, aggregationsForQuery, allFields,
+                table, rowGroupSpecs, queryAggregations, allFields,
                 filterTree: summaryFilterTree, restrictToCreatedBy: access.RestrictToCreatedBy,
                 seriesField: seriesField, seriesMode: seriesMode, sort: summarySort, ct: ct);
+        rows = SummaryFormulaEvaluator.Apply(rows, summaryFormulaPlan);
+        if (definition.SummarySortFields.Any(f => f.AggregationFieldId is { } id && SummaryFormulaFields.IsSummaryFormulaFid(id)))
+            rows = SummaryFormulaEvaluator.Sort(rows, definition.SummarySortFields, rowGroupSpecs.Count, fieldMap);
 
         // SummarizeAsync groups by the raw stored value — for a User field that's the numeric
         // user ID, not a display name (unlike RunTableAsync's rows, which already go through
@@ -1822,9 +1833,14 @@ public class RunReportQueryHandler
         var percentAliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var columnTotals = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
 
-        for (var i = 0; i < visibleAggregations.Count; i++)
+        for (var i = 0; i < displayAggregations.Count; i++)
         {
-            var agg = visibleAggregations[i];
+            var agg = displayAggregations[i];
+            if (summaryFormulaPlan.Has(agg.FieldId))
+            {
+                aggAliasToKey[SummaryFormulaFields.RowKey(agg.FieldId)] = $"agg{i}_{agg.FieldId}";
+                continue;
+            }
             if (!fieldMap.TryGetValue(agg.FieldId, out var aggField)) continue;
             var alias = $"{agg.Function}_{aggField.Name.Replace(" ", "_")}";
             aggAliasToKey[alias] = $"agg{i}_{agg.FieldId}";
@@ -1889,9 +1905,18 @@ public class RunReportQueryHandler
         {
             columns.Add(new ReportColumnInfo { FieldId = seriesField.Fid ?? seriesField.Id, Key = seriesKey!, Name = string.IsNullOrWhiteSpace(seriesField.Label) ? seriesField.Name : seriesField.Label, TypeCode = seriesField.TypeCode });
         }
-        for (var i = 0; i < visibleAggregations.Count; i++)
+        for (var i = 0; i < displayAggregations.Count; i++)
         {
-            var agg = visibleAggregations[i];
+            var agg = displayAggregations[i];
+            if (summaryFormulaPlan.Find(agg.FieldId) is { } summaryFormula)
+            {
+                columns.Add(new ReportColumnInfo
+                {
+                    FieldId = agg.FieldId, Key = $"agg{i}_{agg.FieldId}", Name = summaryFormula.Name,
+                    TypeCode = SummaryFormulaFields.ColumnTypeCode(summaryFormula),
+                });
+                continue;
+            }
             if (fieldMap.TryGetValue(agg.FieldId, out var aggField))
             {
                 var fieldName = string.IsNullOrWhiteSpace(aggField.Label) ? aggField.Name : aggField.Label;
