@@ -127,7 +127,10 @@ public class UpdateFieldCommandHandler
             : command.IsEncrypted;
         var snapshotSourceFid = existing.IsSystem ? null : command.SnapshotSourceFid;
         var snapshotEditable = snapshotSourceFid.HasValue && command.SnapshotEditable;
-        var isAutoFill = existing.IsSystem || snapshotSourceFid.HasValue ? false : command.IsAutoFill;
+        // A field whose type no longer supports Auto-fill (e.g. Text changed to Formula) can still carry the old
+        // flag on its row; drop it rather than rejecting a save that never asked for it.
+        var isAutoFill = existing.IsSystem || snapshotSourceFid.HasValue || !FieldAutoFillCapability.IsSupported(existing.TypeCode)
+            ? false : command.IsAutoFill;
         var isSharedValues = existing.IsSystem ? false : command.IsSharedValues ?? existing.IsSharedValues;
         var settings = existing.IsSystem
             ? SystemFieldSettingsPolicy.RestrictSettingsJson(existing.TypeCode, command.Settings)
