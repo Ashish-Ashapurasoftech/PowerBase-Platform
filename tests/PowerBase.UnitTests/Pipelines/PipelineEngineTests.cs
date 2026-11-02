@@ -2856,6 +2856,77 @@ public class PipelineEngineTests
     }
 
     [Fact]
+    public async Task Condition_InsideLoop_ReferenceToTheLoopedStep_ReadsTheCurrentItem()
+    {
+        // The editor (and the QBL import) writes a field of the looped step inside the loop as {{steps.<looped step>.fid_N}};
+        // the engine reads it from the current item ({{steps.<loop>.item.fid_N}}).
+        var tableGuid = Guid.NewGuid();
+        var searchStep = new PipelineStep
+        {
+            Id = 1,
+            RefId = "ref_search",
+            Type = "query",
+            Subtype = "search-records",
+            ConfigJson = JsonSerializer.Serialize(new { tableId = tableGuid.ToString() })
+        };
+
+        var loopStep = new PipelineStep
+        {
+            Id = 2,
+            RefId = "ref_loop",
+            Type = "loop",
+            Subtype = "for-each",
+            ConfigJson = JsonSerializer.Serialize(new { loopOverStepId = "ref_search" })
+        };
+
+        var conditionStep = new PipelineStep
+        {
+            Id = 3,
+            RefId = "ref_condition",
+            Type = "condition",
+            Subtype = "if-else",
+            ConfigJson = JsonSerializer.Serialize(new
+            {
+                leftOperand = "{{steps.ref_search.fid_5}}",
+                @operator = "greater-than",
+                rightOperand = "2"
+            })
+        };
+
+        var allSteps = new List<PipelineStep> { searchStep, loopStep, conditionStep };
+
+        var table = new AppTable { Id = 10, PublicId = tableGuid, Name = "TestTable" };
+        var fields = new List<AppField>
+        {
+            new() { Id = 50, Fid = 5, Name = "Amount", TypeCode = "NUMERIC" }
+        };
+
+        _tableRepo.GetByPublicIdAsync(tableGuid, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(10, Arg.Any<CancellationToken>()).Returns(fields);
+
+        // Payload has loop item with fid_5 = "10"
+        // Under string comparison, "10" < "2", but under NUMERIC category 10 > 2 (Matched = true)
+        var payloadJson = JsonSerializer.Serialize(new
+        {
+            steps = new Dictionary<string, object>
+            {
+                { "ref_loop", new Dictionary<string, object> { { "item", new Dictionary<string, object> { { "fid_5", "10" } } } } }
+            }
+        });
+
+        var method = typeof(PipelineEngine).GetMethod("ExecuteStepWithServicesAsync", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        // Act
+        var resultJson = await (Task<string>)method!.Invoke(_engine, new object[] {
+            conditionStep, payloadJson, new Dictionary<string, object>(), allSteps, new Dictionary<string, object>(), 1L, new PipelineStepRun(), new List<PipelineEngine.RawStepAuditSnapshot>(), "step_root/ref_loop/loop_index_0",
+            _recordRepo, _tableRepo, _fieldRepo, _recordWriteService, Substitute.For<IPipelineTriggerInterceptor>(), Substitute.For<ITenantUnitOfWork>(), Substitute.For<IPipelineStepIdempotencyRepository>(), Substitute.For<IFileStorageService>(), _pipelineRecordSearchService, CancellationToken.None
+        })!;
+
+        // Assert: 10 > 2 under NUMERIC category evaluates to Matched = true
+        resultJson.Should().Contain("\"Matched\":true");
+    }
+
+    [Fact]
     public async Task Condition_UnresolvableToken_FailsClosedWithoutTextFallback()
     {
         // Arrange

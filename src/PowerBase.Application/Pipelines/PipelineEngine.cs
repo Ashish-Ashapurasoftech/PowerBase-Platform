@@ -1792,13 +1792,40 @@ public partial class PipelineEngine : IPipelineEngine
                 throw new InvalidOperationException("Evaluated Record ID lookup value is empty.");
             }
 
-            if (!long.TryParse(evaluatedRecordIdVal, out var recordId))
+            // By Record ID# (the default) or by the table's key field, which is resolved to the record's Id first.
+            var lookupKeyField = LookUpRecordKey.Field(config.LookupFieldId, table, fields);
+            long recordId;
+            if (lookupKeyField is null)
             {
-                throw new InvalidOperationException($"Evaluated Record ID value '{evaluatedRecordIdVal}' is not a valid numeric identifier.");
+                if (!long.TryParse(evaluatedRecordIdVal, out recordId))
+                {
+                    throw new InvalidOperationException($"Evaluated Record ID value '{evaluatedRecordIdVal}' is not a valid numeric identifier.");
+                }
+            }
+            else
+            {
+                var keyLabel = lookupKeyField.Label ?? lookupKeyField.Name;
+                // Recorded before the search, so a run that finds no record still shows what it looked for.
+                stepRun.InputContext = SerializeAndSanitizeAudit(new {
+                    TablePublicId = config.TablePublicId,
+                    LookupField = keyLabel,
+                    LookupValue = evaluatedRecordIdVal,
+                    SubsequentFields = config.SubsequentFields,
+                    CompareLocalTime = config.CompareLocalTime,
+                    Metadata = BuildAuditFieldMetadata(table, fields)
+                });
+                var typedKey = PowerBase.Application.Relationships.KeyFieldResolver.ConvertToColumnType(lookupKeyField, evaluatedRecordIdVal)
+                    ?? throw new InvalidOperationException($"Evaluated {keyLabel} value '{evaluatedRecordIdVal}' is not a valid {lookupKeyField.TypeCode} value.");
+                var matches = await recordRepo.GetIdsByColumnValuesAsync(table, PowerBase.Application.Relationships.KeyFieldResolver.ColumnName(lookupKeyField), [typedKey], ct);
+                if (matches.Count == 0)
+                    throw new InvalidOperationException($"Record with {keyLabel} '{evaluatedRecordIdVal}' was not found in Table '{table.Name}'.");
+                recordId = matches.Values.First();
             }
 
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
                 TablePublicId = config.TablePublicId,
+                LookupField = lookupKeyField is null ? "Record ID" : lookupKeyField.Label ?? lookupKeyField.Name,
+                LookupValue = evaluatedRecordIdVal,
                 RecordId = recordId,
                 SubsequentFields = config.SubsequentFields,
                 CompareLocalTime = config.CompareLocalTime,
@@ -2303,7 +2330,8 @@ public partial class PipelineEngine : IPipelineEngine
                 normalizedResults.Add(norm);
             }
 
-            var stepOutput = JsonSerializer.Serialize(new { records = normalizedResults });
+            // count matches the chunked output's, so "did the search find records" reads {{steps.x.count}} either way.
+            var stepOutput = JsonSerializer.Serialize(new { records = normalizedResults, count = normalizedResults.Count });
             // No size cap unless one is configured (MaxStepOutputBytes > 0).
             if (_options.MaxStepOutputBytes > 0 && System.Text.Encoding.UTF8.GetByteCount(stepOutput) > _options.MaxStepOutputBytes)
                 throw new PipelineNonRetryableException($"Search Records output exceeds the configured maximum of {_options.MaxStepOutputBytes} bytes. Reduce MaxResults or use a bulk-event pipeline.");
@@ -2324,11 +2352,13 @@ public partial class PipelineEngine : IPipelineEngine
 
             var values = new Dictionary<long, object?>();
             var resolvedMappings = new Dictionary<string, object?>();
+            var addressParts = new PipelineAddressMappings();
             if (config.FieldMappings != null)
             {
                 foreach (var mapping in config.FieldMappings)
                 {
                     if (string.IsNullOrWhiteSpace(mapping.Field)) continue;
+                    if (await TryCollectAddressPartAsync(mapping, fields, addressParts, resolvedMappings, payloadJson, executionPath, allSteps, fieldRepo, tableRepo, ct)) continue;
 
                     var field = ResolvePipelineField(mapping.Field, fields);
 
@@ -2344,6 +2374,7 @@ public partial class PipelineEngine : IPipelineEngine
                     }
                 }
             }
+            addressParts.ApplyTo(values);
 
             LoopBatchProfile.Phase("mappings", ref phaseMark);
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
@@ -2486,11 +2517,13 @@ public partial class PipelineEngine : IPipelineEngine
 
             var values = new Dictionary<long, object?>();
             var resolvedMappings = new Dictionary<string, object?>();
+            var addressParts = new PipelineAddressMappings();
             if (config.FieldMappings != null)
             {
                 foreach (var mapping in config.FieldMappings)
                 {
                     if (string.IsNullOrWhiteSpace(mapping.Field)) continue;
+                    if (await TryCollectAddressPartAsync(mapping, fields, addressParts, resolvedMappings, payloadJson, executionPath, allSteps, fieldRepo, tableRepo, ct)) continue;
 
                     var field = ResolvePipelineField(mapping.Field, fields);
 
@@ -2504,6 +2537,9 @@ public partial class PipelineEngine : IPipelineEngine
                     }
                 }
             }
+            // Writing one part of an address keeps the record's other parts: they are read before the merge.
+            if (addressParts.HasParts)
+                addressParts.ApplyTo(values, await CurrentAddressValuesAsync(recordRepo, table, fields, recordPublicId, addressParts.Fids.Where(fid => !values.ContainsKey(fid)), ct));
 
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
                 TableId = config.TableId,
@@ -3209,7 +3245,10 @@ public partial class PipelineEngine : IPipelineEngine
                 Table = table,
                 Fields = fields,
                 MergeField = mergeField,
-                SelectedFieldFids = config?.Fields?.Select(f => ResolveBulkUpsertField(f, fields).Fid).Where(f => f.HasValue).Select(f => (long)f!.Value).ToHashSet(),
+                // A selected part of an Address (fid_N.city) is kept apart: a row writes that part, not the whole address.
+                SelectedFieldFids = config?.Fields?.Where(f => !PipelineAddressMappings.IsPartReference(f))
+                    .Select(f => ResolveBulkUpsertField(f, fields).Fid).Where(f => f.HasValue).Select(f => (long)f!.Value).ToHashSet(),
+                SelectedAddressParts = PipelineAddressMappings.SelectedParts(config?.Fields, fields),
                 Rows = new List<Dictionary<long, object?>>()
             };
 
@@ -3266,6 +3305,12 @@ public partial class PipelineEngine : IPipelineEngine
             }
 
             var resolvedMappings = new Dictionary<string, object?>();
+            var addressParts = new PipelineAddressMappings();
+            // A selected Address part is present in every row too (blank unless the row maps it).
+            if (root.SelectedAddressParts != null)
+                foreach (var (addressFid, selectedParts) in root.SelectedAddressParts)
+                    if (fields.FirstOrDefault(f => f.Fid == addressFid) is { } addressField)
+                        foreach (var part in selectedParts) addressParts.Add(addressField, part, string.Empty);
 
             // 1. Process FieldMappings if present
             if (config?.FieldMappings != null)
@@ -3273,6 +3318,7 @@ public partial class PipelineEngine : IPipelineEngine
                 foreach (var mapping in config.FieldMappings)
                 {
                     if (string.IsNullOrWhiteSpace(mapping.Field)) continue;
+                    if (await TryCollectAddressPartAsync(mapping, fields, addressParts, resolvedMappings, payloadJson, executionPath, allSteps, fieldRepo, tableRepo, ct)) continue;
                     var field = ResolveBulkUpsertField(mapping.Field, fields);
                     if (field != null && field.Fid.HasValue)
                     {
@@ -3290,6 +3336,7 @@ public partial class PipelineEngine : IPipelineEngine
                 foreach (var kvp in config.RowValues)
                 {
                     if (string.IsNullOrWhiteSpace(kvp.Key)) continue;
+                    if (TryCollectBulkAddressPart(kvp.Key, kvp.Value, fields, addressParts, resolvedMappings, payloadJson, executionPath, allSteps)) continue;
                     var field = ResolveBulkUpsertField(kvp.Key, fields);
                     if (field != null && field.Fid.HasValue)
                     {
@@ -3334,6 +3381,9 @@ public partial class PipelineEngine : IPipelineEngine
                     }
                 }
             }
+
+            // Address parts stay with the row until Commit Upsert knows which record (if any) it updates.
+            addressParts.ApplyToBulkRow(rowValues);
 
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
                 ParentUpsertStepRefId = parentRefId,
@@ -3728,6 +3778,9 @@ public partial class PipelineEngine : IPipelineEngine
                         // Neither provided -> INSERT
                         matchedExistingRow = null;
                     }
+
+                    // Address parts a row set: merged over the matched record's address (update) or an empty one (insert).
+                    PipelineAddressMappings.ResolveBulkRow(row, matchedExistingRow, fields);
 
                     // Remove non-writable (system / computed) fields from row before database writes
                     var nonWritableKeys = row.Keys.Where(k => !writableFids.Contains(k)).ToList();
@@ -4748,6 +4801,8 @@ public partial class PipelineEngine : IPipelineEngine
         var userSub = token.Trim();
         if (UserSubTokenRegex.Match(userSub) is { Success: true } userSubMatch && userSubMatch.Length == userSub.Length)
             return (userSubMatch.Groups[2].Value.Equals("id", StringComparison.OrdinalIgnoreCase) ? "NUMBER" : "TEXT", null);
+        // One part of an Address ({{steps.ref.fid_7.city}}) is text.
+        if (IsAddressSubToken(userSub)) return ("TEXT", null);
 
         var trimmedToken = token.Trim();
         bool isDynamicToken = System.Text.RegularExpressions.Regex.IsMatch(trimmedToken, @"\{\{\s*(?:steps\.|trigger\.|variables\.|[a-zA-Z0-9_]+\.)");
@@ -5005,7 +5060,11 @@ public partial class PipelineEngine : IPipelineEngine
     {
         if (string.IsNullOrEmpty(input)) return string.Empty;
         if (string.IsNullOrEmpty(payloadJson)) return input;
-        if (input.Contains(".fid_", StringComparison.OrdinalIgnoreCase)) input = ExpandUserSubTokens(input, payloadJson, executionPath, allSteps);
+        if (input.Contains(".fid_", StringComparison.OrdinalIgnoreCase))
+        {
+            input = ExpandUserSubTokens(input, payloadJson, executionPath, allSteps);
+            input = ExpandAddressSubTokens(input, payloadJson, executionPath, allSteps);
+        }
         // Callable metadata is part of its durable output; HTTP request metadata is stored separately.
         if (input.Contains("._metadata.", StringComparison.Ordinal))
         {
@@ -5059,7 +5118,7 @@ public partial class PipelineEngine : IPipelineEngine
                                 var targetStep = allSteps.FirstOrDefault(s => string.Equals(s.Id.ToString(), loopOverStepId, StringComparison.OrdinalIgnoreCase) || string.Equals(s.RefId, loopOverStepId, StringComparison.OrdinalIgnoreCase));
                                 if (targetStep != null)
                                 {
-                                    var targetPattern = $@"(?:\bsteps\.)?(?:{Regex.Escape(targetStep.RefId)}|{Regex.Escape(targetStep.Id.ToString())})(?=\.(?!records\b)[a-zA-Z0-9_]+)";
+                                    var targetPattern = $@"(?:\bsteps\.)?(?:{Regex.Escape(targetStep.RefId)}|{Regex.Escape(targetStep.Id.ToString())})(?=\.(?!(?:records|count)\b)[a-zA-Z0-9_]+)";
                                     input = Regex.Replace(input, targetPattern, $"steps.{loopStep.RefId}.item", RegexOptions.IgnoreCase);
                                 }
                             }
@@ -5311,8 +5370,10 @@ public partial class PipelineEngine : IPipelineEngine
 
     private object? ResolveCallableValue(string? input, string payloadJson, string? executionPath, List<PipelineStep>? allSteps)
     {
-        // A complete field reference retains its JSON type; interpolated text remains text.
-        var match = Regex.Match(input ?? "", @"^\{\{\s*((?:steps\.|trigger\.|variables\.)?[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+)\s*\}\}$");
+        // A complete field reference retains its JSON type; interpolated text remains text. One part of an address is read out of
+        // the stored address, as text.
+        if (IsAddressSubToken((input ?? "").Trim())) return EvaluateTokens(input, payloadJson, executionPath, allSteps);
+        var match = Regex.Match(input ?? "",@"^\{\{\s*((?:steps\.|trigger\.|variables\.)?[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+)\s*\}\}$");
         if (!match.Success)
         {
             try { return EvaluateTokens(input, payloadJson, executionPath, allSteps); }
@@ -6230,6 +6291,8 @@ public partial class PipelineEngine : IPipelineEngine
         public IReadOnlyList<AppField>? Fields { get; set; }
         public AppField? MergeField { get; set; }
         public HashSet<long>? SelectedFieldFids { get; set; }
+        /// <summary>Address parts the Prepare step selects (fid → city, zip…), written part by part.</summary>
+        public Dictionary<long, List<string>>? SelectedAddressParts { get; set; }
         public List<Dictionary<long, object?>> Rows { get; set; } = new();
 
         public bool IsCommittable { get; set; } = true;
@@ -6829,6 +6892,8 @@ public partial class PipelineEngine : IPipelineEngine
         public string? CompareLocalTime { get; set; }
         [System.Text.Json.Serialization.JsonConverter(typeof(StringOrPrimitiveJsonConverter))]
         public string? RecordIdValue { get; set; }
+        /// <summary>"fid_N" of the table's key field to look up by; blank = Record ID# (see <see cref="LookUpRecordKey"/>).</summary>
+        public string? LookupFieldId { get; set; }
     }
 
     private class SearchRecordsStepConfig

@@ -323,6 +323,61 @@ public class PipelineStepValidator
         await Validate(new TargetTenantRepos(_appRepo, _tableRepo, _fieldRepo, _appAccessService, null, _enforcer));
     }
 
+    /// <summary>A Look Up a Record step that searches by a field (<c>lookupFieldId</c>) must name Record ID# or the table's
+    /// current key field. Steps without one (every step saved before the setting existed) are not read.</summary>
+    public async Task ValidateLookUpRecordStepAsync(string configJson, CancellationToken ct)
+    {
+        string? lookupFieldId, tableRef, connectionRef;
+        try
+        {
+            using var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(configJson) ? "{}" : configJson);
+            string? Read(string name) => document.RootElement.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+            lookupFieldId = Read("lookupFieldId");
+            tableRef = Read("tablePublicId") ?? Read("tableId") ?? Read("tableLabel");
+            connectionRef = Read("connectionPublicId") ?? Read("connection");
+        }
+        catch (JsonException)
+        {
+            throw new ValidationException(new Dictionary<string, string[]> { ["ConfigJson"] = new[] { "Configuration is malformed." } });
+        }
+        if (string.IsNullOrWhiteSpace(lookupFieldId) || !Guid.TryParse(tableRef, out var tableGuid)) return;
+
+        async Task Validate(TargetTenantRepos repos)
+        {
+            var table = await repos.TableRepo.GetByPublicIdAsync(tableGuid, ct);
+            var fields = await repos.FieldRepo.ListByTableAsync(table.Id, ct);
+            try
+            {
+                LookUpRecordKey.Field(lookupFieldId, table, fields);
+            }
+            catch (InvalidOperationException ex)
+            {
+                throw new ValidationException(new Dictionary<string, string[]> { ["LookupFieldId"] = new[] { ex.Message } });
+            }
+        }
+
+        if (Guid.TryParse(connectionRef, out var connectionId) && !SystemConnectionIds.Contains(connectionId))
+        {
+            var account = await TryResolveSavedAccountAsync(connectionId, ct);
+            if (account != null)
+            {
+                await using var repos = await OpenAccountReposAsync(account, ct);
+                await Validate(repos);
+                return;
+            }
+            var tenant = await _tenantRepo.GetTenantForUserAsync(connectionId, _queryContext.UserId, ct);
+            if (tenant != null && tenant.Id != _queryContext.TenantId)
+            {
+                if (_targetScopeFactory == null)
+                    throw new ValidationException(new Dictionary<string, string[]> { ["ConnectionPublicId"] = new[] { "Target connection validation is unavailable." } });
+                await using var repos = await _targetScopeFactory(tenant.Id);
+                await Validate(repos);
+                return;
+            }
+        }
+        await Validate(new TargetTenantRepos(_appRepo, _tableRepo, _fieldRepo, _appAccessService, null, _enforcer));
+    }
+
     /// <summary>
     /// Validates Create Record required fields against authoritative table metadata. Client-provided
     /// required flags are deliberately ignored, so API callers cannot bypass the rule.
@@ -365,6 +420,16 @@ public class PipelineStepValidator
                 foreach (var mapping in mappings.EnumerateArray())
                 {
                     var fieldText = StringProperty(mapping, "field");
+                    // A part of an Address (fid_N.city) sets that Address: it counts for a required Address unless another
+                    // mapping of the same Address already gives it a value.
+                    if (fieldText != null && PipelineAddressMappings.IsPartReference(fieldText))
+                    {
+                        var addressFid = ParseFid(fieldText[..fieldText.IndexOf('.')]);
+                        if (addressFid.HasValue && mapping.TryGetProperty("value", out var partValue)
+                            && (!values.TryGetValue(addressFid.Value, out var prior) || IsBlank(prior)))
+                            values[addressFid.Value] = partValue;
+                        continue;
+                    }
                     var fid = fieldText is null ? null : ParseFid(fieldText);
                     if (fid.HasValue && mapping.TryGetProperty("value", out var value)) values[fid.Value] = value;
                 }
@@ -397,6 +462,86 @@ public class PipelineStepValidator
             {
                 if (_targetScopeFactory == null)
                     throw new ValidationException(new Dictionary<string, string[]> { ["ConnectionPublicId"] = ["Target connection validation is unavailable."] });
+                await using var repos = await _targetScopeFactory(tenant.Id);
+                await Validate(repos);
+                return;
+            }
+        }
+        await Validate(new TargetTenantRepos(_appRepo, _tableRepo, _fieldRepo, _appAccessService, null, _enforcer));
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex FieldPartReference = new(@"^fid_\d+\.[A-Za-z0-9_]+$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    /// <summary>A Create / Update Record mapping to one part of an Address (<c>fid_N.city</c>): fid_N must be an Address field of the
+    /// step's table and the part one of Street 1, Street 2, City, State/Region, Postal Code, Country. A step without such a mapping
+    /// is not read, so every other step saves exactly as before.</summary>
+    public async Task ValidateAddressPartMappingsAsync(string? configJson, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(configJson) || !configJson.Contains(".", StringComparison.Ordinal)) return;
+        JsonElement root;
+        try
+        {
+            using var doc = JsonDocument.Parse(configJson);
+            root = doc.RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            return; // A malformed configuration is reported by the step's own validation.
+        }
+        if (root.ValueKind != JsonValueKind.Object) return;
+
+        // Create / Update Record name parts in fieldMappings; Prepare Bulk Record Upsert in its field list.
+        var partRefs = new List<string>();
+        if (root.TryGetProperty("fieldMappings", out var mappings) && mappings.ValueKind == JsonValueKind.Array)
+            partRefs.AddRange(mappings.EnumerateArray()
+                .Where(m => m.ValueKind == JsonValueKind.Object && m.TryGetProperty("field", out var f) && f.ValueKind == JsonValueKind.String
+                    && FieldPartReference.IsMatch(f.GetString()!))
+                .Select(m => m.GetProperty("field").GetString()!));
+        if (root.TryGetProperty("fields", out var fieldList) && fieldList.ValueKind == JsonValueKind.Array)
+            partRefs.AddRange(fieldList.EnumerateArray()
+                .Where(f => f.ValueKind == JsonValueKind.String && FieldPartReference.IsMatch(f.GetString()!))
+                .Select(f => f.GetString()!));
+        if (partRefs.Count == 0) return;
+
+        var invalidNames = partRefs.Where(p => !PipelineAddressMappings.IsPartReference(p))
+            .Select(p => $"'{p}' is not a valid Address part. Use street1, street2, city, state, zip or country.").ToArray();
+        if (invalidNames.Length > 0)
+            throw new ValidationException(new Dictionary<string, string[]> { ["FieldMappings"] = invalidNames });
+
+        static string? StringProperty(JsonElement element, params string[] names)
+        {
+            foreach (var property in element.EnumerateObject())
+                if (names.Any(name => string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase)) && property.Value.ValueKind == JsonValueKind.String)
+                    return property.Value.GetString();
+            return null;
+        }
+
+        if (!Guid.TryParse(StringProperty(root, "tablePublicId", "tableId", "tableLabel"), out var tablePublicId)) return;
+        var connectionText = StringProperty(root, "connectionPublicId", "connection");
+
+        async Task Validate(TargetTenantRepos repos)
+        {
+            var table = await repos.TableRepo.GetByPublicIdAsync(tablePublicId, ct);
+            var fields = (await repos.FieldRepo.ListByTableAsync(table.Id, ct)).ToList();
+            var notAddress = partRefs.Where(p => !PipelineAddressFieldFilter.TryResolve(p, fields, out _, out _))
+                .Select(p => $"'{p}': field {p[..p.IndexOf('.')]} is not an Address field of the step's table.").ToArray();
+            if (notAddress.Length > 0)
+                throw new ValidationException(new Dictionary<string, string[]> { ["FieldMappings"] = notAddress });
+        }
+
+        if (Guid.TryParse(connectionText, out var connectionId) && !SystemConnectionIds.Contains(connectionId))
+        {
+            var account = await TryResolveSavedAccountAsync(connectionId, ct);
+            if (account != null)
+            {
+                await using var repos = await OpenAccountReposAsync(account, ct);
+                await Validate(repos);
+                return;
+            }
+            var tenant = await _tenantRepo.GetTenantForUserAsync(connectionId, _queryContext.UserId, ct);
+            if (tenant != null && tenant.Id != _queryContext.TenantId)
+            {
+                if (_targetScopeFactory == null) return;
                 await using var repos = await _targetScopeFactory(tenant.Id);
                 await Validate(repos);
                 return;
@@ -588,6 +733,13 @@ public class PipelineStepValidator
             {
                 foreach (var fidStr in config.SubsequentFields)
                 {
+                    // One part of an Address field (fid_N.city): the field must be an Address of this table.
+                    if (PipelineAddressMappings.IsPartReference(fidStr))
+                    {
+                        if (!PipelineAddressFieldFilter.TryResolve(fidStr, fields.ToList(), out _, out _))
+                            AddError(errors, "SubsequentFields", $"Field '{fidStr}' is not a part of an Address field in the selected Table.");
+                        continue;
+                    }
                     var fid = ParseFid(fidStr);
                     if (fid == null || !fields.Any(f => f.Fid == fid.Value))
                     {

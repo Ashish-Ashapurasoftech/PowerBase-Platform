@@ -827,7 +827,11 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 }
 
                 friendlyInput["Table"] = tableName;
-                friendlyInput["Lookup Value"] = $"Record equals {recordLabel}";
+                // A step that looks up by the table's key field shows that field and the value it searched for.
+                var lookupField = inputDict.TryGetValue("LookupField", out var lfObj) ? lfObj?.ToString() : null;
+                friendlyInput["Lookup Value"] = !string.IsNullOrEmpty(lookupField) && lookupField != "Record ID"
+                    ? $"{lookupField} equals {(inputDict.TryGetValue("LookupValue", out var lvObj) ? lvObj?.ToString() : "—")}"
+                    : $"Record equals {recordLabel}";
                 friendlyInput["Compare with app local time"] = compareLocalTime;
 
                 var lookedUpRid = ReadNumericRecordId(outputDict);

@@ -527,6 +527,7 @@ builder.Services.AddScoped<PowerBase.Application.Import.Services.ImportFieldSani
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblSettingsApplier>();
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblPermissionsApplier>();
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblConnectedTablesApplier>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PblPipelinesImporter>();
 builder.Services.AddScoped<PowerBase.Application.Import.Diff.ImportDiffBuilder>();
 builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportDiff.ImportDiffQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Import.Commands.UpdateAppFromPbl.UpdateAppFromPblCommandHandler>();

@@ -118,7 +118,9 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
 
         bool IsValidFieldRef(string val)
         {
-            return System.Text.RegularExpressions.Regex.IsMatch(val, @"^fid_(?:\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$") || Guid.TryParse(val, out _);
+            return System.Text.RegularExpressions.Regex.IsMatch(val, @"^fid_(?:\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$") || Guid.TryParse(val, out _)
+                // One part of an Address field (fid_N.city); that fid_N is an Address is checked against the table on save.
+                || PipelineAddressMappings.IsPartReference(val);
         }
 
         var traversedRefIds = new HashSet<string>();

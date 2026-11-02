@@ -133,8 +133,25 @@ public class ImportPreviewQueryHandler
             Pages = (document.Pages ?? []).Select(p => p.Name).ToList(),
             Errors = validation.Errors.Concat(conversionIssues.Where(i => i.Severity == PblIssueSeverity.Error)).Select(ToDto).ToList(),
             Warnings = warnings,
+            // Pipelines are only imported with a new app; their notes are their own and never make the app invalid.
+            Pipelines = mode == ImportMode.CreateNewApp ? (parsed.Pipelines ?? []).Select(ToPipelineItem).ToList() : [],
         };
     }
+
+    private static ImportPreviewPipelineItem ToPipelineItem(PblPipeline pipeline) => new()
+    {
+        LogicalRef = pipeline.LogicalRef,
+        Name = pipeline.Name,
+        StepCount = pipeline.SourceStepCount,
+        SkippedStepCount = pipeline.SkippedStepCount,
+        ChangesExecution = pipeline.ChangesExecution,
+        Issues = pipeline.Issues.Select(i => new PblIssueDto
+        {
+            Code = i.Code,
+            Message = i.StepName is null ? i.Message : $"Step '{i.StepName}' ({i.StepId}): {i.Message}",
+            ElementRef = i.StepId,
+        }).ToList(),
+    };
 
     private static ImportPreviewResult FileError(string code, string message) => new()
     {

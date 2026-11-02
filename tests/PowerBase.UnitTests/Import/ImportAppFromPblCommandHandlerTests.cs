@@ -78,7 +78,7 @@ public class ImportAppFromPblCommandHandlerTests
     private int _nextFid = 6;
     private int _nextFieldId = 100;
 
-    private ImportAppFromPblCommandHandler CreateSut()
+    private ImportAppFromPblCommandHandler CreateSut(PblPipelinesImporter? pipelinesImporter = null)
     {
         var bulkCreateHandler = new BulkCreateFieldsCommandHandler(
             _tableRepo, _fieldRepo, _fieldTypeRepo, _schemaEngine, _queryContext, _auditRepo, _formRepo,
@@ -132,7 +132,103 @@ public class ImportAppFromPblCommandHandlerTests
             new ImportFieldSanitizer(new FieldSettingsValidatorRegistry(Array.Empty<IFieldSettingsValidator>())),
             // The settings applier drives other handlers (update app/table/field, set key); it has its own tests — here it is a no-op.
             Substitute.For<PblSettingsApplier>(new object?[] { null, null, null, null, null, null, null, null, null, null }),
-            Substitute.For<PblPermissionsApplier>(new object?[] { null, null, null, null, null, null, null }));
+            Substitute.For<PblPermissionsApplier>(new object?[] { null, null, null, null, null, null, null }),
+            connectedTablesApplier: null,
+            pipelinesImporter: pipelinesImporter);
+    }
+
+    private const string QblWithPipeline = """
+        Version: 0.12
+        Resources:
+          $App_Ops:
+            Type: QB::Application
+            Properties:
+              Name: Ops
+            Tables:
+              $Table_Tasks:
+                Type: QB::Table
+                Properties:
+                  Name: Tasks
+                Fields:
+                  $Field_Title:
+                    Type: QB::Field::Text
+                    Id: 6
+                    Properties:
+                      Label: Title
+          $Pipeline_Wait:
+            Type: QB::Pipeline
+            Properties:
+              Name: Wait
+            Steps:
+              - Type: QB::PipelineStep::Clock
+                Properties:
+                  Id: aa
+                  Type: pipe
+                  Name: Pause
+                  Channel: { Resource: timer, Id: clock, Selector: pause }
+                InputsMeta:
+                  $PipelineStep_InputsMeta_aa:
+                    Type: QB::PipelineStep::InputsMeta
+                    Properties:
+                      Duration: 1 s
+        """;
+
+    private static PblPipelinesImporter PipelinesImporter() =>
+        Substitute.For<PblPipelinesImporter>(new object?[] { null, null, null, null, null, null, null, null, null });
+
+    [Fact]
+    public async Task HandleBatchAsync_QblWithPipeline_ImportsThePipelineAfterTheApp()
+    {
+        var importer = PipelinesImporter();
+        var sut = CreateSut(importer);
+
+        var batch = await sut.HandleBatchAsync(new ImportAppFromPblCommand(QblWithPipeline));
+
+        batch.Apps.Should().ContainSingle(a => a.AppName == "Ops");
+        await importer.Received(1).ImportAsync(
+            Arg.Is<IReadOnlyList<PowerBase.Application.Import.Qbl.ParsedApp>>(apps => apps.Single().Pipelines!.Single().Name == "Wait"),
+            Arg.Is<IReadOnlyList<(PowerBase.Application.Import.Qbl.ParsedApp App, ImportReport Report)>>(imported => imported.Single().Report == batch.Apps[0]),
+            Arg.Any<CancellationToken>(), false);
+    }
+
+    [Fact]
+    public async Task HandleBatchAsync_ActivatePipelinesInTheMapping_IsPassedToThePipelineImporter()
+    {
+        var importer = PipelinesImporter();
+        var sut = CreateSut(importer);
+
+        await sut.HandleBatchAsync(new ImportAppFromPblCommand(QblWithPipeline, Mapping: new PowerBase.Application.Import.Mapping.ImportMapping { ActivatePipelines = true }));
+
+        await importer.Received(1).ImportAsync(Arg.Any<IReadOnlyList<PowerBase.Application.Import.Qbl.ParsedApp>>(),
+            Arg.Any<IReadOnlyList<(PowerBase.Application.Import.Qbl.ParsedApp App, ImportReport Report)>>(), Arg.Any<CancellationToken>(), true);
+    }
+
+    [Fact]
+    public async Task HandleBatchAsync_QblWithoutPipelines_NeverCallsThePipelineImporter()
+    {
+        var importer = PipelinesImporter();
+        var sut = CreateSut(importer);
+
+        var batch = await sut.HandleBatchAsync(new ImportAppFromPblCommand(QblWithPipeline[..QblWithPipeline.IndexOf("  $Pipeline_Wait:", StringComparison.Ordinal)]));
+
+        batch.Apps.Should().ContainSingle();
+        batch.Apps[0].Pipelines.Should().BeEmpty();
+        await importer.DidNotReceiveWithAnyArgs().ImportAsync(default!, default!, default);
+    }
+
+    [Fact]
+    public async Task HandleBatchAsync_PipelineImportFails_TheAppIsStillImported()
+    {
+        var importer = PipelinesImporter();
+        importer.ImportAsync(default!, default!, default).ReturnsForAnyArgs(Task.FromException(new InvalidOperationException("boom")));
+        var sut = CreateSut(importer);
+
+        var batch = await sut.HandleBatchAsync(new ImportAppFromPblCommand(QblWithPipeline));
+
+        batch.Apps.Should().ContainSingle(a => a.AppName == "Ops");
+        batch.Failed.Should().BeEmpty();
+        batch.Apps[0].Skipped.Should().Contain(s => s.Name == "PowerFlows" && s.Reason.Contains("boom"));
+        await _appRepo.DidNotReceiveWithAnyArgs().DeleteAsync(default, default);
     }
 
     public ImportAppFromPblCommandHandlerTests()

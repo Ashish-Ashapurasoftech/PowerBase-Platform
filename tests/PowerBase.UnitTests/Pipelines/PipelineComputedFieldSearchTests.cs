@@ -677,6 +677,82 @@ public class PipelineComputedFieldSearchTests
         Assert.Equal(7, root.GetProperty("Id").GetInt64());
     }
 
+    // ───────────────────────── Look Up by the table's key field ─────────────────────────
+
+    private static readonly AppField SpcCode = new() { Id = 20, Fid = 20, Name = "Special Project Code", Label = "Special Project Code", TypeCode = "Text", PhysicalColumnName = "f_20" };
+
+    private static PipelineStep LookUpByKey(string value, string? lookupFieldId = "fid_20") => new()
+    {
+        Id = 1, RefId = "ref_lookup", Type = "query", Subtype = "look-up-record",
+        ConfigJson = JsonSerializer.Serialize(new { TablePublicId = Table.PublicId.ToString(), RecordIdValue = value, LookupFieldId = lookupFieldId })
+    };
+
+    private static EngineHarness KeyedHarness(long? keyFieldId = 20)
+    {
+        var h = new EngineHarness(TableFields(SpcCode));
+        h.TableRepo.GetByPublicIdAsync(Table.PublicId, Arg.Any<CancellationToken>())
+            .Returns(new AppTable { Id = Table.Id, AppId = Table.AppId, PublicId = Table.PublicId, Name = "SPC", KeyFieldId = keyFieldId });
+        return h;
+    }
+
+    [Fact]
+    public async Task LookUpRecord_ByTheTablesKeyField_FindsTheRecordWithThatKey()
+    {
+        var h = KeyedHarness();
+        h.RecordRepo.GetIdsByColumnValuesAsync(Arg.Any<AppTable>(), "f_20", Arg.Is<IReadOnlyCollection<object>>(v => v.Single().Equals("SPC-1")), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<object, long> { ["SPC-1"] = 7 });
+        h.RecordRepo.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyCollection<long>>(ids => ids.Single() == 7), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>> { [7] = Row(7, Guid.NewGuid()) });
+
+        var root = await h.RunStepAsync(LookUpByKey("SPC-1"));
+
+        Assert.Equal(7, root.GetProperty("Id").GetInt64());
+        Assert.Equal("r7", root.GetProperty("fid_6").GetString());
+    }
+
+    [Fact]
+    public async Task LookUpRecord_ByKeyField_NoMatch_SaysWhichValueWasNotFound()
+    {
+        var h = KeyedHarness();
+        h.RecordRepo.GetIdsByColumnValuesAsync(Arg.Any<AppTable>(), Arg.Any<string>(), Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<object, long>());
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => h.RunStepAsync(LookUpByKey("SPC-404")));
+
+        Assert.Contains("Special Project Code 'SPC-404' was not found", error.Message);
+    }
+
+    [Fact]
+    public async Task LookUpRecord_ByAFieldThatIsNoLongerTheKey_FailsInsteadOfGuessing()
+    {
+        var h = KeyedHarness(keyFieldId: null);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => h.RunStepAsync(LookUpByKey("SPC-1")));
+
+        Assert.Contains("no longer the key field", error.Message);
+        await h.RecordRepo.DidNotReceiveWithAnyArgs().GetIdsByColumnValuesAsync(default!, default!, default!, default);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("fid_3")]
+    public async Task LookUpRecord_WithoutAKeyField_StillLooksUpByRecordId(string? lookupFieldId)
+    {
+        // Steps saved before lookupFieldId existed (and ones set back to Record ID) take the Record ID path, even on a keyed table.
+        var recordId = new AppField { Id = 3, Fid = 3, Name = "Record ID#", TypeCode = "Number", IsSystem = true, PhysicalColumnName = "Id" };
+        var h = new EngineHarness(TableFields(SpcCode, recordId));
+        h.TableRepo.GetByPublicIdAsync(Table.PublicId, Arg.Any<CancellationToken>())
+            .Returns(new AppTable { Id = Table.Id, AppId = Table.AppId, PublicId = Table.PublicId, Name = "SPC", KeyFieldId = 20 });
+        h.RecordRepo.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyCollection<long>>(ids => ids.Single() == 7), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>> { [7] = Row(7, Guid.NewGuid()) });
+
+        var root = await h.RunStepAsync(LookUpByKey("7", lookupFieldId));
+
+        Assert.Equal(7, root.GetProperty("Id").GetInt64());
+        await h.RecordRepo.DidNotReceiveWithAnyArgs().GetIdsByColumnValuesAsync(default!, default!, default!, default);
+    }
+
     [Fact]
     public async Task LookUpRecord_ATableWithNoComputedFields_IsUnchanged()
     {

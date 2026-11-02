@@ -581,7 +581,8 @@ public class GetPipelineEditorQueryHandler
                 IsRequired = f.IsRequired,
                 IsUnique = f.IsUnique,
                 IsPrimary = CopyRecordsDefinition.IsPrimaryField(f),
-                IsSystem = f.IsSystem
+                IsSystem = f.IsSystem,
+                IsKeyField = table.KeyFieldId is long keyFieldId ? f.Id == keyFieldId : LookUpRecordKey.IsRecordId(f),
             }).ToList()
         };
     }
