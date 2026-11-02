@@ -12,7 +12,7 @@ public class UpdateAppBrandingCommandValidator : AbstractValidator<UpdateAppBran
 
     private static readonly HashSet<string> ValidAccents = new(StringComparer.OrdinalIgnoreCase)
     {
-        "indigo", "emerald", "cyan", "rose", "amber", "violet", "pink", "sky", "orange", "lime", "custom",
+        "indigo", "emerald", "cyan", "rose", "amber", "violet", "pink", "sky", "orange", "lime", "navy", "custom",
     };
 
     private static readonly HashSet<string> ValidFontSizes = new(StringComparer.OrdinalIgnoreCase) { "sm", "md", "lg" };

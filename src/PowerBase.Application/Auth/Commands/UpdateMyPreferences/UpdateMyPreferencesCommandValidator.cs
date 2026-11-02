@@ -12,7 +12,7 @@ public class UpdateMyPreferencesCommandValidator : AbstractValidator<UpdateMyPre
 
     private static readonly HashSet<string> ValidAccents = new(StringComparer.OrdinalIgnoreCase)
     {
-        "indigo", "emerald", "cyan", "rose", "amber", "violet", "pink", "sky", "orange", "lime",
+        "indigo", "emerald", "cyan", "rose", "amber", "violet", "pink", "sky", "orange", "lime", "navy",
     };
 
     private static readonly HashSet<string> ValidFontSizes = new(StringComparer.OrdinalIgnoreCase) { "sm", "md", "lg" };
