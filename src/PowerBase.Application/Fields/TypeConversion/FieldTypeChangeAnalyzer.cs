@@ -22,6 +22,9 @@ public sealed class FieldTypeChangeImpact
     public List<DependentFieldUpdate> LookupUpdates { get; } = [];
     public List<DependentFieldUpdate> SummaryUpdates { get; } = [];
     public FieldUsageDto? Usage { get; set; }
+    /// <summary>The field is a unique key (RelationshipKeyRules): converted values that repeat block the change
+    /// instead of turning Unique off.</summary>
+    public bool IsUniqueLocked { get; set; }
 }
 
 /// <summary>
@@ -53,8 +56,16 @@ public sealed class FieldTypeChangeAnalyzer
         var relationships = await _relRepo.ListByTableAsync(table.Id, ct);
         var isKey = relationships.Any(r =>
             (r.ParentTableId == table.Id && table.KeyFieldId == field.Id) || r.DisplayKeyFieldId == field.Id);
-        return new FieldConversionConstraints(field.IsSystem, isKey);
+        var isUniqueLocked = field.IsUnique && RelationshipKeyRules.IsUniqueLocked(table, field, relationships);
+        return new FieldConversionConstraints(field.IsSystem, isKey, isUniqueLocked);
     }
+
+    /// <summary>Why a unique key can't take the change: its converted values would repeat. Null when they don't.</summary>
+    public static string? KeyDuplicatesBlocker(AppField field, int duplicateValues) =>
+        duplicateValues > 0
+            ? $"'{(string.IsNullOrWhiteSpace(field.Label) ? field.Name : field.Label)}' is a key and must stay unique, but " +
+              $"{duplicateValues} converted value(s) would repeat. Fix the duplicates or change the key first."
+            : null;
 
     public async Task<FieldTypeChangeImpact> AnalyzeAsync(
         App app, AppTable table, AppField field, IReadOnlyList<AppField> tableFields,
@@ -62,7 +73,9 @@ public sealed class FieldTypeChangeAnalyzer
     {
         var impact = new FieldTypeChangeImpact();
 
-        var check = FieldTypeConversionMatrix.Check(field.TypeCode, targetTypeCode, await GetConstraintsAsync(table, field, ct));
+        var constraints = await GetConstraintsAsync(table, field, ct);
+        impact.IsUniqueLocked = constraints.IsUniqueLocked;
+        var check = FieldTypeConversionMatrix.Check(field.TypeCode, targetTypeCode, constraints);
         if (!check.IsAllowed) impact.Blockers.Add(check.BlockedReason!);
 
         var touchesColumn = check.Kind is not ConversionKind.FormulaToFormula;

@@ -156,6 +156,8 @@ public class UpdateFieldCommandHandler
         if (sharedErrors.Count > 0) throw new ValidationException(new Dictionary<string, string[]>(sharedErrors));
         _guard.ValidateActionButtonTargets(existing.TypeCode, settings, tableFields, existing.Id);
         _guard.ValidateSnapshot(existing, label, snapshotSourceFid, snapshotEditable, isRequired, isUnique, command.IsAutoFill && snapshotSourceFid.HasValue, tableFields);
+        // Before the Display As switch below, which saves the new type straight away.
+        await _guard.ValidateKeyStaysUniqueAsync(table, existing, label, isUnique, ct);
 
         // Formula text is stored by field ID so a rename can't break it (see FormulaCanonicalizer).
         // The label being saved right now is also accepted as a name, so a formula can reference a

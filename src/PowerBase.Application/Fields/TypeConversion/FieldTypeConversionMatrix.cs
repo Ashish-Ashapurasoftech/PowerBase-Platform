@@ -53,6 +53,10 @@ public static class FieldTypeConversionMatrix
 
     public static bool IsFormula(string typeCode) => FormulaScalarTwins.ContainsKey(typeCode);
 
+    /// <summary>A formula has no column to index; every other type follows the field page's capability matrix.</summary>
+    public static bool CanBeUnique(string typeCode) =>
+        !IsFormula(typeCode) && FieldGeneralSettingsCapability.Resolve(typeCode, null)?.Unique != false;
+
     public static bool IsSupported(string typeCode) =>
         IsFormula(typeCode) || SupportedScalarTypes.Contains(typeCode, StringComparer.Ordinal);
 
@@ -86,6 +90,9 @@ public static class FieldTypeConversionMatrix
         if (constraints.IsRelationshipKey && !KeyEligibleTypes.Contains(targetTypeCode))
             return ConversionCheck.Blocked(sourceTypeCode, targetTypeCode,
                 "This field is a relationship key; it can only become Text, Numeric, Currency, Percent, Rating or Date.");
+        if (constraints.IsUniqueLocked && !CanBeUnique(targetTypeCode))
+            return ConversionCheck.Blocked(sourceTypeCode, targetTypeCode,
+                "This field is a key and must stay unique; a field of this type can't be unique.");
 
         var sourceIsFormula = IsFormula(sourceTypeCode);
         var targetIsFormula = IsFormula(targetTypeCode);

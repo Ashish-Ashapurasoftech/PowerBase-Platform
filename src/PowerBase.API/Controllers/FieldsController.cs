@@ -150,7 +150,8 @@ public class FieldsController : ControllerBase
     public async Task<IActionResult> Get(Guid tableId, Guid publicId, CancellationToken ct)
     {
         var result = await _getHandler.HandleAsync(new GetFieldQuery(tableId, publicId), ct);
-        return Ok(new ApiResponse<FieldDetailResponse>(MapToDetailResponse(result.Field, result.HasRecords)));
+        return Ok(new ApiResponse<FieldDetailResponse>(
+            MapToDetailResponse(result.Field, result.HasRecords, result.IsKeyField, result.RelationshipKeyUsages)));
     }
 
     /// <summary>List every supported field type configuration (reference data — not tenant- or table-scoped).</summary>
@@ -427,7 +428,7 @@ public class FieldsController : ControllerBase
         IsKeyField = f.IsKeyField,
     };
 
-    private static FieldDetailResponse MapToDetailResponse(AppField f, bool hasRecords) => new()
+    private static FieldDetailResponse MapToDetailResponse(AppField f, bool hasRecords, bool isKeyField, IReadOnlyList<string>? relationshipKeyUsages) => new()
     {
         Id = f.Id,
         PublicId = f.PublicId,
@@ -453,6 +454,8 @@ public class FieldsController : ControllerBase
         Settings = f.Settings,
         CreatedOn = f.CreatedOn,
         HasRecords = hasRecords,
+        IsKeyField = isKeyField,
+        RelationshipKeyUsages = relationshipKeyUsages ?? [],
     };
 
     private static FieldVersionListItemResponse MapToVersionListItemResponse(

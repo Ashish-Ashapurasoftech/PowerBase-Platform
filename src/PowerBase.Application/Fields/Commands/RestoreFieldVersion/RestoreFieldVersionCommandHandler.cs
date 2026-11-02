@@ -124,6 +124,7 @@ public class RestoreFieldVersionCommandHandler
 
         await _guard.ValidateRequiredHasDefaultOrNoRestrictedRolesAsync(existing.Id, label, target.IsRequired, target.DefaultValue, ct);
         await _guard.ValidateUniqueTransitionAsync(table, existing, label, target.IsUnique, ct);
+        await _guard.ValidateKeyStaysUniqueAsync(table, existing, label, target.IsUnique, ct);
         await _guard.ValidateEncryptionTransitionAsync(table, existing, target.IsEncrypted, ct);
 
         // Same column re-typing UpdateField does when the encryption flag flips (before SetUniqueAsync re-creates the index).
