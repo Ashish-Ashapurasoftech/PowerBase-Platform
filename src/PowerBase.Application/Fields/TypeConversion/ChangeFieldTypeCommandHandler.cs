@@ -83,6 +83,10 @@ public sealed class ChangeFieldTypeCommandHandler
             ? await FieldTypeChangeDryRun.RunAsync(plan, _columns, sampleSize: 0, ct)
             : null;
 
+        // A key must stay unique (RelationshipKeyRules): repeats block the change rather than turn Unique off.
+        if (impact.IsUniqueLocked && FieldTypeChangeAnalyzer.KeyDuplicatesBlocker(field, dryRun?.DuplicateValues ?? 0) is { } keyBlocker)
+            throw new ConflictException(keyBlocker);
+
         // Same per-type rules the field page enforces (FieldGeneralSettingsCapability). A formula has no column, so
         // it can't hold a unique index here.
         var capabilities = FieldGeneralSettingsCapability.Resolve(plan.TargetTypeCode, null);
@@ -152,6 +156,12 @@ public sealed class ChangeFieldTypeCommandHandler
             try
             {
                 await _schemaEngine.SetUniqueAsync(plan.Table, converted, true, ct);
+            }
+            catch (Exception ex) when (impact.IsUniqueLocked)
+            {
+                // A key keeps Unique; saving the field again rebuilds the missing index (UpdateFieldCommandHandler).
+                warnings.Add("The unique index couldn't be rebuilt. This field is a key, so \"Must be unique\" stays on: save the field again to rebuild the index.");
+                Console.WriteLine($"[ChangeFieldType] unique index for key field {field.Id} not rebuilt: {ex.Message}");
             }
             catch (Exception ex)
             {

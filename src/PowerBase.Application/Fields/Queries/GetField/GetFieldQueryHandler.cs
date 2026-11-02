@@ -1,5 +1,6 @@
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
+using PowerBase.Application.Relationships;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 
@@ -7,8 +8,11 @@ namespace PowerBase.Application.Fields.Queries.GetField;
 
 /// <summary>The field plus whether its table has any records — the latter drives whether the
 /// field's encryption setting can still be changed (see FieldDetailResponse.HasRecords). An
-/// EXISTS check, not a COUNT, so it stays cheap on tables with millions of records.</summary>
-public sealed record GetFieldResult(AppField Field, bool HasRecords);
+/// EXISTS check, not a COUNT, so it stays cheap on tables with millions of records.
+/// <paramref name="IsKeyField"/> and <paramref name="RelationshipKeyUsages"/> ("Employees → Department") say why
+/// Unique is locked on the field page (see RelationshipKeyRules).</summary>
+public sealed record GetFieldResult(
+    AppField Field, bool HasRecords, bool IsKeyField = false, IReadOnlyList<string>? RelationshipKeyUsages = null);
 
 public class GetFieldQueryHandler
 {
@@ -16,10 +20,12 @@ public class GetFieldQueryHandler
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly IAppVariableRepository? _variableRepo;
+    private readonly IRelationshipRepository? _relRepo;
 
     public GetFieldQueryHandler(IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo,
-        IAppVariableRepository? variableRepo = null)
+        IAppVariableRepository? variableRepo = null, IRelationshipRepository? relRepo = null)
     {
+        _relRepo = relRepo;
         _variableRepo = variableRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -48,6 +54,13 @@ public class GetFieldQueryHandler
         }
 
         var hasRecords = await _recordRepo.HasAnyRecordsAsync(table, ct);
-        return new GetFieldResult(field, hasRecords);
+
+        IReadOnlyList<string> keyUsages = [];
+        if (_relRepo is not null && !field.IsSystem)
+        {
+            var usages = RelationshipKeyRules.KeyUsages(table, field, await _relRepo.ListByTableAsync(table.Id, ct));
+            keyUsages = await RelationshipKeyRules.DescribeAsync(usages, table, _tableRepo, ct);
+        }
+        return new GetFieldResult(field, hasRecords, table.KeyFieldId == field.Id, keyUsages);
     }
 }

@@ -45,7 +45,8 @@ public sealed record ConversionCheck(
 /// <summary>Facts about the field (not its type) that restrict which targets are allowed.</summary>
 /// <param name="IsSystemField">Record ID#, Date Created, … — never convertible.</param>
 /// <param name="IsRelationshipKey">The field is a parent table's key / display key — only key-eligible targets.</param>
-public sealed record FieldConversionConstraints(bool IsSystemField = false, bool IsRelationshipKey = false)
+/// <param name="IsUniqueLocked">The field is unique and a key (RelationshipKeyRules) — only targets that can be unique.</param>
+public sealed record FieldConversionConstraints(bool IsSystemField = false, bool IsRelationshipKey = false, bool IsUniqueLocked = false)
 {
     public static readonly FieldConversionConstraints None = new();
 }
