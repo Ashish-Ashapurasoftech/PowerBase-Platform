@@ -384,4 +384,24 @@ public class ImportDefinitionCheckerTests
         _source.RemoveAll(f => f.Fid == 6);
         (await Check(WithVariables(cfg))).NeedsAttention.Should().BeTrue();
     }
+
+    [Fact]
+    public async Task A_formula_variable_used_as_a_typed_number_is_not_flagged_and_a_broken_one_is()
+    {
+        var sound = VariableConfig(c =>
+        {
+            c.Variables = [new ImportVariable { Name = "var_rate", Kind = ImportVariables.Formula, Formula = "2 + 3" }];
+            c.Mappings.Add(new ImportFieldMapping { DestFid = 7, Source = ImportMappingSource.Formula, Formula = "[var_rate] * 2" });
+        });
+        (await Check(WithVariables(sound))).NeedsAttention.Should().BeFalse();
+
+        var broken = VariableConfig(c =>
+        {
+            c.Variables = [new ImportVariable { Name = "var_rate", Kind = ImportVariables.Formula, Formula = "[Name]" }];
+            c.Mappings.Add(new ImportFieldMapping { DestFid = 7, Source = ImportMappingSource.Formula, Formula = "ToNumber([var_rate])" });
+        });
+        var flagged = await Check(WithVariables(broken));
+        flagged.NeedsAttention.Should().BeTrue();
+        flagged.AttentionReason.Should().Contain("var_rate");
+    }
 }

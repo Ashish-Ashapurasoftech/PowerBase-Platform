@@ -248,7 +248,8 @@ public class TablesController : ControllerBase
         IsShowInBar = r.Table.IsShowInBar,
         IsAutoSaveOnLeave = r.Table.IsAutoSaveOnLeave,
         CreatedOn = r.Table.CreatedOn,
-        Fields = r.Fields.Select(f => MapFieldToResponse(f, r.SummarySourceSettings.GetValueOrDefault(f.Id))).ToList(),
+        Fields = r.Fields.Select(f => MapFieldToResponse(f, r.SummarySourceSettings.GetValueOrDefault(f.Id),
+            r.ReferenceKeys?.GetValueOrDefault(f.Id))).ToList(),
     };
 
     private static TableSummaryResponse MapToSummaryResponse(CreateTableResult r) => new()
@@ -318,7 +319,8 @@ public class TablesController : ControllerBase
     private static int? ResolveKeyFieldFid(long? keyFieldId, IReadOnlyList<AppField> fields) =>
         keyFieldId is null ? null : fields.FirstOrDefault(f => f.Id == keyFieldId.Value)?.Fid;
 
-    private static FieldResponse MapFieldToResponse(AppField f, string? summarySourceSettings = null) => new()
+    private static FieldResponse MapFieldToResponse(AppField f, string? summarySourceSettings = null,
+        PowerBase.Application.Tables.Queries.GetTable.ReferenceKey? referenceKey = null) => new()
     {
         Id = f.Id,
         PublicId = f.PublicId,
@@ -345,5 +347,7 @@ public class TablesController : ControllerBase
         Settings = f.Settings,
         CreatedOn = f.CreatedOn,
         SummarySourceSettings = summarySourceSettings,
+        ReferenceKeyFid = referenceKey?.Fid,
+        ReferenceKeyTypeCode = referenceKey?.ValueTypeCode,
     };
 }

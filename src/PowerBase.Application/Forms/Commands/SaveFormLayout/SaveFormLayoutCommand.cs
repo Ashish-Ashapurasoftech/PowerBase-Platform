@@ -79,4 +79,7 @@ public record FormElementLayout(
     string? ContentWidthMode = null,
     int? ContentWidthValue = null,
     string? ContentWidthUnit = null,
-    string? Name = null);
+    string? Name = null,
+    string? RecordPickerMode = null,
+    Guid? RecordPickerReportPublicId = null,
+    long? RecordPickerFieldId = null);

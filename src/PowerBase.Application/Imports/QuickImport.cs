@@ -12,7 +12,8 @@ public sealed record QuickImportRequest(ImportDefinitionConfig Config, Guid? Fil
 /// definition is saved through <see cref="SaveImportDefinitionHandler"/> (so every check a saved import goes through runs, permissions included), the run is
 /// started through <see cref="StartImportRunHandler"/>, and the definition is then removed again. A removed definition is an ordinary state: the run keeps
 /// working, shows in the history and on the run page, and no list of templates (the app's Imports, PowerFlow, pipelines, the scheduler) ever shows it.
-/// <para>One table, no schedule and nothing that only makes sense for a template that comes back (reading only what changed since the last run).</para></summary>
+/// <para>It takes everything a template does (filters, variables, rules, several tables, sheets read separately) except what only makes sense for a template that comes back: a
+/// schedule, and reading only what changed since the last run.</para></summary>
 public sealed class StartQuickImportHandler(
     SaveImportDefinitionHandler save, StartImportRunHandler start, IImportDefinitionRepository definitions, IAppAccessService access,
     IAppTableRepository tables, IQueryContext user, ILogger<StartQuickImportHandler> logger)
@@ -24,7 +25,6 @@ public sealed class StartQuickImportHandler(
         await access.RequireMembershipByTablePublicIdAsync(destinationTableId, ct);
         var cfg = request.Config ?? throw Invalid("The import is missing.");
         if (cfg.Schedule is not null) throw Invalid("A quick import runs once, now; it cannot be scheduled.");
-        if (cfg.AdditionalTargets.Count > 0) throw Invalid("A quick import fills this table only.");
         if (cfg.OnlyChangedSinceLastRun || cfg.ChangedSinceUtc is not null) throw Invalid("Reading only what changed since the last run belongs to saved imports.");
         if (cfg.SourceKind == ImportSourceKinds.File && request.FileId is null) throw Invalid("Choose the file to import.");
         if (cfg.SourceKind == ImportSourceKinds.Table && request.FileId is not null) throw Invalid("This import reads a table, not a file.");

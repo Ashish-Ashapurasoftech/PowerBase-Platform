@@ -27,8 +27,14 @@ public class FieldResponse
     public int? Fid { get; init; }
     public string? Settings { get; init; }
     public DateTime CreatedOn { get; init; }
-    /// <summary>Only on Min/Max Summary fields, and only from GET /tables/{publicId}: the current
-    /// Settings JSON of the child field being summarized, so the value (e.g. the latest Due Date)
-    /// renders in that field's display format. Read-only — never sent back when saving a field.</summary>
+    /// <summary>Only on Lookup and Sum / Avg / Min / Max Summary fields, and only from GET /tables/{publicId}: the
+    /// current Settings JSON of the field whose value it shows, so the value renders in that field's display format
+    /// where its own Behavior Settings leave one unset. Read-only — never sent back when saving a field.</summary>
     public string? SummarySourceSettings { get; init; }
+    /// <summary>Only on Reference fields, and only from GET /tables/{publicId}: the Fid of the parent key the reference
+    /// shows (3 = Record ID#) — its relationship's Display Key, else the parent's Set Key, else Record ID#.</summary>
+    public int? ReferenceKeyFid { get; init; }
+    /// <summary>Only on Reference fields, with <see cref="ReferenceKeyFid"/>: the type of value that key holds (Number,
+    /// Text, Date, …), which decides the Behavior Settings the reference offers. Null when it can't be told.</summary>
+    public string? ReferenceKeyTypeCode { get; init; }
 }

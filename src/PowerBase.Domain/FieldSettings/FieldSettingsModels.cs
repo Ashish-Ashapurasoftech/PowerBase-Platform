@@ -552,6 +552,58 @@ public sealed class FormulaRichTextSettings
 // ── Relationship field settings ──────────────────────────────────────────────
 
 /// <summary>
+/// The Behavior Settings of a Reference, Lookup or Summary field (Quickbase's Behavior section on those fields), kept
+/// in one nested <c>display</c> object so the relationship wiring next to it is never touched when they're saved.
+/// The members are the same ones the stored type that shows such a value uses — a lookup of a Currency field takes
+/// <see cref="NumericSettings"/>' Decimals/Symbol/…, a Date lookup <see cref="DateSettings"/>' ShowMonthName/… —
+/// and which of them apply follows the field's result type (LookupSettings/SummarySettings.ResultTypeCode).
+/// A member left null takes the source field's own setting (the lookup's source, the summary's target), then the
+/// app default. A Reference only takes DisplayBold/NoWrap/ColumnWidth.
+/// </summary>
+public sealed class RelationshipDisplaySettings
+{
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+
+    // Number / Currency / Percent / Rating (and Duration's Decimals)
+    public int? Decimals { get; set; }
+    public string? Separator { get; set; }
+    /// <summary>One of <see cref="NumericDisplayAs"/>. Only changes how the value is drawn — unlike a plain Number
+    /// field, a Lookup or Summary keeps its own type.</summary>
+    public string? DisplayAs { get; set; }
+    /// <summary>Currency symbol (DisplayAs = Currency).</summary>
+    public string? Symbol { get; set; }
+    /// <summary>One of <see cref="CurrencyPositions"/> (DisplayAs = Currency).</summary>
+    public string? Position { get; set; }
+    /// <summary>Maximum stars, 1-20 (DisplayAs = Rating).</summary>
+    public int? Max { get; set; }
+    public string? UnitsDescription { get; set; }
+    public bool? TreatBlankAsZero { get; set; }
+    public bool? ShowTotalInReports { get; set; }
+    public bool? ShowAverageInReports { get; set; }
+
+    // Date / DateTime
+    public bool? ShowMonthName { get; set; }
+    public bool? ShowDayOfWeek { get; set; }
+    public bool? HideYearIfCurrent { get; set; }
+    public bool? ShowTime { get; set; }
+
+    // Duration
+    /// <summary>One of <see cref="DurationDisplays"/>.</summary>
+    public string? Display { get; set; }
+
+    // Time
+    /// <summary>One of <see cref="TimeFormats"/>.</summary>
+    public string? Format { get; set; }
+    public bool? Use24Hour { get; set; }
+
+    // Checkbox
+    public bool? ShowYesNo { get; set; }
+    public bool? ShowTotalsRow { get; set; }
+}
+
+/// <summary>
 /// Settings for a Reference field (lives on the child table). A Reference is a physical
 /// BIGINT column holding the parent row Id; these settings record which relationship and
 /// parent table it belongs to so the picker and projector can resolve it.
@@ -586,6 +638,9 @@ public sealed class ReferenceSettings
     /// <summary>Show this field's value as a link that opens the parent record (Quickbase's DisplayAsLinkToParent).
     /// Off by default.</summary>
     public bool DisplayAsLinkToParent { get; set; }
+
+    /// <summary>Behavior Settings (bold, no wrap, column width only). Null = defaults.</summary>
+    public RelationshipDisplaySettings? Display { get; set; }
 }
 
 /// <summary>
@@ -645,6 +700,9 @@ public sealed class LookupSettings
     /// <summary>Show this field's value as a link that opens the parent record (Quickbase's DisplayAsLinkToParent).
     /// Off by default.</summary>
     public bool DisplayAsLinkToParent { get; set; }
+
+    /// <summary>Behavior Settings for the value shown. Null = the source field's own.</summary>
+    public RelationshipDisplaySettings? Display { get; set; }
 }
 
 /// <summary>
@@ -688,6 +746,9 @@ public sealed class SummarySettings
     public bool SortDescending { get; set; }
     /// <summary>Include each unique value only once (at its first position in the sort order).</summary>
     public bool DistinctValues { get; set; }
+
+    /// <summary>Behavior Settings for the value shown. Null = the target field's own (app defaults for Count).</summary>
+    public RelationshipDisplaySettings? Display { get; set; }
 }
 
 /// <summary>The JSON keys an Address field's composite value is stored under (confirmed real

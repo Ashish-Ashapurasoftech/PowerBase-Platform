@@ -3,6 +3,8 @@ using PowerBase.Application.Imports;
 using PowerBase.Application.Reports;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Formula;
+using PowerBase.Formula.Evaluation;
 
 namespace PowerBase.Imports.Tests;
 
@@ -11,6 +13,12 @@ namespace PowerBase.Imports.Tests;
 public class ImportVariableTests
 {
     private static ImportVariable Var(string name, string value = "v") => new() { Name = name, Value = value };
+    private static ImportVariable Calc(string name, string formula) => new() { Name = name, Kind = ImportVariables.Formula, Formula = formula };
+
+    private static readonly EvaluationOptions Clock = new() { UtcNow = new DateTime(2026, 3, 15, 10, 30, 0, DateTimeKind.Utc) };
+
+    private static IReadOnlyDictionary<string, string> ValuesOf(IReadOnlyList<ImportVariable> variables) => ImportVariables.Evaluate(variables, new FormulaEngine(), Clock).Values;
+    private static ImportDefinitionConfig Apply(ImportDefinitionConfig cfg) => ImportVariables.Apply(cfg, ValuesOf(cfg.Variables));
 
     private static FilterGroup Filter(string op, string value, long fid = 6) =>
         new() { Nodes = [new() { Condition = new() { FieldId = fid, Operator = op, Value = value } }] };
@@ -84,20 +92,6 @@ public class ImportVariableTests
         ImportVariables.Collision([], fields, []).Should().BeNull();
     }
 
-    // ---- the schema formulas compile against ----
-
-    [Fact]
-    public void The_schema_finds_a_variable_by_name_ignoring_case_and_nothing_else()
-    {
-        var schema = ImportVariables.Schema([Var("var_Rate", "7")])!;
-
-        schema.TryResolve("var_rate", out var found).Should().BeTrue();
-        found.Value.Should().Be("7");
-        schema.TryResolve("var_other", out _).Should().BeFalse();
-        schema.TryResolve("var_1", out _).Should().BeFalse();
-        ImportVariables.Schema([]).Should().BeNull("an import without variables compiles exactly as before");
-    }
-
     // ---- substituting {{var_name}} ----
 
     private static ImportDefinitionConfig Cfg(Action<ImportDefinitionConfig> tweak)
@@ -112,8 +106,8 @@ public class ImportVariableTests
     {
         var cfg = Cfg(c => { c.Conditions = Filter("eq", "plain"); c.Variables = [Var("var_a")]; });
 
-        ImportVariables.Apply(cfg).Should().BeSameAs(cfg);
-        ImportVariables.Apply(Cfg(_ => { })).Should().NotBeNull();
+        Apply(cfg).Should().BeSameAs(cfg);
+        Apply(Cfg(_ => { })).Should().NotBeNull();
     }
 
     [Fact]
@@ -140,7 +134,7 @@ public class ImportVariableTests
             c.SheetMappings = [new ImportSheetMapping { Sheet = "S", Mappings = [Static(9, "s:{{var_a}}")], VirtualColumns = [new ImportVirtualColumn { StaticValue = "{{var_a}}" }] }];
         });
 
-        var applied = ImportVariables.Apply(cfg);
+        var applied = Apply(cfg);
 
         applied.Conditions!.Nodes[0].Group!.Nodes[0].Condition!.Value.Should().Be("AAA");
         applied.TableConditions!.Nodes[0].Condition!.Value.Should().Be("x-AAA-y");
@@ -169,7 +163,7 @@ public class ImportVariableTests
     {
         var cfg = Cfg(c => { c.Variables = [Var("var_a", "AAA"), Var("var_b", "BBB")]; c.Mappings = [Static(9, typed)]; });
 
-        ImportVariables.Apply(cfg).Mappings[0].StaticValue.Should().Be(expected);
+        Apply(cfg).Mappings[0].StaticValue.Should().Be(expected);
     }
 
     [Fact]
@@ -191,7 +185,7 @@ public class ImportVariableTests
             };
         });
 
-        var values = ImportVariables.Apply(cfg).Conditions!.Nodes.Select(n => n.Condition!.Value).ToArray();
+        var values = Apply(cfg).Conditions!.Nodes.Select(n => n.Condition!.Value).ToArray();
 
         values.Should().Equal("3", "2026-01-31", "13:45:00", "true");
     }
@@ -201,7 +195,7 @@ public class ImportVariableTests
     {
         var cfg = Cfg(c => { c.Variables = [Var("var_a", "{{var_b}}"), Var("var_b", "BBB")]; c.Mappings = [Static(9, "{{var_a}}")]; });
 
-        ImportVariables.Apply(cfg).Mappings[0].StaticValue.Should().Be("{{var_b}}");
+        Apply(cfg).Mappings[0].StaticValue.Should().Be("{{var_b}}");
     }
 
     [Fact]
@@ -209,10 +203,10 @@ public class ImportVariableTests
     {
         var cfg = Cfg(c => { c.Variables = [Var("var_a")]; c.Mappings = [Static(9, "{{var_nope}}")]; });
 
-        var act = () => ImportVariables.Apply(cfg);
+        var act = () => Apply(cfg);
 
         act.Should().Throw<ValidationException>().WithMessage("*Unknown variable {{var_nope}}*");
-        ImportVariables.TryApply(cfg, out _).Should().Contain("var_nope");
+        ImportVariables.TryApply(cfg, ValuesOf(cfg.Variables), out _).Should().Contain("var_nope");
     }
 
     // ---- end to end: a run uses the variables ----
@@ -405,6 +399,181 @@ public class ImportVariableTests
 
         h.Store.Inserted.Should().OnlyContain(r => Equals(r[9], "{{not a variable}}"));
         h.Completion!.Value.Status.Should().Be(ImportRunStatus.Success);
+    }
+
+    // ---- formula variables: typed, worked out once ----
+
+    [Fact]
+    public void A_formula_variable_is_worked_out_once_and_each_type_has_the_text_a_filter_value_takes()
+    {
+        var (values, error) = ImportVariables.Evaluate(
+        [
+            Var("var_text", "hello"), Calc("var_n", "2 + 3"), Calc("var_dec", "10 / 4"), Calc("var_b", "1 = 1"), Calc("var_day", "Date(2026, 1, 31)"),
+            Calc("var_today", "Today()"), Calc("var_back", "Today() - Days(30)"), Calc("var_label", "\"a\" & \"b\""), Calc("var_blank", "\"\"")
+        ], new FormulaEngine(), Clock);
+        error.Should().BeNull();
+
+        values["var_text"].Should().Be("hello");
+        values["var_n"].Should().Be("5");
+        values["var_dec"].Should().Be("2.5");
+        values["var_b"].Should().Be("true");
+        values["var_day"].Should().Be("2026-01-31");
+        values["var_today"].Should().Be("2026-03-15", "worked out with the run's clock");
+        values["var_back"].Should().Be("2026-02-13");
+        values["var_label"].Should().Be("ab");
+        values["var_blank"].Should().Be("");
+    }
+
+    [Fact]
+    public void A_variable_may_use_another_whatever_the_order_and_not_a_source_column()
+    {
+        ValuesOf([Calc("var_b", "[var_a] * 2"), Calc("var_a", "21")])["var_b"].Should().Be("42");
+
+        var (_, error) = ImportVariables.Evaluate([Calc("var_x", "[Name] & \"!\"")], new FormulaEngine(), Clock);
+        error.Should().Contain("var_x", "a variable is global: it has no row to read a column from");
+    }
+
+    [Fact]
+    public void A_circular_unknown_or_wrongly_typed_formula_is_refused_naming_the_variable()
+    {
+        ImportVariables.Evaluate([Calc("var_a", "[var_b]"), Calc("var_b", "[var_a]")], new FormulaEngine(), Clock).Error.Should().Contain("variables").And.Contain("var_a");
+        ImportVariables.Evaluate([Calc("var_a", "[var_nope] + 1")], new FormulaEngine(), Clock).Error.Should().Contain("var_a");
+        ImportVariables.Evaluate([Calc("var_a", "1 +")], new FormulaEngine(), Clock).Error.Should().Contain("var_a");
+    }
+
+    [Fact]
+    public void A_formula_variable_needs_a_formula_and_an_unknown_kind_is_refused()
+    {
+        ImportVariables.Check([new ImportVariable { Name = "var_a", Kind = ImportVariables.Formula }]).Should().Contain("Enter the formula");
+        ImportVariables.Check([new ImportVariable { Name = "var_a", Kind = "other" }]).Should().Contain("fixed value or a formula");
+        ImportVariables.Check([Calc("var_a", new string('1', ImportPlanBuilder.MaxFormulaLength + 1))]).Should().Contain("too long");
+        ImportVariables.Check([Calc("var_a", "1")]).Should().BeNull();
+    }
+
+    [Fact]
+    public void Variables_are_read_as_virtual_columns_in_order_and_keep_the_id_they_were_given()
+    {
+        var withIds = ImportVariables.AsColumns([new ImportVariable { Name = "var_a", Value = "x", Fid = ImportVariables.FidBase + 7 }, Calc("var_b", "1")]);
+        withIds.Select(c => (c.Fid, c.Name, c.Kind)).Should().Equal(
+            (ImportVariables.FidBase + 7, "var_a", ImportVirtual.Fixed), (ImportVariables.FidFallback + 1, "var_b", ImportVirtual.Formula));
+        withIds[1].Formula.Should().Be("1");
+        withIds.Should().OnlyContain(c => ImportVirtual.IsVirtualFid(c.Fid));
+    }
+
+    [Fact]
+    public void Deleting_another_variable_never_moves_the_id_of_one_that_has_its_own()
+    {
+        var a = new ImportVariable { Name = "var_a", Value = "x", Fid = ImportVariables.FidBase };
+        var b = new ImportVariable { Name = "var_b", Value = "y", Fid = ImportVariables.FidBase + 1 };
+
+        ImportVariables.AsColumns([a, b]).Single(c => c.Name == "var_b").Fid.Should().Be(ImportVariables.FidBase + 1);
+        ImportVariables.AsColumns([b]).Single(c => c.Name == "var_b").Fid.Should().Be(ImportVariables.FidBase + 1);
+    }
+
+    [Fact]
+    public void An_id_outside_the_range_or_given_to_two_variables_is_refused()
+    {
+        ImportVariables.Check([new ImportVariable { Name = "var_a", Fid = 5 }]).Should().Contain("not valid");
+        ImportVariables.Check([new ImportVariable { Name = "var_a", Fid = ImportVariables.FidFallback }]).Should().Contain("not valid");
+        ImportVariables.Check([new ImportVariable { Name = "var_a", Fid = ImportVariables.FidBase }, new ImportVariable { Name = "var_b", Fid = ImportVariables.FidBase }]).Should().Contain("not valid");
+        ImportVariables.Check([new ImportVariable { Name = "var_a", Fid = ImportVariables.FidBase }, new ImportVariable { Name = "var_b" }]).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_number_variable_is_a_number_in_a_formula_and_in_a_filter()
+    {
+        var h = ImportHarness.Create(RunConfig(c =>
+        {
+            c.Variables = [Calc("var_rate", "2 + 1")];
+            c.Mappings.Add(Formula(7, "[var_rate] * 10"));        // typed: no ToNumber needed
+            c.Conditions = Filter("startsWith", "n{{var_rate}}"); // n3, n30..n39
+        }), Source(40, rowFilter: true));
+
+        await h.RunAsync();
+
+        h.Store.Inserted.Should().HaveCount(11).And.OnlyContain(r => Equals(r[7], 30m));
+        h.Completion!.Value.Status.Should().Be(ImportRunStatus.Success);
+    }
+
+    [Fact]
+    public async Task A_date_variable_can_be_a_mappings_source_and_a_formulas_value()
+    {
+        var h = ImportHarness.Create(RunConfig(c =>
+        {
+            c.Variables = [Calc("var_day", "Date(2026, 1, 31)")];
+            c.Mappings.Add(Formula(9, "ToText([var_day])"));
+        }), Source(2));
+
+        await h.RunAsync();
+
+        h.Store.Inserted.Should().HaveCount(2).And.OnlyContain(r => ((string)r[9]!).Contains("2026"));
+    }
+
+    [Fact]
+    public async Task A_variable_mapped_as_a_source_gives_every_row_its_value()
+    {
+        var h = ImportHarness.Create(RunConfig(c =>
+        {
+            c.Variables =
+            [
+                new ImportVariable { Name = "var_label", Value = "Imported", Fid = ImportVariables.FidBase },
+                new ImportVariable { Name = "var_amount", Kind = ImportVariables.Formula, Formula = "40 + 2", Fid = ImportVariables.FidBase + 1 }
+            ];
+            c.Mappings.Add(new ImportFieldMapping { DestFid = 9, SourceFid = ImportVariables.FidBase });
+            c.Mappings.Add(new ImportFieldMapping { DestFid = 7, SourceFid = ImportVariables.FidBase + 1 });
+        }), Source(3));
+
+        await h.RunAsync();
+
+        h.Store.Inserted.Should().OnlyContain(r => Equals(r[9], "Imported") && Equals(r[7], 42m));
+    }
+
+    [Fact]
+    public async Task A_formula_variable_is_the_same_for_every_table_the_import_fills()
+    {
+        const long contactsId = 12;
+        var contactsPublicId = Guid.NewGuid();
+        var contacts = new HarnessDestination
+        {
+            Id = contactsId, PublicId = contactsPublicId, Name = "Contacts",
+            Fields = [ImportHarness.RecordId(contactsId), ImportHarness.Field(contactsId, 6, "Title", "Text"), ImportHarness.Field(contactsId, 8, "Code", "Text", required: true, unique: true)]
+        };
+        var options = Source(4);
+        options.ExtraDestinations = [contacts];
+        var h = ImportHarness.Create(RunConfig(c =>
+        {
+            c.Variables = [Calc("var_tag", "\"T\" & ToText(1 + 1)")];
+            c.Mappings.Add(Formula(9, "[var_tag]"));
+            c.AdditionalTargets = [new ImportTargetConfig { DestinationTableId = contactsPublicId, ImportType = ImportTypes.Copy, Mappings = [Formula(6, "[var_tag]"), new() { DestFid = 8, SourceFid = 6 }] }];
+        }), options);
+
+        await h.RunAsync();
+
+        h.Store.InsertedByTable[11].Should().OnlyContain(r => Equals(r[9], "T2"));
+        h.Store.InsertedByTable[contactsId].Should().OnlyContain(r => Equals(r[6], "T2"));
+    }
+
+    [Fact]
+    public async Task A_broken_variable_formula_fails_the_run_before_anything_is_written()
+    {
+        var h = ImportHarness.Create(RunConfig(c => { c.Variables = [Calc("var_a", "[Name]")]; c.Mappings.Add(Formula(9, "[var_a]")); }), Source(3));
+
+        await h.RunAsync();
+
+        h.Store.Inserted.Should().BeEmpty();
+        h.Completion!.Value.Status.Should().Be(ImportRunStatus.Failed);
+    }
+
+    [Fact]
+    public void A_formula_variable_round_trips_through_a_save_and_old_variables_without_a_kind_are_fixed()
+    {
+        var entity = new ImportDefinition();
+        ImportConfigMapper.Apply(entity, RunConfig(c => c.Variables = [Calc("var_a", "1 + 1"), Var("var_b", "x")]));
+
+        var loaded = ImportConfigMapper.ToConfig(entity, Guid.Empty).Variables;
+
+        loaded.Select(v => (v.Name, v.Kind, v.Formula, v.Value)).Should().Equal(("var_a", "formula", "1 + 1", ""), ("var_b", "fixed", null, "x"));
+        ImportJson.Deserialize<ImportVariable>("{\"name\":\"var_old\",\"value\":\"v\"}")!.Kind.Should().Be("fixed");
     }
 
     // ---- saving and loading ----

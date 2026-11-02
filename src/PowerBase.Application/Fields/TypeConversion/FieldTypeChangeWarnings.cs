@@ -18,9 +18,11 @@ public static class FieldTypeChangeWarnings
 
         var capabilities = FieldGeneralSettingsCapability.Resolve(plan.TargetTypeCode, null);
         var targetIsFormula = FieldTypeConversionMatrix.IsFormula(plan.TargetTypeCode);
-        if (plan.Field.IsUnique && dryRun is { DuplicateValues: > 0 })
+        // A key never loses Unique: its repeats are a blocker instead (PreviewFieldTypeChangeQueryHandler).
+        var uniqueCanTurnOff = plan.Field.IsUnique && !impact.IsUniqueLocked;
+        if (uniqueCanTurnOff && dryRun is { DuplicateValues: > 0 })
             warnings.Add($"{dryRun.DuplicateValues} converted value(s) repeat, so \"Must be unique\" will be turned off.");
-        else if (plan.Field.IsUnique && (targetIsFormula || capabilities?.Unique == false))
+        else if (uniqueCanTurnOff && (targetIsFormula || capabilities?.Unique == false))
             warnings.Add("The new type can't be unique, so \"Must be unique\" will be turned off.");
         if (plan.Field.IsRequired && capabilities?.Required == false)
             warnings.Add("The new type can't be required, so \"Must be filled in\" will be turned off.");

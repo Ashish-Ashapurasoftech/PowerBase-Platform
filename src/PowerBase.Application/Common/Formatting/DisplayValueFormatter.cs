@@ -358,6 +358,9 @@ public static class DisplayValueFormatter
         var d = decimals ?? 0;
         string Fmt(decimal n) => d == 0 ? Math.Round(n, MidpointRounding.AwayFromZero).ToString("0", Inv) : n.ToString("F" + d, Inv);
         string Plain(decimal n) => n.ToString("0.##########", Inv);
+        // "1 hr", not "1 hrs": the singular unit when the shown number is exactly one.
+        string Unit(string text, string one, string many) =>
+            $"{text} {(decimal.TryParse(text, NumberStyles.Number, Inv, out var v) && v == 1 ? one : many)}";
 
         switch (display)
         {
@@ -378,17 +381,17 @@ public static class DisplayValueFormatter
                 var total = (long)Math.Round(minutes * 60, MidpointRounding.AwayFromZero);
                 return $"{total / 60}:{total % 60:00}";
             }
-            case "Weeks": return $"{Fmt(minutes / 10080)} wks";
-            case "Days": return $"{Fmt(minutes / 1440)} days";
-            case "Hours": return $"{Fmt(minutes / 60)} hrs";
-            case "Minutes": return $"{Fmt(minutes)} mins";
-            case "Seconds": return $"{Fmt(minutes * 60)} secs";
+            case "Weeks": return Unit(Fmt(minutes / 10080), "wk", "wks");
+            case "Days": return Unit(Fmt(minutes / 1440), "day", "days");
+            case "Hours": return Unit(Fmt(minutes / 60), "hr", "hrs");
+            case "Minutes": return Unit(Fmt(minutes), "min", "mins");
+            case "Seconds": return Unit(Fmt(minutes * 60), "sec", "secs");
             default: // "Smart" (or unset)
-                if (minutes >= 10080 && minutes % 10080 == 0) return $"{Plain(minutes / 10080)} wks";
+                if (minutes >= 10080 && minutes % 10080 == 0) return Unit(Plain(minutes / 10080), "wk", "wks");
                 if (minutes >= 1440 && minutes % 1440 == 0) return $"{Plain(minutes / 1440)} {(minutes == 1440 ? "day" : "days")}";
                 if (minutes >= 60 && minutes % 60 == 0) return $"{Plain(minutes / 60)} {(minutes == 60 ? "hr" : "hrs")}";
                 if (minutes >= 1) return $"{Plain(minutes)} {(minutes == 1 ? "min" : "mins")}";
-                if (minutes > 0 && minutes < 1) return $"{Plain(minutes * 60)} secs";
+                if (minutes > 0 && minutes < 1) return Unit(Plain(minutes * 60), "sec", "secs");
                 return $"{Plain(minutes)} mins";
         }
     }

@@ -187,6 +187,47 @@ public class ReportLargeTableTests
         result.TotalsIncomplete.Should().BeFalse();
     }
 
+    [Fact]
+    public async Task A_lookup_or_summary_is_totalled_only_when_its_display_settings_ask_for_it()
+    {
+        const int OpenTasks = 120, Rate = 121, Closed = 122;
+        var sut = Handler();
+        // Count summary opted in on its Behavior Settings; a Currency lookup that wasn't; a True/False summary counting checked.
+        var fields = Fields();
+        fields.Add(new AppField { Id = OpenTasks, Fid = OpenTasks, Name = "Open Tasks", TypeCode = "Summary", IsReportable = true,
+            Settings = """{"relationshipId":2,"childTableId":98,"referenceFid":5,"function":"Count","display":{"showTotalInReports":true}}""" });
+        fields.Add(new AppField { Id = Rate, Fid = Rate, Name = "Project - Rate", TypeCode = "Lookup", IsReportable = true,
+            Settings = """{"relationshipId":1,"referenceFid":110,"sourceTableId":99,"sourceFid":9,"sourceTypeCode":"Currency","showTotalInReports":true}""" });
+        fields.Add(new AppField { Id = Closed, Fid = Closed, Name = "Any Closed", TypeCode = "Summary", IsReportable = true,
+            Settings = """{"relationshipId":2,"childTableId":98,"referenceFid":5,"function":"Exists","display":{"showTotalsRow":true}}""" });
+        _reportRepo.GetVisibleReportAsync(ReportId, Arg.Any<CancellationToken>()).Returns(new Report
+        {
+            Id = 1, PublicId = ReportId, AppTableId = TableId, ReportType = "Table",
+            Definition = JsonSerializer.Serialize(new ReportDefinition { Columns = [Budget, OpenTasks, Rate, Closed] }),
+        });
+        _fieldRepo.ListByTableAsync(TableId, Arg.Any<CancellationToken>()).Returns(fields);
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(new TableAccessContext { Unrestricted = true, ViewScope = RecordScopes.AllRecords, VisibleFields = fields, EditableFieldIds = new HashSet<long>() });
+        // Every Tasks record: 2 open tasks, a rate of 10, a closed task on odd records.
+        _formulaProjector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(ci => ci.ArgAt<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(1)
+                .Select(r => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>
+                {
+                    [OpenTasks] = 2m, [Rate] = 10m, [Closed] = (long)r["Id"]! % 2 == 1,
+                }).ToList());
+        ListedPageAndCountAre(3);
+        BudgetTotalInSqlIs(sum: 3m, rows: 3);
+        EveryMatchIs(Rows(3));
+
+        var result = await sut.HandleAsync(new RunReportQuery(ReportId, 1, 20));
+
+        result.Totals[OpenTasks.ToString()].Sum.Should().Be(6m);
+        result.Totals[Closed.ToString()].Sum.Should().Be(2m, "a True/False summary counts its checked records");
+        result.Totals.Should().NotContainKey(Rate.ToString(), "a lookup's opt-ins live in its display object, not beside its wiring");
+        result.TotalsIncomplete.Should().BeFalse();
+    }
+
     // ── The AI Search fast path ────────────────────────────────────────────────────────────────
 
     private FilterGroup DepartmentIsEngineering => new() { Logic = "and", Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = Department, Operator = "eq", Value = "Engineering" } }] };

@@ -307,4 +307,40 @@ public class ImportFormulaValidationTests
         (await new Rig().Check(Table("[Name]"))).Valid.Should().BeTrue();
         (await new Rig().Check(Table("[Name] & [var_x]") with { Variables = [Var("nope")] })).Valid.Should().BeFalse();
     }
+
+    private static ImportVariable Calc(string name, string formula) => new() { Name = name, Kind = ImportVariables.Formula, Formula = formula };
+
+    [Fact]
+    public async Task A_formula_variable_is_typed_in_the_formulas_that_use_it()
+    {
+        var number = await new Rig().Check(Table("[var_rate] * 2", "Number") with { Variables = [Calc("var_rate", "2 + 3")] });
+        var date = await new Rig().Check(Table("[var_day]", "Date") with { Variables = [Calc("var_day", "Today()")] });
+
+        number.Valid.Should().BeTrue();
+        number.ResultType.Should().Be("Number");
+        date.Valid.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task The_formula_of_a_variable_has_no_source_columns_and_cannot_use_itself_but_can_use_the_others()
+    {
+        var variables = new List<ImportVariable> { Calc("var_a", "1"), Calc("var_b", "[var_a] + 1") };
+
+        var usesOther = await new Rig().Check(Table("[var_a] + 1") with { Variables = variables, OwnVariable = "var_b", SourceTableId = null });
+        var usesColumn = await new Rig().Check(Table("[Name]") with { Variables = variables, OwnVariable = "var_b" });
+        var usesItself = await new Rig().Check(Table("[var_b] + 1") with { Variables = variables, OwnVariable = "var_b" });
+
+        usesOther.Valid.Should().BeTrue();
+        usesColumn.Valid.Should().BeFalse("a variable is global: there is no row to read a column from");
+        usesItself.Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_variable_cannot_hold_a_duration_and_says_variable_not_virtual_column()
+    {
+        var result = await new Rig().Check(Table("Days(3)") with { OwnVariable = "var_l", SourceTableId = null });
+
+        result.Valid.Should().BeFalse();
+        result.Diagnostics.Should().Contain(d => d.Message.Contains("variable"));
+    }
 }

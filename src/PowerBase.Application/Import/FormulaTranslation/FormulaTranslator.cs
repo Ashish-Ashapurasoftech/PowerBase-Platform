@@ -4,6 +4,7 @@ using PowerBase.Domain.Entities;
 using PowerBase.Domain.FieldSettings;
 using PowerBase.Formula;
 using PowerBase.Formula.Binding;
+using PowerBase.Formula.Diagnostics;
 using PowerBase.Formula.Types;
 
 namespace PowerBase.Application.Import.FormulaTranslation;
@@ -86,6 +87,15 @@ public class FormulaTranslator
             // authoring UI applies.
             // One formula can need several fixes (a text/number concatenation AND a comparison AND a multi-branch If), and fixing one
             // can expose the next, so rewrite and re-check a few times.
+            // Too deeply nested to read: the thousands of "unknown variable" errors that follow only hide the real reason, and no
+            // rewrite can fix it.
+            if (compiled.Diagnostics.FirstOrDefault(d => d.Code == FormulaErrorCode.FormulaTooComplex) is { } tooComplex)
+                return new FormulaTranslationResult
+                {
+                    Status = FormulaTranslationStatus.NeedsManualReview,
+                    Diagnostics = [tooComplex.Message],
+                };
+
             var current = expression;
             var currentDiagnostics = compiled.Diagnostics;
             for (var pass = 0; pass < MAX_REWRITE_PASSES; pass++)

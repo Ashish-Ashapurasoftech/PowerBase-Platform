@@ -41,4 +41,12 @@ public class FormElement
     public string? ContentWidthMode { get; set; }
     public int? ContentWidthValue { get; set; }
     public string? ContentWidthUnit { get; set; }
+
+    // ── Reference / reference-proxy elements: which parent fields the dropdown shows ──
+    /// <summary>"default" | "report" | "field"; null = "default" (the parent table's default record picker).</summary>
+    public string? RecordPickerMode { get; set; }
+    /// <summary>Mode "report": PublicId of a Table report on the parent table.</summary>
+    public Guid? RecordPickerReportPublicId { get; set; }
+    /// <summary>Mode "field": Fid (like <see cref="AppFieldId"/>) of a Lookup field of this relationship on the form's table.</summary>
+    public long? RecordPickerFieldId { get; set; }
 }

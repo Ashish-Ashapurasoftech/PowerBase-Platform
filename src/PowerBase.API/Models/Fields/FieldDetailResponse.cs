@@ -35,4 +35,11 @@ public class FieldDetailResponse
     /// Encrypt-field toggle can still be changed on the Field Detail page — toggling encryption
     /// after data exists would leave the column in a mixed plaintext/ciphertext state.</summary>
     public bool HasRecords { get; init; }
+
+    /// <summary>True if this is its table's key field (Set Key).</summary>
+    public bool IsKeyField { get; init; }
+
+    /// <summary>The relationships that use this field as their parent key, as "Employees → Department". Together
+    /// with <see cref="IsKeyField"/> this says why Unique can't be turned off on the Field Detail page.</summary>
+    public IReadOnlyList<string> RelationshipKeyUsages { get; init; } = [];
 }

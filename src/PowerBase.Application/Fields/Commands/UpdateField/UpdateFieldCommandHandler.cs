@@ -134,6 +134,10 @@ public class UpdateFieldCommandHandler
         var isSharedValues = existing.IsSystem ? false : command.IsSharedValues ?? existing.IsSharedValues;
         var settings = existing.IsSystem
             ? SystemFieldSettingsPolicy.RestrictSettingsJson(existing.TypeCode, command.Settings)
+            // A Reference / Lookup / Summary takes only its Behavior Settings (the "display" object) from the request:
+            // the rest of its settings is the relationship's wiring, which only the relationship commands change.
+            : RelationshipDisplaySettingsPolicy.AppliesTo(existing.TypeCode)
+                ? RelationshipDisplaySettingsPolicy.Merge(existing.TypeCode, existing.Settings, command.Settings)
             // A request that sends no settings leaves them as they are: UpdateFieldSql writes Settings = @settings,
             // so passing null on would silently erase a formula's expression (or any other saved setting).
             : command.Settings ?? existing.Settings;
@@ -152,6 +156,8 @@ public class UpdateFieldCommandHandler
         if (sharedErrors.Count > 0) throw new ValidationException(new Dictionary<string, string[]>(sharedErrors));
         _guard.ValidateActionButtonTargets(existing.TypeCode, settings, tableFields, existing.Id);
         _guard.ValidateSnapshot(existing, label, snapshotSourceFid, snapshotEditable, isRequired, isUnique, command.IsAutoFill && snapshotSourceFid.HasValue, tableFields);
+        // Before the Display As switch below, which saves the new type straight away.
+        await _guard.ValidateKeyStaysUniqueAsync(table, existing, label, isUnique, ct);
 
         // Formula text is stored by field ID so a rename can't break it (see FormulaCanonicalizer).
         // The label being saved right now is also accepted as a name, so a formula can reference a

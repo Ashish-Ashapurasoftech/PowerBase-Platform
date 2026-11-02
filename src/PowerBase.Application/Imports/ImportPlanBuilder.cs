@@ -11,7 +11,6 @@ using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Domain.ValueObjects;
 using PowerBase.Formula;
-using PowerBase.Formula.Binding;
 using PowerBase.Formula.Diagnostics;
 using PowerBase.Formula.Evaluation;
 using PowerBase.Formula.Types;
@@ -126,12 +125,15 @@ public sealed class ImportPlanBuilder(
     /// definition's column references are pointed at them. Null for a table import, which behaves exactly as before.</param>
     public async Task<ImportPlan> BuildAsync(ImportDefinitionConfig cfg, Guid destinationTableId, CancellationToken ct, ImportFileSource? file = null, DateTime? runClock = null)
     {
-        // The import's variables: checked on their own, then {{var_name}} in a filter or a fixed value is replaced by the variable's text, so everything
-        // below sees plain values. [var_name] in a formula is resolved by the formula engine through the schema.
+        // The import's variables: checked on their own and worked out once (against the run's clock, so every table sees the same "today"); then
+        // {{var_name}} in a filter or a fixed value is replaced by the variable's text, so everything below sees plain values. In a formula a variable is a
+        // column like a virtual column (they are added to the virtual columns below), so it is typed by its result.
+        runClock ??= DateTime.UtcNow;
         var variables = cfg.Variables;
         if (ImportVariables.Check(variables) is { } variableProblem) throw Invalid(variableProblem);
-        var variableSchema = ImportVariables.Schema(variables);
-        cfg = ImportVariables.Apply(cfg);
+        var (variableValues, variableError) = ImportVariables.Evaluate(variables, formulaEngine, FormulaOptionsForVariables(runClock.Value));
+        if (variableError is not null) throw Invalid(variableError);
+        cfg = ImportVariables.Apply(cfg, variableValues);
         if (file is not null) cfg = ImportFileRemap.Apply(cfg, file);
         if (string.IsNullOrWhiteSpace(cfg.Name)) throw Invalid("Give the import a name.");
         if (cfg.Name.Length > 200) throw Invalid("The import name is too long.");
@@ -179,7 +181,9 @@ public sealed class ImportPlanBuilder(
         var mappings = new List<ResolvedMapping>(active.Count);
         // Virtual columns are sources like any other, but exist only inside the import: they are added after what the user can see.
         if (ImportVariables.Collision(variables, visibleSource, cfg.VirtualColumns) is { } variableClash) throw Invalid(variableClash);
-        var (virtuals, virtualError) = ImportVirtual.Resolve(cfg.VirtualColumns, visibleSource, formulaEngine, variables: variableSchema);
+        // The variables come first: the import's own virtual columns may use them.
+        var allVirtuals = variables.Count == 0 ? cfg.VirtualColumns : ImportVariables.AsColumns(variables).Concat(cfg.VirtualColumns).ToList();
+        var (virtuals, virtualError) = ImportVirtual.Resolve(allVirtuals, visibleSource, formulaEngine);
         if (virtualError is not null) throw Invalid(virtualError);
         var sourceWithVirtuals = virtuals.Count == 0 ? visibleSource : visibleSource.Concat(virtuals.Select(v => v.Field)).ToList();
         var sourceSchema = new AppFieldSchema(sourceWithVirtuals);
@@ -196,14 +200,14 @@ public sealed class ImportPlanBuilder(
 
             if (ImportTypeCompatibility.IsUserDestination(dest))
             {
-                mappings.Add(await ResolveFixedUserAsync(m, dest, cfg.VirtualColumns, ct));
+                mappings.Add(await ResolveFixedUserAsync(m, dest, allVirtuals, ct));
                 continue;
             }
             mappings.Add(m.Source switch
             {
                 ImportMappingSource.Dynamic => ResolveDynamic(m, dest, sourceWithVirtuals, anySourceType: file is not null || (m.SourceFid is { } sf && ImportVirtual.IsVirtualFid(sf)), cfg.RunTimeZone),
                 ImportMappingSource.Static => ResolveStatic(m, dest, dest.Fid == mergeKey?.Fid),
-                ImportMappingSource.Formula => ResolveFormula(m, dest, sourceSchema, variableSchema),
+                ImportMappingSource.Formula => ResolveFormula(m, dest, sourceSchema),
                 _ => throw Invalid($"'{ImportTypeCompatibility.DisplayName(dest)}' has an unknown value source.")
             });
         }
@@ -225,6 +229,8 @@ public sealed class ImportPlanBuilder(
         // A file's rows are never filtered by SQL: every condition on a file's columns is checked on each row as it is read.
         var rowFids = sourceFields.Where(f => f.Fid.HasValue && (file is not null || PhysicalNaming.IsComputedTypeCode(f.TypeCode) || f.IsEncrypted))
             .Select(f => (long)f.Fid!.Value).ToHashSet();
+        // A "does not have a duplicate" condition needs every row read first, so it is only ever checked on each row in memory, whatever the field.
+        foreach (var fid in ImportRowFilter.DuplicateFields(resolved)) rowFids.Add(fid);
         var (sqlFilter, rowFilterTree) = FormulaFilterSorter.SplitFilterTree(resolved, rowFids);
 
         // This table's own filter is checked on each row in memory, whatever the field: the source is read once for every table, so SQL
@@ -278,9 +284,8 @@ public sealed class ImportPlanBuilder(
     /// the one plan <see cref="BuildAsync"/> would.</summary>
     public async Task<IReadOnlyList<ImportPlan>> BuildAllAsync(ImportDefinitionConfig cfg, Guid homeTableId, CancellationToken ct, ImportFileSource? file = null)
     {
-        // With one table, the import's conditions already say which rows go in; a second set would only be a way to get them wrong.
-        if (cfg.AdditionalTargets.Count == 0 && cfg.SheetMappings.Count == 0 && cfg.TableConditions is { Nodes.Count: > 0 })
-            throw Invalid("A table's own filter is for an import that fills more than one table. Use the conditions above instead.");
+        // With one table, the table's own filter and the import's conditions ask the same question: they are combined (both must hold).
+        cfg = ImportSingleTableFilter.Fold(cfg);
         if (cfg.SheetMappings.Count > 0 && cfg.TableConditions is { Nodes.Count: > 0 })
             throw Invalid("A table that reads the workbook sheet by sheet is filtered in each sheet's own mapping.");
         var clock = DateTime.UtcNow;
@@ -533,19 +538,26 @@ public sealed class ImportPlanBuilder(
 
     /// <summary>A formula is the platform's own formula language, compiled against the source table's fields the user can see.
     /// Its result type must be one the destination can safely take, which is checked here, before any row is read.</summary>
-    private ResolvedMapping ResolveFormula(ImportFieldMapping m, AppField dest, AppFieldSchema sourceSchema, IVariableSchema? variables)
+    private ResolvedMapping ResolveFormula(ImportFieldMapping m, AppField dest, AppFieldSchema sourceSchema)
     {
         var name = ImportTypeCompatibility.DisplayName(dest);
         if (string.IsNullOrWhiteSpace(m.Formula)) throw Invalid($"Enter the formula for '{name}'.");
         if (m.Formula.Length > MaxFormulaLength) throw Invalid($"The formula for '{name}' is too long (at most {MaxFormulaLength} characters).");
         if (ImportFormulaGuard.IsTooDeep(m.Formula)) throw Invalid($"The formula for '{name}' is nested too deeply (at most {ImportFormulaGuard.MaxNesting} levels).");
-        var compiled = formulaEngine.Compile(m.Formula, sourceSchema, variableSchema: variables);
+        var compiled = formulaEngine.Compile(m.Formula, sourceSchema);
         if (compiled.Diagnostics.FirstOrDefault(d => d.Severity == FormulaSeverity.Error) is { } error)
             throw Invalid($"The formula for '{name}' has an error: {error.Message}");
         var problem = ImportTypeCompatibility.CheckFormulaResult(compiled.ResultType, dest);
         if (problem is not null) throw Invalid($"'{name}': {problem}");
         return new ResolvedMapping { Destination = dest, Kind = ImportMappingSource.Formula, Formula = compiled };
     }
+
+    /// <summary>How a variable's formula is calculated: with the run's clock and the person running it. There is no table, a variable being the import's.</summary>
+    private EvaluationOptions FormulaOptionsForVariables(DateTime runClock) => new()
+    {
+        UtcNow = runClock,
+        CurrentUser = user.UserId > 0 ? new UserRef(user.UserId.ToString(System.Globalization.CultureInfo.InvariantCulture), user.UserEmail, user.UserName) : null
+    };
 
     private EvaluationOptions FormulaOptionsForRun(AppTable source, DateTime? runClock) => new()
     {
@@ -673,7 +685,8 @@ public sealed class ImportPlanBuilder(
         if (conditions is null) return;
         var errors = new Dictionary<string, string[]>();
         var validIds = visibleFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).Append(-1).ToHashSet();
-        CommonReportValidationHelpers.ValidateFilterGroup(conditions, validIds, errors);
+        // The shared checker only knows the operators a report has: "does not have a duplicate" is checked as "is blank" (same field, no value), and for itself below.
+        CommonReportValidationHelpers.ValidateFilterGroup(AsKnownOperators(conditions), validIds, errors);
 
         var computed = visibleFields.Where(f => f.Fid.HasValue && PhysicalNaming.IsComputedTypeCode(f.TypeCode)).Select(f => (long)f.Fid!.Value).ToHashSet();
         void Walk(FilterGroup g)
@@ -682,6 +695,7 @@ public sealed class ImportPlanBuilder(
             {
                 if (n.Condition is { } c)
                 {
+                    if (c.Operator == ImportRowFilter.NoDuplicateOperator) CheckNoDuplicate(c, visibleFields, errors);
                     if (string.Equals(c.ValueMode, "ask", StringComparison.OrdinalIgnoreCase))
                         CommonReportValidationHelpers.AddError(errors, "conditions", "\"Ask the user\" values are not available in an import, which runs without anyone to ask.");
                     if (string.Equals(c.ValueMode, "field", StringComparison.OrdinalIgnoreCase) && c.ValueFieldId.HasValue && computed.Contains(c.ValueFieldId.Value))
@@ -692,6 +706,37 @@ public sealed class ImportPlanBuilder(
         }
         Walk(conditions);
         if (errors.Count > 0) throw new ValidationException(errors);
+    }
+
+    /// <summary>Field types whose value is not one thing to compare (several values, a file, a whole address, a range): no "does not have a duplicate" on them.</summary>
+    private static readonly HashSet<string> NoDuplicateUnsupported = ["MultiSelect", "MultiUser", "File", "Address", "DateRange", "NumericRange", "RichText", "ReportLink"];
+
+    /// <summary>A copy of the filter in which each "does not have a duplicate" is an "is blank" on the same field, so the report checker, which knows only a
+    /// report's operators, still checks the field ids. The copy is only checked, never run.</summary>
+    private static FilterGroup AsKnownOperators(FilterGroup conditions)
+    {
+        if (!ImportRowFilter.DuplicateFields(conditions).Any()) return conditions;
+        var copy = ImportJson.Deserialize<FilterGroup>(ImportJson.Serialize(conditions))!;
+        void Swap(FilterGroup g)
+        {
+            foreach (var n in g.Nodes)
+            {
+                if (n.Condition is { } c && c.Operator == ImportRowFilter.NoDuplicateOperator) { c.Operator = "isEmpty"; c.Value = null; c.ValueMode = null; }
+                if (n.Group is not null) Swap(n.Group);
+            }
+        }
+        Swap(copy);
+        return copy;
+    }
+
+    private static void CheckNoDuplicate(FilterCondition c, IReadOnlyList<AppField> visibleFields, Dictionary<string, string[]> errors)
+    {
+        var field = visibleFields.FirstOrDefault(f => f.Fid == c.FieldId);
+        if (field is not null && NoDuplicateUnsupported.Contains(field.TypeCode))
+            CommonReportValidationHelpers.AddError(errors, "conditions", $"'{ImportTypeCompatibility.DisplayName(field)}' cannot be checked for duplicates: it holds more than one value or no single value to compare.");
+        // The value only says whether the first row of a repeated value is kept ("true"); anything else is a mistake, not a different meaning.
+        if (!string.IsNullOrEmpty(c.Value) && !string.Equals(c.Value, "true", StringComparison.OrdinalIgnoreCase) && !string.Equals(c.Value, "false", StringComparison.OrdinalIgnoreCase))
+            CommonReportValidationHelpers.AddError(errors, "conditions", "A duplicate condition only says whether the first row of a repeated value is kept.");
     }
 
     /// <summary>Turns run-relative values into literals: today/yesterday/past-N-days, "is during …" ranges, "is current

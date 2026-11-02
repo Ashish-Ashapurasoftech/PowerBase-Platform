@@ -72,8 +72,11 @@ public class UpdateSummaryFieldCommandHandler
         var lookupSources = await SummaryLookupSources.LoadAsync(childFields, _fieldRepo, ct);
         var referenceKeys = await ReferenceKeys.LoadAsync(rel.ChildTableId, childFields, _relRepo, _tableRepo, _fieldRepo, ct);
 
-        var settings = RelationshipFieldFactory.Serialize(SummarySettingsBuilder.Build(rel, command.Function, command.TargetFid,
-            command.MatchingCriteria, command.CombinedText, childFields, parentFields, app, lookupSources, field.Fid, referenceKeys));
+        var built = SummarySettingsBuilder.Build(rel, command.Function, command.TargetFid,
+            command.MatchingCriteria, command.CombinedText, childFields, parentFields, app, lookupSources, field.Fid, referenceKeys);
+        // The summary's Behavior Settings are edited on the field itself (UpdateField), not here — keep them.
+        built.Display = FormulaTypeMap.ParseSummarySettings(field.Settings)?.Display;
+        var settings = RelationshipFieldFactory.Serialize(built);
 
         if (await _fieldRepo.LabelExistsInTableAsync(parent.Id, label, excludeFieldId: field.Id, ct: ct))
             throw new DuplicateException("Field", "label", label);
