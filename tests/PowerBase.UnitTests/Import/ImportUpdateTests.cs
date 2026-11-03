@@ -297,4 +297,92 @@ public class ImportDiffBuilderTests
 
         diff.Items.Single(i => i.ElementType == "Field").MatchedBy.Should().Be(ImportMatchedBy.Mapping);
     }
+
+    // ---- PowerFlows ----
+
+    private readonly IPipelineRepository _pipelineRepo = Substitute.For<IPipelineRepository>();
+
+    private ImportDiffBuilder SutWithPipelines(params (long Id, Guid PublicId, string Name)[] existing)
+    {
+        Sut();
+        _tableRepo.ListByAppAsync(1L, Arg.Any<CancellationToken>()).Returns(new List<AppTable>());
+        _pipelineRepo.ListNamesByAppIdAsync(1L, Arg.Any<CancellationToken>()).Returns(existing.Select(e => (e.PublicId, e.Name)).ToList());
+        foreach (var e in existing)
+            _pipelineRepo.GetIdByPublicIdAsync(e.PublicId, Arg.Any<CancellationToken>()).Returns(e.Id);
+        return new ImportDiffBuilder(_appRepo, _tableRepo, _fieldRepo, _reportRepo, _formRepo, _roleRepo, _variableRepo, _pageRepo, _refRepo, _pipelineRepo);
+    }
+
+    private static PblPipeline Pipeline(string logicalRef, string name, bool unreadable = false) =>
+        new() { LogicalRef = logicalRef, Name = name, IsUnreadable = unreadable };
+
+    [Fact]
+    public async Task Build_PipelineNotInApp_IsNew()
+    {
+        var diff = await SutWithPipelines().BuildAsync(Doc(), _appId, null, default, [Pipeline("$P", "Create Status Log")]);
+
+        var item = diff.Items.Single(i => i.ElementType == ImportElementTypes.Pipeline);
+        item.Status.Should().Be(ImportDiffStatus.New);
+        item.Name.Should().Be("Create Status Log");
+    }
+
+    [Fact]
+    public async Task Build_PipelineWithSameNameInApp_IsChangedAndCanBeOverwritten()
+    {
+        var existing = Guid.NewGuid();
+
+        var diff = await SutWithPipelines((40, existing, "create status log")).BuildAsync(Doc(), _appId, null, default, [Pipeline("$P", "Create Status Log")]);
+
+        var item = diff.Items.Single(i => i.ElementType == ImportElementTypes.Pipeline);
+        item.Status.Should().Be(ImportDiffStatus.Changed);
+        item.CanOverwrite.Should().BeTrue();
+        item.MatchedBy.Should().Be(ImportMatchedBy.Name);
+        item.TargetElementPublicId.Should().Be(existing);
+        item.TargetElementId.Should().Be(40);
+    }
+
+    [Fact]
+    public async Task Build_PipelineImportedBefore_IsMatchedBySourceRefEvenAfterARename()
+    {
+        var existing = Guid.NewGuid();
+        var sut = SutWithPipelines((40, existing, "Renamed in the app"));
+        _refRepo.ListByAppAsync(1L, Arg.Any<CancellationToken>()).Returns(new[]
+        {
+            new ImportSourceRef { AppId = 1, ElementType = ImportElementTypes.Pipeline, SourceLogicalRef = "$P", ElementId = 40 },
+        });
+
+        var diff = await sut.BuildAsync(Doc(), _appId, null, default, [Pipeline("$P", "Create Status Log")]);
+
+        var item = diff.Items.Single(i => i.ElementType == ImportElementTypes.Pipeline);
+        item.MatchedBy.Should().Be(ImportMatchedBy.SourceRef);
+        item.TargetElementPublicId.Should().Be(existing);
+    }
+
+    [Fact]
+    public async Task Build_UnreadablePipeline_IsNotOffered()
+    {
+        var diff = await SutWithPipelines().BuildAsync(Doc(), _appId, null, default, [Pipeline("", "Pipelines", unreadable: true)]);
+
+        diff.Items.Should().NotContain(i => i.ElementType == ImportElementTypes.Pipeline);
+    }
+
+    [Fact]
+    public void Plan_MatchedPipelineWithoutADecision_IsKept_AndOverwriteIsPlanned()
+    {
+        var item = new ImportDiffItem
+        {
+            ElementType = ImportElementTypes.Pipeline, SourceLogicalRef = "$P", Name = "Flow", Status = ImportDiffStatus.Changed,
+            CanOverwrite = true, TargetElementPublicId = Guid.NewGuid(), TargetElementId = 40,
+        };
+        var diff = new ImportDiffResult { Items = [item] };
+
+        var kept = ImportUpdatePlanner.Plan(diff, new ImportMapping());
+        kept.Overwrites.Should().BeEmpty();
+        kept.Outcomes.Should().ContainSingle().Which.Outcome.Should().Be(ImportOutcome.Skipped);
+
+        var plan = ImportUpdatePlanner.Plan(diff, new ImportMapping
+        {
+            Elements = [new ImportMappingElement { ElementType = ImportElementTypes.Pipeline, SourceLogicalRef = "$P", Action = ImportElementAction.Overwrite }],
+        });
+        plan.Overwrites.Should().ContainSingle().Which.SourceLogicalRef.Should().Be("$P");
+    }
 }

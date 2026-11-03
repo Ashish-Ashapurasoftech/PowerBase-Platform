@@ -45,7 +45,8 @@ public static class ImportUpdatePlanner
         }
 
         var undecided = diff.Items
-            .Where(i => i.Status == ImportDiffStatus.Changed && i.CanOverwrite && !decisions.ContainsKey(ImportSourceRefRecorder.Key(i.ElementType, i.SourceLogicalRef)))
+            .Where(i => i.Status == ImportDiffStatus.Changed && i.CanOverwrite && i.ElementType != ImportElementTypes.Pipeline
+                        && !decisions.ContainsKey(ImportSourceRefRecorder.Key(i.ElementType, i.SourceLogicalRef)))
             .ToList();
 
         if (errors.Count > 0)
@@ -69,7 +70,9 @@ public static class ImportUpdatePlanner
                         plan.AddKeys.Add(key);
                     break;
                 case ImportDiffStatus.Changed:
-                    if (decision!.Action == ImportElementAction.Overwrite)
+                    // A PowerFlow already in the app is kept unless Overwrite was chosen (so an update that predates
+                    // PowerFlows in the diff still works without a decision for each one).
+                    if (decision?.Action == ImportElementAction.Overwrite)
                         plan.Overwrites.Add(item);
                     else
                         plan.Outcomes.Add(Outcome(item, ImportOutcome.Skipped, "Skipped by user."));

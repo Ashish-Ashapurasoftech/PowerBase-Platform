@@ -650,4 +650,116 @@ public class PblPipelinesImporterTests
         report.Pipelines.Should().BeEmpty();
         await _pipelineRepo.DidNotReceive().CreateAsync(Arg.Any<Pipeline>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
     }
+
+    // ---- Update Existing App ----
+
+    private static ParsedApp Parsed(string pipelineYaml) =>
+        ImportDocumentParser.ParseAll(QblPipelineConverterTests.App + "\n" + pipelineYaml + "\n" + QblPipelineConverterTests.Account).Single();
+
+    private static PblPipelinesImporter.ExistingAppTargets NoTargets() => new(new Dictionary<string, long>(), new Dictionary<string, long>());
+
+    [Fact]
+    public void LoadApp_QblWithPipelines_KeepsThePipelinesForTheUpdate()
+    {
+        var content = QblPipelineConverterTests.App + "\n" + QblPipelineConverterTests.AllSteps + "\n" + QblPipelineConverterTests.Account;
+
+        var (app, _) = PblDocumentTools.LoadApp(content, new PowerBase.Application.Import.Pbl.PblValidator());
+
+        app.Pipelines.Should().ContainSingle().Which.Name.Should().Be("All Step");
+        app.Pipelines![0].AppRef.Should().Be(app.AppRef);
+    }
+
+    [Fact]
+    public async Task ExistingApp_ApprovedNewPipeline_IsCreatedOffWithAllItsSteps()
+    {
+        var parsed = Parsed(QblPipelineConverterTests.AllSteps);
+        var pipelineRef = parsed.Pipelines!.Single().LogicalRef;
+
+        var items = await Importer().ImportIntoExistingAppAsync(parsed, _appId, "Docs", [pipelineRef], new Dictionary<string, Guid>(), NoTargets(), default);
+
+        var item = items.Should().ContainSingle().Subject;
+        item.Status.Should().Be(PipelineImportStatuses.Created);
+        item.PipelinePublicId.Should().Be(_pipelineId);
+        item.StepsImported.Should().Be(18);
+        _created!.IsActive.Should().BeFalse();
+        _saves.Should().ContainSingle().Which.Should().HaveCount(18);
+    }
+
+    [Fact]
+    public async Task ExistingApp_PipelineNotApproved_IsLeftAlone()
+    {
+        var parsed = Parsed(QblPipelineConverterTests.AllSteps);
+
+        var items = await Importer().ImportIntoExistingAppAsync(parsed, _appId, "Docs", [], new Dictionary<string, Guid>(), NoTargets(), default);
+
+        items.Should().BeEmpty();
+        await _pipelineRepo.DidNotReceive().CreateAsync(Arg.Any<Pipeline>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+        _saves.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ExistingApp_TableMatchedUnderAnotherName_StepsUseThatTable()
+    {
+        // The app's "Employee" table was renamed "Staff"; the diff matched it by source ref.
+        _employee.Name = "Staff";
+        var parsed = Parsed(QblPipelineConverterTests.AllSteps);
+        var employeeRef = parsed.Document.Tables!.Single(t => t.Name == "Employee").LogicalRef;
+        var targets = new PblPipelinesImporter.ExistingAppTargets(new Dictionary<string, long> { [employeeRef] = _employee.Id }, new Dictionary<string, long>());
+
+        var items = await Importer().ImportIntoExistingAppAsync(parsed, _appId, "Docs", [parsed.Pipelines!.Single().LogicalRef],
+            new Dictionary<string, Guid>(), targets, default);
+
+        items.Single().Status.Should().Be(PipelineImportStatuses.Created);
+        Config(Saved("ref_aa")).GetProperty("tablePublicId").GetString().Should().Be(_employee.PublicId.ToString());
+        items.Single().Issues.Should().NotContain(i => i.Code == "PIPELINE_TABLE_MISSING");
+    }
+
+    [Fact]
+    public async Task ExistingApp_FieldMatchedUnderAnotherName_MappingUsesThatField()
+    {
+        // "Name" on Employee is called "Full Name" in the app now; the diff matched it by source ref.
+        var renamed = Field(20, "Full Name");
+        _fieldRepo.ListByTableAsync(1, Arg.Any<CancellationToken>()).Returns(new List<AppField> { RecordId(), renamed, Field(30, "TAddress", "Address") });
+        var parsed = Parsed(QblPipelineConverterTests.AllSteps);
+        var nameRef = parsed.Document.Tables!.Single(t => t.Name == "Employee").Fields!.Single(f => f.Name == "Name").LogicalRef;
+        var targets = new PblPipelinesImporter.ExistingAppTargets(new Dictionary<string, long>(), new Dictionary<string, long> { [nameRef] = renamed.Id });
+
+        await Importer().ImportIntoExistingAppAsync(parsed, _appId, "Docs", [parsed.Pipelines!.Single().LogicalRef], new Dictionary<string, Guid>(), targets, default);
+
+        Saved("ref_ab").ConfigJson.Should().Contain("fid_20");
+    }
+
+    [Fact]
+    public async Task ExistingApp_Overwrite_TurnsThePowerFlowOffAndReplacesStepsAndSchedule()
+    {
+        var existingId = Guid.NewGuid();
+        var existing = new Pipeline { Id = 77, PublicId = existingId, AppId = 10, Name = "My flow", Description = "old", IsActive = true, RowVersion = [7] };
+        var updates = new List<Pipeline>();
+        _pipelineRepo.GetByPublicIdAsync(existingId, Arg.Any<CancellationToken>()).Returns(_ => existing);
+        _pipelineRepo.GetIdByPublicIdAsync(existingId, Arg.Any<CancellationToken>()).Returns(77L);
+        _pipelineRepo.GetStepsByPipelineIdAsync(77, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep>());
+        _pipelineRepo.UpdateAsync(Arg.Do<Pipeline>(p => updates.Add(new Pipeline { Name = p.Name, Description = p.Description, IsActive = p.IsActive })),
+            Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>()).Returns(1);
+        var oldSchedule = new PipelineSchedule { Id = 5, PublicId = Guid.NewGuid(), PipelineId = 77, ScheduleType = "daily" };
+        _pipelineRepo.GetScheduleByPipelineIdAsync(77, Arg.Any<CancellationToken>()).Returns(oldSchedule);
+        var overwriteSaves = new List<List<PipelineStep>>();
+        _pipelineRepo.SaveStepsAsync(77, Arg.Do<IEnumerable<PipelineStep>>(s => overwriteSaves.Add(s.ToList())), Arg.Any<byte[]>(),
+            Arg.Any<bool>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>()).Returns(Task.CompletedTask);
+        var parsed = Parsed(QblPipelineConverterTests.AllSteps);
+        var pipelineRef = parsed.Pipelines!.Single().LogicalRef;
+
+        var items = await Importer().ImportIntoExistingAppAsync(parsed, _appId, "Docs", [],
+            new Dictionary<string, Guid> { [pipelineRef] = existingId }, NoTargets(), default);
+
+        var item = items.Should().ContainSingle().Subject;
+        item.Status.Should().Be(PipelineImportStatuses.Created);
+        item.PipelinePublicId.Should().Be(existingId);
+        item.Name.Should().Be("My flow", "an overwrite keeps the PowerFlow's own name");
+        item.StepsImported.Should().Be(18);
+        updates.Should().ContainSingle().Which.IsActive.Should().BeFalse();
+        updates[0].Name.Should().Be("My flow");
+        overwriteSaves.Should().ContainSingle().Which.Should().HaveCount(18);
+        await _pipelineRepo.DidNotReceive().CreateAsync(Arg.Any<Pipeline>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+        await _pipelineRepo.Received(1).DeleteScheduleAsync(oldSchedule.PublicId, Arg.Any<CancellationToken>());
+    }
 }
