@@ -26,10 +26,13 @@ public class ImportDiffQueryHandler
     {
         await _accessService.RequireAppRoleAsync(query.TargetAppPublicId, ADMINISTRATOR_ROLE, ct);
 
-        var (document, warnings) = PblDocumentTools.Load(query.Content, _validator);
+        var (parsedApp, warnings) = PblDocumentTools.LoadApp(query.Content, _validator);
+        var document = parsedApp.Document;
         PblDocumentTools.ExcludeTables(document, query.Mapping?.ExcludedTableRefs);
 
-        var diff = await _diffBuilder.BuildAsync(document, query.TargetAppPublicId, query.Mapping, ct);
+        var diff = await _diffBuilder.BuildAsync(document, query.TargetAppPublicId, query.Mapping, ct, parsedApp.Pipelines);
+        foreach (var unreadable in (parsedApp.Pipelines ?? []).Where(p => p.IsUnreadable))
+            warnings.AddRange(unreadable.Issues.Select(i => new PowerBase.Application.Import.Commands.ImportAppFromPbl.ImportSkippedItem { Name = unreadable.Name, Reason = i.Message }));
         diff.Warnings.AddRange(warnings.Select(w => w.Reason));
         return diff;
     }

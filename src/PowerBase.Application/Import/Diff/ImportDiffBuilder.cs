@@ -29,12 +29,15 @@ public class ImportDiffBuilder
     private readonly IAppVariableRepository _variableRepo;
     private readonly IPageRepository _pageRepo;
     private readonly IImportSourceRefRepository _sourceRefRepo;
+    private readonly IPipelineRepository? _pipelineRepo;
 
     public ImportDiffBuilder(
         IAppRepository appRepo, IAppTableRepository tableRepo, IAppFieldRepository fieldRepo,
         IReportRepository reportRepo, IFormRepository formRepo, IAppRoleRepository roleRepo,
-        IAppVariableRepository variableRepo, IPageRepository pageRepo, IImportSourceRefRepository sourceRefRepo)
+        IAppVariableRepository variableRepo, IPageRepository pageRepo, IImportSourceRefRepository sourceRefRepo,
+        IPipelineRepository? pipelineRepo = null)
     {
+        _pipelineRepo = pipelineRepo;
         _appRepo = appRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -46,7 +49,8 @@ public class ImportDiffBuilder
         _sourceRefRepo = sourceRefRepo;
     }
 
-    public async Task<ImportDiffResult> BuildAsync(PblDocument document, Guid appPublicId, ImportMapping? mapping, CancellationToken ct)
+    public async Task<ImportDiffResult> BuildAsync(PblDocument document, Guid appPublicId, ImportMapping? mapping, CancellationToken ct,
+        IReadOnlyList<PblPipeline>? pipelines = null)
     {
         var appId = await _appRepo.GetIdByPublicIdAsync(appPublicId, ct);
         var app = await _appRepo.GetByPublicIdAsync(appPublicId, ct);
@@ -249,6 +253,28 @@ public class ImportDiffBuilder
             }
         }
 
+        // ----- Pipelines (PowerFlows) -----
+        // A matched PowerFlow cannot be compared step by step with the file, so it is always Changed: the user decides to
+        // overwrite it (steps, schedule and description from the file; it is turned off) or to keep it as it is.
+        var readablePipelines = (pipelines ?? []).Where(p => !p.IsUnreadable && !string.IsNullOrEmpty(p.LogicalRef)).ToList();
+        if (readablePipelines.Count > 0 && _pipelineRepo is not null)
+        {
+            var existingPipelines = new List<ExistingPipeline>();
+            foreach (var (publicId, name) in await _pipelineRepo.ListNamesByAppIdAsync(appId, ct))
+                existingPipelines.Add(new ExistingPipeline(await _pipelineRepo.GetIdByPublicIdAsync(publicId, ct), publicId, name));
+            var usedPipelineIds = new HashSet<long>();
+            foreach (var pipeline in readablePipelines)
+            {
+                var (existing, matchedBy) = Match(ImportElementTypes.Pipeline, pipeline.LogicalRef, pipeline.Name,
+                    existingPipelines, p => p.Id, p => p.PublicId, p => p.Name, elementIdByRef, overrides, usedPipelineIds);
+                items.Add(existing is null
+                    ? NewItem(ImportElementTypes.Pipeline, pipeline.LogicalRef, pipeline.Name, null, "")
+                    : Matched(ImportElementTypes.Pipeline, pipeline.LogicalRef, pipeline.Name, null, "", existing.PublicId, existing.Id, matchedBy,
+                        [new ImportPropertyChange { Property = "Steps", Before = $"PowerFlow '{existing.Name}' as it is now", After = "Steps, schedule and description from the file (the PowerFlow is turned off)" }],
+                        canOverwrite: true));
+            }
+        }
+
         return new ImportDiffResult
         {
             TargetAppPublicId = appPublicId,
@@ -259,6 +285,8 @@ public class ImportDiffBuilder
     }
 
     private static string Key(string elementType, string logicalRef) => $"{elementType}|{logicalRef}";
+
+    private sealed record ExistingPipeline(long Id, Guid PublicId, string Name);
 
     /// <summary>Mapping override, then recorded source ref, then name. Each existing element can be
     /// claimed by at most one file element.</summary>

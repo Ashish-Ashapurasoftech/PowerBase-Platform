@@ -34,7 +34,6 @@ public class PblPipelinesImporter(
     UpdatePipelineCommandHandler? updatePipelineHandler = null)
 {
     private const int NAME_MAX = 200;
-    private const int DESCRIPTION_MAX = 500;
 
     private IAppRepository AppRepo => appRepo;
     private IAppTableRepository TableRepo => tableRepo;
@@ -84,6 +83,55 @@ public class PblPipelinesImporter(
         }
     }
 
+    /// <summary>Where the elements of the file already are in an existing app (Update Existing App): the matched table's and
+    /// field's ids, keyed by their logical ref in the file. A table or field the update just added is found by its name.</summary>
+    public sealed record ExistingAppTargets(IReadOnlyDictionary<string, long> TableIdByRef, IReadOnlyDictionary<string, long> FieldIdByRef);
+
+    /// <summary>Update Existing App: creates the file's pipelines listed in <paramref name="addRefs"/> in the app, and overwrites the
+    /// PowerFlows in <paramref name="overwrites"/> (logical ref → PowerFlow) with the file's steps, schedule and description. An
+    /// overwritten PowerFlow keeps its name and run history and is turned off, like every imported PowerFlow, until it is reviewed.</summary>
+    public virtual async Task<List<PipelineImportReportItem>> ImportIntoExistingAppAsync(
+        ParsedApp app, Guid appPublicId, string appName, IReadOnlyCollection<string> addRefs, IReadOnlyDictionary<string, Guid> overwrites,
+        ExistingAppTargets targets, CancellationToken ct)
+    {
+        var report = new ImportReport { AppPublicId = appPublicId, AppName = appName };
+        var resolver = new Resolver(this, [(app, report)], targets);
+        foreach (var pipeline in app.Pipelines ?? [])
+        {
+            Guid? overwrite = overwrites.TryGetValue(pipeline.LogicalRef, out var target) ? target : null;
+            if (overwrite is null && !addRefs.Contains(pipeline.LogicalRef))
+                continue;
+            var item = NewItem(pipeline);
+            report.Pipelines.Add(item);
+            try
+            {
+                if (pipeline.IsUnreadable)
+                    continue;
+                if (!string.Equals(pipeline.AppRef, app.AppRef, StringComparison.Ordinal))
+                {
+                    Issue(item, "PIPELINE_APP_NOT_IMPORTED", pipeline.AppRef is null
+                        ? "The pipeline does not say which application it belongs to; it was not imported."
+                        : "The pipeline belongs to another application in the file, so it was not imported into this app.");
+                    continue;
+                }
+                if (overwrite is { } pipelinePublicId)
+                    await OverwriteOneAsync(pipeline, pipelinePublicId, resolver, item, ct);
+                else
+                    await ImportOneAsync(pipeline, report, resolver, item, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                item.NeedsReview = true;
+                Issue(item, "PIPELINE_IMPORT_FAILED", $"The PowerFlow could not be imported completely ({Describe(ex)}).");
+            }
+            finally
+            {
+                item.NeedsReview |= item.Status != PipelineImportStatuses.Created || pipeline.ChangesExecution;
+            }
+        }
+        return report.Pipelines;
+    }
+
     private static PipelineImportReportItem NewItem(PblPipeline pipeline)
     {
         var item = new PipelineImportReportItem
@@ -100,24 +148,61 @@ public class PblPipelinesImporter(
         return item;
     }
 
-    private async Task ImportOneAsync(PblPipeline pipeline, ImportReport report, Resolver resolver, PipelineImportReportItem item, CancellationToken ct)
+    private async Task<List<SavePipelineStepDto>> BuildStepsAsync(PblPipeline pipeline, Resolver resolver, PipelineImportReportItem item, CancellationToken ct)
     {
         var steps = new List<SavePipelineStepDto>();
         for (var i = 0; i < pipeline.Steps.Count; i++)
             steps.Add(await ToDtoAsync(pipeline.Steps[i], i, resolver, item, ct));
         NumberSteps(steps, 1);
+        return steps;
+    }
+
+    /// <summary>Replaces an existing PowerFlow's steps, schedule and description with the file's. It is turned off first, so it
+    /// never runs half-replaced; when the new steps cannot be saved its previous steps and schedule are kept.</summary>
+    private async Task OverwriteOneAsync(PblPipeline pipeline, Guid pipelinePublicId, Resolver resolver, PipelineImportReportItem item, CancellationToken ct)
+    {
+        var steps = await BuildStepsAsync(pipeline, resolver, item, ct);
+        var existing = await pipelineRepo.GetByPublicIdAsync(pipelinePublicId, ct);
+        item.Name = existing.Name;
+        item.PipelinePublicId = pipelinePublicId;
+
+        if (updatePipelineHandler is null)
+            throw new InvalidOperationException("PowerFlows cannot be updated here.");
+        await updatePipelineHandler.HandleAsync(new UpdatePipelineCommand(pipelinePublicId, existing.Name, pipeline.Description, false, existing.RowVersion), ct);
+        item.Status = PipelineImportStatuses.Created;
+
+        if (steps.Count > 0)
+            await SaveStepsAsync(pipelinePublicId, steps, item, ct);
+        else
+        {
+            var current = await pipelineRepo.GetByPublicIdAsync(pipelinePublicId, ct);
+            await saveStepsHandler.HandleAsync(new SavePipelineStepsCommand(pipelinePublicId, steps, current.RowVersion), ct);
+            if (pipeline.SourceStepCount > 0)
+                item.Status = PipelineImportStatuses.CreatedWithoutSteps;
+        }
+
+        if (item.Status != PipelineImportStatuses.Created)
+        {
+            Issue(item, "PIPELINE_OVERWRITE_STEPS_KEPT", "The file's steps could not be saved, so the PowerFlow keeps its previous steps and schedule. It was turned off; review it before turning it on.");
+            return;
+        }
+        item.StepsImported = Count(steps);
+        item.NeedsReview |= Flatten(steps).Any(s => !s.IsValidated);
+
+        var pipelineId = await pipelineRepo.GetIdByPublicIdAsync(pipelinePublicId, ct);
+        if (await pipelineRepo.GetScheduleByPipelineIdAsync(pipelineId, ct) is { } oldSchedule)
+            await pipelineRepo.DeleteScheduleAsync(oldSchedule.PublicId, ct);
+        await ImportScheduleAsync(pipeline, pipelinePublicId, item, ct);
+    }
+
+    private async Task ImportOneAsync(PblPipeline pipeline, ImportReport report, Resolver resolver, PipelineImportReportItem item, CancellationToken ct)
+    {
+        var steps = await BuildStepsAsync(pipeline, resolver, item, ct);
 
         var name = await UniqueNameAsync(pipeline.Name, ct);
         if (!string.Equals(name, pipeline.Name, StringComparison.Ordinal))
             Issue(item, "PIPELINE_RENAMED", $"Imported as '{name}': you already have a PowerFlow named '{pipeline.Name}'.");
-        string? description = pipeline.Description;
-        if (description?.Length > DESCRIPTION_MAX)
-        {
-            Issue(item, "PIPELINE_DESCRIPTION_NOT_IMPORTED", $"The description is longer than {DESCRIPTION_MAX} characters and was not imported.");
-            description = null;
-        }
-
-        var created = await createPipelineHandler.HandleAsync(new CreatePipelineCommand(report.AppPublicId, name, description), ct);
+        var created = await createPipelineHandler.HandleAsync(new CreatePipelineCommand(report.AppPublicId, name, pipeline.Description), ct);
         item.Name = created.Name;
         item.PipelinePublicId = created.PublicId;
         item.Status = PipelineImportStatuses.Created;
@@ -228,7 +313,9 @@ public class PblPipelinesImporter(
         }
 
         var timeZone = string.IsNullOrWhiteSpace(pipeline.CrontabTimezone) ? null : pipeline.CrontabTimezone.Trim();
-        var command = new UpdatePipelineScheduleCommand(pipelinePublicId, "custom", null, null, null, null, null, null, null, timeZone ?? string.Empty, pipeline.Crontab.Trim());
+        var schedule = PowerBase.Application.Import.Qbl.QblCrontabSchedule.From(pipeline.Crontab);
+        var command = new UpdatePipelineScheduleCommand(pipelinePublicId, schedule.ScheduleType, schedule.Interval, schedule.TimeOfDay, schedule.Weekdays,
+            schedule.MonthDay, schedule.MonthOfYear, null, null, timeZone ?? string.Empty, schedule.CronExpression);
         var validation = new UpdatePipelineScheduleCommandValidator().Validate(command);
         if (!validation.IsValid)
         {
@@ -247,6 +334,11 @@ public class PblPipelinesImporter(
         {
             PipelineId = pipelineId,
             ScheduleType = command.ScheduleType,
+            Interval = command.Interval,
+            TimeOfDay = command.TimeOfDay,
+            Weekdays = command.Weekdays,
+            MonthDay = command.MonthDay,
+            MonthOfYear = command.MonthOfYear,
             TimeZone = command.TimeZone,
             CronExpression = command.CronExpression,
             NextRunOn = null,
@@ -390,7 +482,7 @@ public class PblPipelinesImporter(
     };
 
     /// <summary>Turns the reference values of a converted step into the ids of what the import created.</summary>
-    private sealed class Resolver(PblPipelinesImporter owner, IReadOnlyList<(ParsedApp App, ImportReport Report)> imported)
+    private sealed class Resolver(PblPipelinesImporter owner, IReadOnlyList<(ParsedApp App, ImportReport Report)> imported, ExistingAppTargets? targets = null)
     {
         /// <summary>A reference that points at nothing. Dropped from lists, emptied in plain settings.</summary>
         private sealed class Missing
@@ -504,6 +596,10 @@ public class PblPipelinesImporter(
                 foreach (var table in tables.Values)
                     _tablesByPublicId[table.PublicId] = table;
             }
+            // Update Existing App: a table the file matched to one of the app's (by source ref, mapping or name) is that table,
+            // whatever it is called in the app now.
+            if (targets is not null && targets.TableIdByRef.TryGetValue(tableRef, out var matchedId))
+                return tables.Values.FirstOrDefault(t => t.Id == matchedId);
             return tables.TryGetValue(pblTable.Name, out var created) ? created : null;
         }
 
@@ -531,6 +627,9 @@ public class PblPipelinesImporter(
             var home = Home(field.AppRef)!.Value;
             var pblTable = (home.App.Document.Tables ?? []).First(t => string.Equals(t.LogicalRef, field.TableRef, StringComparison.Ordinal));
             var qualified = $"{field.TableRef}::{field.FieldRef}";
+            if (targets is not null && targets.FieldIdByRef.TryGetValue(qualified, out var matchedFieldId)
+                && fields.FirstOrDefault(f => f.Id == matchedFieldId) is { Fid: { } matchedFid })
+                return matchedFid;
             if ((pblTable.Fields ?? []).FirstOrDefault(f => string.Equals(f.LogicalRef, qualified, StringComparison.Ordinal)) is { } pblField
                 && fields.FirstOrDefault(f => string.Equals(f.Name, pblField.Name, StringComparison.OrdinalIgnoreCase)) is { Fid: { } byName })
                 return byName;
