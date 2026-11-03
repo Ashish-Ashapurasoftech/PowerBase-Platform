@@ -38,8 +38,9 @@ public interface IPipelineRepository
     Task<Pipeline> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<Pipeline?> GetByIdAsync(long id, CancellationToken ct = default);
     Task<long> GetIdByPublicIdAsync(Guid publicId, CancellationToken ct = default);
-    Task<IReadOnlyList<PipelineListItemDetail>> ListByUserPagedAsync(long userId, int page, int pageSize, string? search, string sortBy, bool sortDesc, bool? isActive, CancellationToken ct = default);
-    Task<int> CountByUserAsync(long userId, string? search, bool? isActive, CancellationToken ct = default);
+    /// <param name="appPublicId">Only the PowerFlows of this app; null = every app (the PowerFlows list's App filter).</param>
+    Task<IReadOnlyList<PipelineListItemDetail>> ListByUserPagedAsync(long userId, int page, int pageSize, string? search, string sortBy, bool sortDesc, bool? isActive, CancellationToken ct = default, Guid? appPublicId = null);
+    Task<int> CountByUserAsync(long userId, string? search, bool? isActive, CancellationToken ct = default, Guid? appPublicId = null);
     /// <summary>Every non-deleted pipeline's id/name for this app, unpaged — for filter dropdowns only.</summary>
     Task<IReadOnlyList<(Guid PublicId, string Name)>> ListNamesByAppIdAsync(long appId, CancellationToken ct = default);
     Task<IReadOnlyList<Pipeline>> ListAllActiveAsync(CancellationToken ct = default);

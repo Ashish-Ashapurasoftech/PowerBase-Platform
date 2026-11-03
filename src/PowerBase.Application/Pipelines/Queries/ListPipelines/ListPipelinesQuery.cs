@@ -9,4 +9,5 @@ public record ListPipelinesQuery(
     string? Search = null,
     string SortBy = "createdOn",
     bool SortDesc = true,
-    bool? IsActive = null);
+    bool? IsActive = null,
+    Guid? FilterAppPublicId = null);
