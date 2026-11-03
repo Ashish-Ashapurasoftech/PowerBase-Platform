@@ -67,6 +67,19 @@ public sealed class ImportPreviewRoleItem
     public int TablePermissionCount { get; init; }
 }
 
+/// <summary>A Quickbase pipeline the import will create as a PowerFlow (always off). <see cref="Issues"/> lists the steps that are
+/// skipped and the values that are not carried; they never block the application's import.</summary>
+public sealed class ImportPreviewPipelineItem
+{
+    public string LogicalRef { get; init; } = string.Empty;
+    public string Name { get; init; } = string.Empty;
+    public int StepCount { get; init; }
+    public int SkippedStepCount { get; init; }
+    /// <summary>The PowerFlow will not do everything the source pipeline did; review it before turning it on.</summary>
+    public bool ChangesExecution { get; init; }
+    public List<PblIssueDto> Issues { get; init; } = [];
+}
+
 /// <summary>One application of the uploaded file.</summary>
 public sealed class ImportPreviewAppItem
 {
@@ -83,6 +96,8 @@ public sealed class ImportPreviewAppItem
     public List<string> Pages { get; init; } = [];
     public List<PblIssueDto> Errors { get; init; } = [];
     public List<PblIssueDto> Warnings { get; init; } = [];
+    /// <summary>Quickbase pipelines imported with this app (New App mode only).</summary>
+    public List<ImportPreviewPipelineItem> Pipelines { get; init; } = [];
 }
 
 public sealed class ImportPreviewResult

@@ -104,6 +104,41 @@ public class CopyRecordsTests
     }
 
     [Fact]
+    public void SystemFields_CanBeMappedDestinations_ButNotTheMergeField()
+    {
+        AppField SystemDate(int fid, string column)
+        {
+            var field = Field(fid, column, "DateTime");
+            field.IsSystem = true;
+            field.PhysicalColumnName = column;
+            return field;
+        }
+        var key = Field(9, "Destination key", unique: true);
+        var config = Config();
+        config.SourceFields = new() { "fid_6", "fid_7", "fid_8" };
+        config.DestinationFields = new() { "fid_9", "fid_1", "fid_2" };
+        config.MergeField = "fid_9";
+        var source = new[] { Field(6, "Key"), Field(7, "Created", "DateTime"), Field(8, "Modified", "DateTime") };
+        var destination = new[] { key, SystemDate(1, "CreatedOn"), SystemDate(2, "ModifiedOn") };
+
+        config.ValidateFields(source, destination);
+
+        config.MergeField = "fid_1";
+        Assert.Throws<ValidationException>(() => config.ValidateFields(source, destination));
+        var owner = Field(4, "Record Owner", "User");
+        owner.IsSystem = true;
+        owner.PhysicalColumnName = "OwnerId";
+        config.MergeField = "fid_9";
+        config.DestinationFields = new() { "fid_9", "fid_1", "fid_4" };
+        config.ValidateFields(source, new[] { key, SystemDate(1, "CreatedOn"), owner });
+        Assert.True(CopyRecordsDefinition.IsMappedOnlySystemField(owner));
+        var primary = Field(3, "Record ID#", "Number");
+        primary.IsSystem = true;
+        primary.PhysicalColumnName = "Id";
+        Assert.False(CopyRecordsDefinition.IsMappedOnlySystemField(primary));
+    }
+
+    [Fact]
     public void MergeEligibilityUsesMetadataInsteadOfFixedFid()
     {
         var config = Config();

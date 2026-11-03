@@ -1,0 +1,653 @@
+using PowerBase.Application.Pipelines.Commands.UpdatePipeline;
+using System.Text.Json;
+using FluentAssertions;
+using NSubstitute;
+using NSubstitute.ExceptionExtensions;
+using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Import.Commands.ImportAppFromPbl;
+using PowerBase.Application.Import.Qbl;
+using PowerBase.Application.Import.Services;
+using PowerBase.Application.Pipelines.Commands.CreatePipeline;
+using PowerBase.Application.Pipelines.Commands.SavePipelineSteps;
+using PowerBase.Domain.Entities;
+using PowerBase.UnitTests.Import.Qbl;
+using Xunit;
+
+namespace PowerBase.UnitTests.Import;
+
+/// <summary>
+/// The pipeline import end to end below the database: the real-export pipeline is resolved against the tables and fields the
+/// app import created, then created and saved through the real <see cref="CreatePipelineCommandHandler"/> and
+/// <see cref="SavePipelineStepsCommandHandler"/> — so every step also passes the validation a PowerFlow saved in the editor gets.
+/// </summary>
+public class PblPipelinesImporterTests
+{
+    private readonly IPipelineRepository _pipelineRepo = Substitute.For<IPipelineRepository>();
+    private readonly IAppRepository _appRepo = Substitute.For<IAppRepository>();
+    private readonly IAppTableRepository _tableRepo = Substitute.For<IAppTableRepository>();
+    private readonly IAppFieldRepository _fieldRepo = Substitute.For<IAppFieldRepository>();
+    private readonly ITenantRepository _tenantRepo = Substitute.For<ITenantRepository>();
+    private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
+
+    private readonly Guid _appId = Guid.NewGuid();
+    private readonly Guid _tenantId = Guid.NewGuid();
+    private readonly Guid _pipelineId = Guid.NewGuid();
+    private readonly AppTable _employee = new() { Id = 1, AppId = 10, PublicId = Guid.NewGuid(), Name = "Employee" };
+    private readonly AppTable _employee1 = new() { Id = 2, AppId = 10, PublicId = Guid.NewGuid(), Name = "Employee1" };
+    private readonly List<List<PipelineStep>> _saves = [];
+    private Pipeline? _created;
+
+    public PblPipelinesImporterTests()
+    {
+        _queryContext.TenantId.Returns(1L);
+        _queryContext.UserId.Returns(1L);
+        var tenant = new Tenant { Id = 1, PublicId = _tenantId, Name = "Realm" };
+        _tenantRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(tenant);
+        _tenantRepo.GetTenantForUserAsync(_tenantId, 1, Arg.Any<CancellationToken>()).Returns(tenant);
+
+        _appRepo.GetIdByPublicIdAsync(_appId, Arg.Any<CancellationToken>()).Returns(10L);
+        _appRepo.GetByPublicIdAsync(_appId, Arg.Any<CancellationToken>()).Returns(new App { Id = 10, PublicId = _appId, Name = "Docs" });
+        _tableRepo.ListByAppAsync(10, Arg.Any<CancellationToken>()).Returns(new List<AppTable> { _employee, _employee1 });
+        _tableRepo.GetByPublicIdAsync(_employee.PublicId, Arg.Any<CancellationToken>()).Returns(_employee);
+        _tableRepo.GetByPublicIdAsync(_employee1.PublicId, Arg.Any<CancellationToken>()).Returns(_employee1);
+        _fieldRepo.ListByTableAsync(1, Arg.Any<CancellationToken>()).Returns(new List<AppField>
+        {
+            RecordId(), Field(20, "Name"), Field(30, "TAddress", "Address"),
+        });
+        _fieldRepo.ListByTableAsync(2, Arg.Any<CancellationToken>()).Returns(new List<AppField> { RecordId(), Field(6, "Employee Name") });
+
+        _pipelineRepo.NameExistsForUserAsync(1, Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(false);
+        _pipelineRepo.CreateAsync(Arg.Do<Pipeline>(p => _created = p), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>())
+            .Returns((_pipelineId, 99L));
+        _pipelineRepo.GetByPublicIdAsync(_pipelineId, Arg.Any<CancellationToken>())
+            .Returns(_ => new Pipeline { Id = 99, PublicId = _pipelineId, AppId = 10, Name = _created!.Name, IsActive = false, RowVersion = [1] });
+        _pipelineRepo.GetIdByPublicIdAsync(_pipelineId, Arg.Any<CancellationToken>()).Returns(99L);
+        _pipelineRepo.GetStepsByPipelineIdAsync(99, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep>());
+        _pipelineRepo.SaveStepsAsync(99, Arg.Do<IEnumerable<PipelineStep>>(s => _saves.Add(s.ToList())), Arg.Any<byte[]>(),
+            Arg.Any<bool>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>()).Returns(Task.CompletedTask);
+    }
+
+    private static AppField RecordId() => new()
+    {
+        Id = 103, Fid = 3, Name = "Record ID#", Label = "Record ID#", TypeCode = "Number", IsSystem = true, PhysicalColumnName = "Id",
+    };
+
+    private static AppField Field(int fid, string name, string typeCode = "Text") => new()
+    {
+        Id = 1000 + fid, Fid = fid, Name = name, Label = name, TypeCode = typeCode, PhysicalColumnName = $"f_{fid}",
+    };
+
+    private PblPipelinesImporter Importer()
+    {
+        var create = new CreatePipelineCommandHandler(_appRepo, _pipelineRepo, Substitute.For<IAuditRepository>(), _queryContext);
+        var save = new SavePipelineStepsCommandHandler(_pipelineRepo, _appRepo, _tableRepo, _fieldRepo, Substitute.For<IAppAccessService>(),
+            Substitute.For<ITenantUnitOfWork>(), _tenantRepo, _queryContext, Substitute.For<IMainPipelineQueueRepository>(), Substitute.For<IServiceProvider>());
+        var update = new UpdatePipelineCommandHandler(_pipelineRepo, Substitute.For<IAuditRepository>(), _queryContext, _appRepo, _tableRepo, _fieldRepo,
+            Substitute.For<IAppAccessService>(), _tenantRepo, Substitute.For<IMainPipelineQueueRepository>(), Substitute.For<IServiceProvider>());
+        return new PblPipelinesImporter(create, save, _pipelineRepo, _appRepo, _tableRepo, _fieldRepo, _tenantRepo, _queryContext, update);
+    }
+
+    private async Task<ImportReport> ImportAsync(string pipelineYaml, bool activate = false)
+    {
+        var parsed = ImportDocumentParser.ParseAll(QblPipelineConverterTests.App + "\n" + pipelineYaml + "\n" + QblPipelineConverterTests.Account).Single();
+        var report = new ImportReport { AppPublicId = _appId, AppName = "Docs" };
+        await Importer().ImportAsync([parsed], [(parsed, report)], CancellationToken.None, activate);
+        return report;
+    }
+
+    private PipelineStep Saved(string refId) => _saves.Last().Single(s => s.RefId == refId);
+
+    private static JsonElement Config(PipelineStep step) => JsonDocument.Parse(step.ConfigJson!).RootElement;
+
+    [Fact]
+    public async Task RealExportPipeline_IsCreatedOffAndEveryStepPassesPowerFlowsValidation()
+    {
+        var report = await ImportAsync(QblPipelineConverterTests.AllSteps);
+
+        var item = report.Pipelines.Should().ContainSingle().Subject;
+        item.Status.Should().Be(PipelineImportStatuses.Created);
+        item.PipelinePublicId.Should().Be(_pipelineId);
+        item.StepsImported.Should().Be(18);
+        item.StepsSkipped.Should().Be(0);
+        report.PipelinesCreated.Should().Be(1);
+        _created!.IsActive.Should().BeFalse();
+        _created.Name.Should().Be("All Step");
+        _saves.Should().ContainSingle("the steps pass validation on the first save");
+        _saves[0].Should().HaveCount(18);
+    }
+
+    [Fact]
+    public async Task Import_NumbersStepsAsTheEditorDoes()
+    {
+        // assignStepNumbers: a loop's steps continue the count.
+        await ImportAsync(QblPipelineConverterTests.AllSteps);
+        int Number(string refId) => Config(Saved(refId)).GetProperty("_displayNumber").GetInt32();
+
+        Number("ref_aa").Should().Be(1);
+        Number("ref_ab").Should().Be(2);
+        var loop = _saves[0].Single(s => s.Type == "loop");
+        Config(loop).GetProperty("_displayNumber").GetInt32().Should().Be(6);
+        Number("ref_af").Should().Be(7);
+    }
+
+    [Fact]
+    public async Task ActivateNotRequested_PowerFlowStaysOffWithoutAnActivationIssue()
+    {
+        var item = (await ImportAsync(QblPipelineConverterTests.AllSteps)).Pipelines.Single();
+
+        item.IsActive.Should().BeFalse();
+        item.Issues.Should().NotContain(i => i.Code == "PIPELINE_NOT_ACTIVATED");
+    }
+
+    [Fact]
+    public async Task ActivateRequested_CompletePowerFlowIsTurnedOnThroughTheEditorsActivation()
+    {
+        _pipelineRepo.GetStepsByPipelineIdAsync(99, Arg.Any<CancellationToken>()).Returns(_ => _saves.LastOrDefault() ?? []);
+        _pipelineRepo.UpdateAsync(Arg.Any<Pipeline>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>()).Returns(1);
+
+        var item = (await ImportAsync(QblPipelineConverterTests.AllSteps, activate: true)).Pipelines.Single();
+
+        if (item.NeedsReview)
+            item.Issues.Should().Contain(i => i.Code == "PIPELINE_NOT_ACTIVATED");
+        else
+        {
+            item.Issues.Should().NotContain(i => i.Code == "PIPELINE_NOT_ACTIVATED", string.Join(" | ", item.Issues.Select(i => i.Message)));
+            item.IsActive.Should().BeTrue();
+            await _pipelineRepo.Received().UpdateAsync(Arg.Is<Pipeline>(p => p.IsActive), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+        }
+    }
+
+    [Fact]
+    public async Task ActivateRequested_DraftStepKeepsItOffAndSaysWhy()
+    {
+        var item = (await ImportAsync(QblPipelineConverterTests.AllSteps.Replace("Ronak", "{{zz.unknown}}"), activate: true)).Pipelines.Single();
+
+        item.IsActive.Should().BeFalse();
+        item.NeedsReview.Should().BeTrue();
+        item.Issues.Should().Contain(i => i.Code == "PIPELINE_NOT_ACTIVATED");
+    }
+
+    [Fact]
+    public async Task RealExportPipeline_ReferencesBecomeIdsFieldNumbersAndStepTokens()
+    {
+        await ImportAsync(QblPipelineConverterTests.AllSteps);
+        var table = _employee.PublicId.ToString();
+        var table1 = _employee1.PublicId.ToString();
+
+        var trigger = Config(Saved("ref_aa"));
+        trigger.GetProperty("tablePublicId").GetString().Should().Be(table);
+        trigger.GetProperty("appPublicId").GetString().Should().Be(_appId.ToString());
+        trigger.GetProperty("connectionPublicId").GetString().Should().Be(_tenantId.ToString());
+        trigger.GetProperty("subsequentFields").EnumerateArray().Select(e => e.GetString()).Should().Equal("fid_20", "fid_30", "fid_30.city");
+        trigger.GetProperty("triggerOnAdded").GetBoolean().Should().BeTrue();
+
+        var create = Config(Saved("ref_ab")).GetProperty("fieldMappings")[0];
+        create.GetProperty("field").GetString().Should().Be("fid_6");
+        create.GetProperty("value").GetString().Should().Be("{{steps.ref_aa.fid_20}}");
+        Config(Saved("ref_ab")).GetProperty("tablePublicId").GetString().Should().Be(table1);
+
+        Config(Saved("ref_ac")).GetProperty("targetRecordId").GetString().Should().Be("{{steps.ref_ab.CreatedRecordPublicId}}");
+        Config(Saved("ref_ad")).GetProperty("tableId").GetString().Should().Be(table1);
+        Config(Saved("ref_ag")).GetProperty("recordIdValue").GetString().Should().Be("{{steps.ref_aa.fid_3}}");
+
+        var rule = Config(Saved("ref_ae")).GetProperty("filterGroups")[0].GetProperty("rules")[0];
+        rule.GetProperty("field").GetString().Should().Be("fid_20");
+        rule.GetProperty("operator").GetString().Should().Be("starts-with");
+
+        var copy = Config(Saved("ref_aj"));
+        copy.GetProperty("sourceTable").GetString().Should().Be(table);
+        copy.GetProperty("destinationTable").GetString().Should().Be(table1);
+        copy.GetProperty("sourceFields")[0].GetString().Should().Be("fid_20");
+        copy.GetProperty("destinationFields")[0].GetString().Should().Be("fid_6");
+        copy.GetProperty("mergeField").GetString().Should().Be("fid_3");
+
+        Config(Saved("ref_al")).GetProperty("mergeField").GetString().Should().Be("fid_3");
+        Config(Saved("ref_an")).GetProperty("bulkRecordSetStepId").GetString().Should().Be("ref_al");
+        Config(Saved("ref_ak")).GetProperty("durationText").GetString().Should().Be("1 s");
+    }
+
+    [Fact]
+    public async Task HandleErrorsBranchesEmailAndCall_AreSavedThroughPowerFlowsValidation()
+    {
+        var report = await ImportAsync("""
+              $Pipeline_P:
+                Type: QB::Pipeline
+                Properties: { Name: P }
+                Steps:
+                  - Type: QB::PipelineStep::Quickbase
+                    Properties:
+                      Id: aa
+                      Name: On New Event
+                      Channel: { Resource: record, Id: quickbase, Selector: on_new_event }
+                    InputsMeta:
+                      $Meta:
+                        Type: QB::PipelineStep::InputsMeta
+                        Properties: { On_Add_Record: true }
+                        PipelineStep_DataSources:
+                          $Ds:
+                            Type: QB::PipelineStep::DataSource::Table
+                            Properties:
+                              Table: !Ref { App: $App_Docs, Table: $Table_Employee }
+                              Name: table
+                  - Type: QB::PipelineStep::ErrorHandling
+                    Properties: { Type: error_handling, Mode: Handle, Name: Handle Errors }
+                    Try:
+                      - Type: QB::PipelineStep::Quickbase
+                        Properties:
+                          Id: an
+                          Name: Create Record
+                          Channel: { Resource: record, Id: quickbase, Selector: create }
+                          Inputs: { Employee_Name: '{{aa.name}}' }
+                        InputsMeta:
+                          $Meta:
+                            Type: QB::PipelineStep::InputsMeta
+                            PipelineStep_DataSources:
+                              $Ds:
+                                Type: QB::PipelineStep::DataSource::Table
+                                Properties:
+                                  Table: !Ref { App: $App_Docs, Table: $Table_Employee1 }
+                                  Name: table
+                    OnError:
+                      - Type: QB::PipelineStep::Quickbase
+                        Properties:
+                          Id: ap
+                          Name: Create Record
+                          Channel: { Resource: record, Id: quickbase, Selector: create }
+                          Inputs: { Employee_Name: '{{ERROR.error_message}}' }
+                        InputsMeta:
+                          $Meta:
+                            Type: QB::PipelineStep::InputsMeta
+                            PipelineStep_DataSources:
+                              $Ds:
+                                Type: QB::PipelineStep::DataSource::Table
+                                Properties:
+                                  Table: !Ref { App: $App_Docs, Table: $Table_Employee1 }
+                                  Name: table
+                      - Type: QB::PipelineStep::Stop
+                        Properties: { Type: stop, Name: Stop }
+                    OnSuccess:
+                      - Type: QB::PipelineStep::Quickbase
+                        Properties:
+                          Id: ao
+                          Name: Update Record
+                          Channel: { Resource: record, Id: quickbase, Selector: update }
+                          Inputs: { Employee_Name: '{{an.employee_name}}' }
+                          Target: { StepId: an, Type: step-reference }
+                  - Type: QB::PipelineStep::MicrosoftOutlook
+                    Properties:
+                      Id: ar
+                      Name: Send an Email
+                      Channel: { Resource: email, Id: microsoft-outlook, Selector: send_email }
+                      Inputs: { To_Addresses: '{{aa.name}}', Subject: Hi, Body: '{{aa.name}}', Save_To_Sent_Items: true }
+                  - Type: QB::PipelineStep::CloudpipesMeta
+                    Properties:
+                      Id: at
+                      Name: Call Another Pipeline
+                      Channel: { Resource: pipeline, Id: cloudpipes-meta, Selector: call_pipeline }
+                      Inputs: { Name: '{{aa.name}}' }
+                    InputsMeta:
+                      $Meta: { Type: QB::PipelineStep::InputsMeta, Properties: { Call_Definition: 'Flow1(Name)' } }
+            """);
+
+        var item = report.Pipelines.Should().ContainSingle().Subject;
+        item.StepsImported.Should().Be(8);
+        _created!.IsActive.Should().BeFalse();
+        _saves.Should().ContainSingle("the steps pass validation on the first save");
+        _saves[0].Should().OnlyContain(s => s.IsValidated);
+
+        var handle = _saves[0].Single(s => s.Subtype == "handle-errors");
+        Config(handle).GetProperty("fallbackAction").GetString().Should().Be("handle");
+        Saved("ref_an").ParentBranch.Should().Be("children");
+        Saved("ref_ao").ParentBranch.Should().Be("successChildren");
+        Saved("ref_ap").ParentBranch.Should().Be("errorChildren");
+        _saves[0].Single(s => s.Subtype == "stop").ParentBranch.Should().Be("errorChildren");
+        // Saved as the editor saves an error-detail chip, so opening the PowerFlow changes nothing.
+        Config(Saved("ref_ap")).GetProperty("fieldMappings")[0].GetProperty("value").GetString().Should().Be("{{ERROR.error_message}}");
+        Config(Saved("ref_ao")).GetProperty("fieldMappings")[0].GetProperty("value").GetString().Should().Be("{{steps.ref_an.fid_6}}");
+
+        var email = Config(Saved("ref_ar"));
+        email.GetProperty("toAddresses").GetString().Should().Be("{{steps.ref_aa.fid_20}}");
+        email.GetProperty("saveToSentItems").GetString().Should().Be("Yes");
+        var call = Config(Saved("ref_at"));
+        call.GetProperty("callDefinition").GetString().Should().Be("Flow1(Name)");
+        call.GetProperty("arguments").GetProperty("Name").GetString().Should().Be("{{steps.ref_aa.fid_20}}");
+    }
+
+    [Fact]
+    public async Task IncomingRequestAndMakeRequest_AreSavedThroughPowerFlowsValidation()
+    {
+        var report = await ImportAsync("""
+              $Pipeline_P:
+                Type: QB::Pipeline
+                Properties: { Name: P }
+                Steps:
+                  - Type: QB::PipelineStep::Webhooks
+                    Properties:
+                      Id: aa
+                      Name: Incoming Request
+                      Channel: { Resource: request, Id: webhooks, Selector: on_incoming }
+                    InputsMeta:
+                      $Meta: { Type: QB::PipelineStep::InputsMeta, Properties: { Authentication_Schema: no-auth, Method_Type: POST } }
+                  - Type: QB::PipelineStep::Http
+                    Properties:
+                      Id: ab
+                      Name: Make Request
+                      PipelineChannelAccount: !Ref { PipelineChannelAccount: $PipelineChannelAccount_Http }
+                      Channel: { Resource: request, Id: http, Selector: make_request }
+                    InputsMeta:
+                      $Meta: { Type: QB::PipelineStep::InputsMeta, Properties: { Method: POST, Path: /post, Body: '{{aa.body}}' } }
+                  - Type: QB::PipelineStep::Quickbase
+                    Properties:
+                      Id: ac
+                      Name: Create Record
+                      Channel: { Resource: record, Id: quickbase, Selector: create }
+                      Inputs: { Employee_Name: '{{aa.body_params.name}}' }
+                    InputsMeta:
+                      $Meta:
+                        Type: QB::PipelineStep::InputsMeta
+                        PipelineStep_DataSources:
+                          $Ds:
+                            Type: QB::PipelineStep::DataSource::Table
+                            Properties:
+                              Table: !Ref { App: $App_Docs, Table: $Table_Employee1 }
+                              Name: table
+              $PipelineChannelAccount_Http:
+                Type: QB::PipelineChannelAccount
+                Properties: { Channel: http, Alias: ysl-dev }
+            """);
+
+        report.Pipelines.Should().ContainSingle().Which.StepsImported.Should().Be(3);
+        Config(Saved("ref_ab")).GetProperty("accountName").GetString().Should().Be("ysl-dev");
+        Config(Saved("ref_ab")).TryGetProperty("httpConnectionId", out _).Should().BeFalse("no connection is created on import");
+        _created!.IsActive.Should().BeFalse();
+        _saves.Should().ContainSingle("the steps pass validation on the first save");
+        Saved("ref_aa").IsValidated.Should().BeTrue();
+        Config(Saved("ref_aa")).GetProperty("methodType").GetString().Should().Be("POST");
+        Saved("ref_ab").IsValidated.Should().BeFalse("the HTTP connection is not in the file");
+        Config(Saved("ref_ab")).GetProperty("body").GetString().Should().Be("{{steps.ref_aa.body}}");
+        Config(Saved("ref_ac")).GetProperty("fieldMappings")[0].GetProperty("value").GetString().Should().Be("{{steps.ref_aa.body_params.name}}");
+    }
+
+    [Fact]
+    public async Task RealExportPipeline_KeepsBranchesAndLoopsAndMarksOnlyTheClearedStepAsADraft()
+    {
+        var report = await ImportAsync(QblPipelineConverterTests.AllSteps);
+
+        Saved("ref_af").ParentBranch.Should().Be("children");
+        Saved("ref_ah").ParentBranch.Should().Be("children");
+        Saved("ref_ai").ParentBranch.Should().Be("elseChildren");
+        _saves[0].Single(s => s.Subtype == "stop").ParentBranch.Should().Be("elseChildren");
+        Config(_saves[0].Single(s => s.Subtype == "for-each")).GetProperty("loopOverStepId").GetString().Should().Be("ref_ae");
+
+        _saves[0].Where(s => !s.IsValidated).Select(s => s.RefId).Should().Equal("ref_am");
+        Config(Saved("ref_am")).GetProperty("rowValues").GetProperty("fid_20").GetString().Should().Be("");
+        report.Pipelines[0].NeedsReview.Should().BeTrue();
+        report.Pipelines[0].Issues.Should().Contain(i => i.StepId == "am" && i.Code == "PIPELINE_REFERENCE_CLEARED");
+    }
+
+    [Fact]
+    public async Task UnsupportedStep_IsReportedWithPipelineStepNameIdAndReason()
+    {
+        var report = await ImportAsync(QblPipelineConverterTests.Unsupported);
+
+        var item = report.Pipelines.Single();
+        item.Status.Should().Be(PipelineImportStatuses.Created);
+        item.StepsSkipped.Should().Be(2);
+        item.NeedsReview.Should().BeTrue();
+        item.Issues.Should().Contain(i => i.StepId == "ab" && i.StepName == "Send Slack Message" && i.IsSkippedStep
+                                          && i.Message.StartsWith(QblPipelineConverter.UNSUPPORTED_STEP_MESSAGE));
+        _saves.Last().Select(s => s.RefId).Should().Equal("ref_aa", "ref_ad");
+    }
+
+    [Fact]
+    public async Task ExistingPipelineName_IsImportedUnderANumberedName()
+    {
+        _pipelineRepo.NameExistsForUserAsync(1, "All Step", Arg.Any<CancellationToken>()).Returns(true);
+
+        var report = await ImportAsync(QblPipelineConverterTests.AllSteps);
+
+        _created!.Name.Should().Be("All Step 2");
+        report.Pipelines[0].Issues.Should().Contain(i => i.Code == "PIPELINE_RENAMED");
+    }
+
+    [Fact]
+    public async Task FieldMissingFromTheImportedApp_IsLeftOutAndTheStepIsADraft()
+    {
+        _fieldRepo.ListByTableAsync(2, Arg.Any<CancellationToken>()).Returns(new List<AppField> { RecordId() });
+
+        var report = await ImportAsync(QblPipelineConverterTests.AllSteps);
+
+        Saved("ref_ab").IsValidated.Should().BeFalse();
+        Config(Saved("ref_ab")).GetProperty("fieldMappings").GetArrayLength().Should().Be(0);
+        report.Pipelines[0].Issues.Should().Contain(i => i.StepId == "ab" && i.Message.Contains("Employee Name"));
+    }
+
+    [Fact]
+    public async Task StepsThatFailValidation_AreSavedAsDraftsRatherThanLost()
+    {
+        // The trigger's app check (only the save's validation reads the app this way) fails on the first save; the import
+        // retries with every step as a draft.
+        var calls = 0;
+        _appRepo.GetByPublicIdAsync(_appId, Arg.Any<CancellationToken>())
+            .Returns(_ => ++calls == 1 ? throw new InvalidOperationException("app lookup failed") : new App { Id = 10, PublicId = _appId, Name = "Docs" });
+
+        var report = await ImportAsync(QblPipelineConverterTests.AllSteps);
+
+        report.Pipelines[0].Status.Should().Be(PipelineImportStatuses.Created);
+        _saves.Should().ContainSingle();
+        _saves[0].Should().OnlyContain(s => !s.IsValidated);
+        report.Pipelines[0].Issues.Should().Contain(i => i.Code == "PIPELINE_STEP_INCOMPLETE");
+    }
+
+    // A trigger on a table of an application that is not in the file (raw Quickbase DBIDs), followed by a step on an imported table.
+    private const string TriggerOnForeignTable = """
+          $Pipeline_Foreign_Trigger:
+            Type: QB::Pipeline
+            Properties:
+              Name: Foreign Trigger
+              Tags: []
+              Owner: YslDevTeam
+            Steps:
+              - Type: QB::PipelineStep::Quickbase
+                Properties:
+                  Id: aa
+                  Type: pipe
+                  Name: On New Event
+                  SubType: trigger
+                  PipelineChannelAccount: !Ref
+                    PipelineChannelAccount: $PipelineChannelAccount_Quickbase
+                  Channel:
+                    Resource: record
+                    Id: quickbase
+                    Selector: on_new_event
+                InputsMeta:
+                  $PipelineStep_InputsMeta_aa:
+                    Type: QB::PipelineStep::InputsMeta
+                    Properties:
+                      On_Add_Record: true
+                    PipelineStep_DataSources:
+                      $PipelineStep_DataSource_1:
+                        Type: QB::PipelineStep::DataSource::App
+                        Properties:
+                          App: bu3wxsy83
+                          Name: app
+                      $PipelineStep_DataSource_2:
+                        Type: QB::PipelineStep::DataSource::Table
+                        Properties:
+                          Table: bu3wxsy86
+                          Name: table
+              - Type: QB::PipelineStep::Clock
+                Properties:
+                  Id: ak
+                  Type: pipe
+                  Name: Pause
+                  SubType: action
+                  Channel:
+                    Resource: timer
+                    Id: clock
+                    Selector: pause
+                InputsMeta:
+                  $PipelineStep_InputsMeta_ak:
+                    Type: QB::PipelineStep::InputsMeta
+                    Properties:
+                      Duration: 1 s
+              - Type: QB::PipelineStep::Quickbase
+                Properties:
+                  Id: ab
+                  Type: pipe
+                  Name: Create Record
+                  SubType: action
+                  PipelineChannelAccount: !Ref
+                    PipelineChannelAccount: $PipelineChannelAccount_Quickbase
+                  Channel:
+                    Resource: record
+                    Id: quickbase
+                    Selector: create
+                  Inputs:
+                    Employee_Name: Fixed
+                InputsMeta:
+                  $PipelineStep_InputsMeta_ab:
+                    Type: QB::PipelineStep::InputsMeta
+                    PipelineStep_DataSources:
+                      $PipelineStep_DataSource_1:
+                        Type: QB::PipelineStep::DataSource::App
+                        Properties:
+                          App: !Ref
+                            App: $App_Docs
+                          Name: app
+                      $PipelineStep_DataSource_3:
+                        Type: QB::PipelineStep::DataSource::Table
+                        Properties:
+                          Table: !Ref
+                            App: $App_Docs
+                            Table: $Table_Employee1
+                          Name: table
+        """;
+
+    [Fact]
+    public async Task TriggerOnTableNotInFile_IsLeftOutAndTheOtherStepsAreSavedAsDrafts()
+    {
+        var report = await ImportAsync(TriggerOnForeignTable);
+
+        var item = report.Pipelines.Should().ContainSingle().Subject;
+        item.Status.Should().Be(PipelineImportStatuses.Created);
+        item.StepsImported.Should().Be(2);
+        item.NeedsReview.Should().BeTrue();
+        item.Issues.Should().Contain(i => i.Code == "PIPELINE_TRIGGER_NOT_SAVED" && i.StepName == "On New Event");
+        var saved = _saves.Should().ContainSingle().Subject;
+        saved.Select(s => s.RefId).Should().Equal("ref_ak", "ref_ab");
+        saved.Select(s => s.DisplayOrder).Should().Equal(0, 1);
+        saved.Should().OnlyContain(s => !s.IsValidated);
+        saved.Select(s => Config(s).GetProperty("_displayNumber").GetInt32()).Should().Equal(1, 2);
+    }
+
+    [Fact]
+    public async Task TriggerOnTableNotInFile_FollowedByCreateRecord_SavesTheCreateRecordAsTheFirstStep()
+    {
+        // Create Record can start a PowerFlow (as in Quickbase), so once the trigger is left out it is saved on its own.
+        var pause = TriggerOnForeignTable.IndexOf("- Type: QB::PipelineStep::Clock", StringComparison.Ordinal);
+        var create = TriggerOnForeignTable.IndexOf("- Type: QB::PipelineStep::Quickbase", pause, StringComparison.Ordinal);
+        var withoutPause = TriggerOnForeignTable[..pause] + TriggerOnForeignTable[create..];
+
+        var report = await ImportAsync(withoutPause);
+
+        var item = report.Pipelines.Single();
+        item.Status.Should().Be(PipelineImportStatuses.Created);
+        item.Issues.Should().Contain(i => i.Code == "PIPELINE_TRIGGER_NOT_SAVED");
+        _saves.Should().ContainSingle().Which.Should().ContainSingle().Which.Subtype.Should().Be("create-record");
+    }
+
+    [Fact]
+    public async Task ConditionOnASearchFindingRecords_AndAnAndOrFilter_PassPowerFlowsValidation()
+    {
+        var report = await ImportAsync("""
+          $Pipeline_Found:
+            Type: QB::Pipeline
+            Properties:
+              Name: Found
+            Steps:
+              - Type: QB::PipelineStep::Quickbase
+                Properties:
+                  Id: ab
+                  Name: Search Records
+                  PipelineChannelAccount: !Ref
+                    PipelineChannelAccount: $PipelineChannelAccount_Quickbase
+                  Channel: { Resource: record, Id: quickbase, Selector: search }
+                  Filters:
+                    Type: composite-expression
+                    Notation: postfix
+                    Expression:
+                      - { Type: relational-expression, Field: employee_name, Operator: starts, Value: Ron }
+                      - { Type: relational-expression, Field: employee_name, Operator: '!contains', Value: x }
+                      - { Type: logical-operator, Operator: AND }
+                      - { Type: relational-expression, Field: employee_name, Operator: set }
+                      - { Type: logical-operator, Operator: OR }
+                InputsMeta:
+                  $Meta:
+                    Type: QB::PipelineStep::InputsMeta
+                    PipelineStep_DataSources:
+                      $Ds:
+                        Type: QB::PipelineStep::DataSource::Table
+                        Properties:
+                          Table: !Ref { App: $App_Docs, Table: $Table_Employee1 }
+                          Name: table
+              - Type: QB::PipelineStep::Condition
+                Properties:
+                  Name: Condition
+                  Filters:
+                    Type: composite-expression
+                    Notation: postfix
+                    Expression:
+                      - { Type: relational-expression, Operator: '!empty', Target: ab }
+                Then:
+                  - Type: QB::PipelineStep::Stop
+                    Properties: { Type: stop, Name: Stop }
+        """);
+
+        var item = report.Pipelines.Should().ContainSingle().Subject;
+        item.Status.Should().Be(PipelineImportStatuses.Created, string.Join(" | ", item.Issues.Select(i => i.Code + ": " + i.Message)));
+        item.Issues.Should().NotContain(i => i.Code.StartsWith("PIPELINE_FILTER") || i.Code == "PIPELINE_STEP_INCOMPLETE");
+        Saved("ref_ab").IsValidated.Should().BeTrue();
+        Config(Saved("ref_ab")).GetProperty("filterGroups").GetArrayLength().Should().Be(2);
+        var condition = _saves.Last().Single(s => s.Subtype == "if-else");
+        condition.IsValidated.Should().BeTrue();
+        var rule = Config(condition).GetProperty("ruleGroups")[0].GetProperty("rules")[0];
+        rule.GetProperty("left").GetString().Should().Be("{{steps.ref_ab.count}}");
+        rule.GetProperty("op").GetString().Should().Be("not-equals");
+    }
+
+    [Fact]
+    public async Task TriggerOnImportedTable_IsKept()
+    {
+        await ImportAsync(QblPipelineConverterTests.AllSteps);
+
+        _saves.Should().ContainSingle();
+        _saves[0].Should().Contain(s => s.RefId == "ref_aa" && s.Subtype == "new-event");
+    }
+
+    [Fact]
+    public async Task CreateFailure_IsReportedAndNeverThrown()
+    {
+        _pipelineRepo.CreateAsync(Arg.Any<Pipeline>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("database down"));
+
+        var report = await ImportAsync(QblPipelineConverterTests.AllSteps);
+
+        var item = report.Pipelines.Single();
+        item.Status.Should().Be(PipelineImportStatuses.NotCreated);
+        item.NeedsReview.Should().BeTrue();
+        item.Issues.Should().Contain(i => i.Code == "PIPELINE_IMPORT_FAILED");
+    }
+
+    [Fact]
+    public async Task FileWithoutPipelines_DoesNothing()
+    {
+        var parsed = ImportDocumentParser.ParseAll(QblPipelineConverterTests.App).Single();
+        var report = new ImportReport { AppPublicId = _appId, AppName = "Docs" };
+
+        await Importer().ImportAsync([parsed], [(parsed, report)], CancellationToken.None);
+
+        report.Pipelines.Should().BeEmpty();
+        await _pipelineRepo.DidNotReceive().CreateAsync(Arg.Any<Pipeline>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+    }
+}

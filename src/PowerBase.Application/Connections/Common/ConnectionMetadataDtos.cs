@@ -36,4 +36,6 @@ public class ConnectionFieldDto
     public bool IsUnique { get; set; }
     public bool IsPrimary { get; set; }
     public bool IsSystem { get; set; }
+    /// <summary>The table's key field (Set Key): its own key field, or Record ID# when the table has none.</summary>
+    public bool IsKeyField { get; set; }
 }

@@ -4,8 +4,10 @@ using PowerBase.Domain.Exceptions;
 namespace PowerBase.Application.Import.Qbl;
 
 /// <summary>One application found in an uploaded file, already converted to PBL. <see cref="AppRef"/> is the
-/// application's logical ref (unique within the file); table refs are only unique inside one application.</summary>
-public sealed record ParsedApp(string AppRef, PblDocument Document, List<PblIssue> Issues);
+/// application's logical ref (unique within the file); table refs are only unique inside one application.
+/// <see cref="Pipelines"/> are the file's Quickbase pipelines this application's import is responsible for (QBL only); their
+/// problems stay on each pipeline and never count as the application's.</summary>
+public sealed record ParsedApp(string AppRef, PblDocument Document, List<PblIssue> Issues, IReadOnlyList<PblPipeline>? Pipelines = null);
 
 /// <summary>
 /// Single entry point <see cref="ImportPreviewQueryHandler"/>/<see cref="ImportAppFromPblCommandHandler"/>
@@ -30,9 +32,36 @@ public static class ImportDocumentParser
         }
 
         var qblDocument = QblSerializer.Deserialize(content);
-        return QblToPblConverter.ConvertAll(qblDocument)
-            .Select(r => new ParsedApp(r.AppRef, r.Document, r.Issues))
+        var results = QblToPblConverter.ConvertAll(qblDocument);
+        var pipelines = ConvertPipelines(qblDocument, content);
+        var appRefs = results.Select(r => r.AppRef).ToList();
+        return results
+            .Select((r, i) => new ParsedApp(r.AppRef, r.Document, r.Issues, QblPipelineConverter.ForApp(pipelines, appRefs, i)))
             .ToList();
+    }
+
+    /// <summary>Pipelines are an addition to the application import: whatever goes wrong reading them is reported on the
+    /// pipelines and never stops the applications from importing.</summary>
+    private static IReadOnlyList<PblPipeline> ConvertPipelines(QblDocument qblDocument, string content)
+    {
+        if (!qblDocument.Resources.Values.Any(r => r.Type == QblPipelineConverter.PIPELINE_TYPE))
+            return [];
+        try
+        {
+            return QblPipelineConverter.ConvertAll(qblDocument, content);
+        }
+        catch (Exception ex)
+        {
+            return
+            [
+                new PblPipeline
+                {
+                    Name = "Pipelines",
+                    IsUnreadable = true,
+                    Issues = [new PblPipelineIssue { Code = "PIPELINE_UNREADABLE", Message = $"The file's pipelines could not be read ({ex.Message}); none was imported.", ChangesExecution = true }],
+                },
+            ];
+        }
     }
 
     /// <summary>For flows that work on exactly one application (Update Existing App). A file holding several is

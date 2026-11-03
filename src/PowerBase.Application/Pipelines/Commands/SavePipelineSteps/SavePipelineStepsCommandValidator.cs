@@ -31,10 +31,13 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
             (firstStep.Type == "query" && (firstStep.Subtype == "search-records" || firstStep.Subtype == "look-up-record")) ||
             firstStep.Subtype == "handle-errors" ||
             (firstStep.Type == "action" && (firstStep.Subtype == "prepare-bulk-upsert" || firstStep.Subtype == "copy-records" || firstStep.Subtype == "make-request" || firstStep.Subtype == "pause" || firstStep.Subtype == "import-with-csv")) ||
-            (firstStep.Type == "email" && (firstStep.Subtype == "send-email" || firstStep.Subtype == "send-email-outlook"));
+            (firstStep.Type == "email" && (firstStep.Subtype == "send-email" || firstStep.Subtype == "send-email-outlook")) ||
+            // As in Quickbase: these actions can start a PowerFlow that is run by hand or on a schedule.
+            (firstStep.Type == "action" && firstStep.Subtype is "create-record" or "update-record" or "delete-record" or "call-another-pipeline") ||
+            (firstStep.Type == "file" && firstStep.Subtype == "upload-file");
         if (!isValidFirstStep)
         {
-            context.AddFailure("Steps", "A PowerFlow must begin with a Trigger, Search/Query, Make Request, Copy Records, Import with CSV, Handle Errors, Prepare Bulk Record Upsert, Pause, or Send Email step.");
+            context.AddFailure("Steps", "A PowerFlow must begin with a Trigger, Search/Query, Make Request, Copy Records, Import with CSV, Handle Errors, Prepare Bulk Record Upsert, Pause, Send Email, Create Record, Update Record, Delete Record, Upload a File or Call Another PowerFlow step.");
         }
 
         var stepById = new Dictionary<string, SavePipelineStepDto>();
@@ -118,7 +121,9 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
 
         bool IsValidFieldRef(string val)
         {
-            return System.Text.RegularExpressions.Regex.IsMatch(val, @"^fid_(?:\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$") || Guid.TryParse(val, out _);
+            return System.Text.RegularExpressions.Regex.IsMatch(val, @"^fid_(?:\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$") || Guid.TryParse(val, out _)
+                // One part of an Address field (fid_N.city); that fid_N is an Address is checked against the table on save.
+                || PipelineAddressMappings.IsPartReference(val);
         }
 
         var traversedRefIds = new HashSet<string>();
@@ -211,6 +216,7 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
             if (step.Subtype == "update-record" || step.Subtype == "delete-record")
             {
                 string? targetRecordId = null;
+                var byRecordId = PipelineRecordSource.IsRecordId(step.ConfigJson);
                 if (!string.IsNullOrEmpty(step.ConfigJson))
                 {
                     try
@@ -224,7 +230,16 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
                     catch { }
                 }
 
-                if (step.IsValidated && string.IsNullOrEmpty(targetRecordId))
+                if (byRecordId)
+                {
+                    // "Record ID" mode (e.g. the first step): the record is named by its Record ID in a table chosen on the step,
+                    // not taken from an earlier step, so there is no target step to check.
+                    if (step.IsValidated && !PipelineRecordSource.HasTable(step.ConfigJson))
+                        context.AddFailure("Steps", $"Step '{step.RefId}' requires a valid table selection.");
+                    if (step.IsValidated && string.IsNullOrWhiteSpace(targetRecordId))
+                        context.AddFailure("Steps", $"Step '{step.RefId}' requires a Record ID.");
+                }
+                else if (step.IsValidated && string.IsNullOrEmpty(targetRecordId))
                 {
                     context.AddFailure("Steps", $"Step '{step.RefId}' requires a valid target record selection (targetRecordId).");
                 }

@@ -62,6 +62,10 @@ public sealed class CopyRecordsDefinition
     public static bool IsPrimaryField(AppField field) => field.IsPrimary ||
         (field.IsSystem && string.Equals(field.PhysicalColumnName, "Id", StringComparison.OrdinalIgnoreCase));
     public static bool IsWritable(AppField field) => !field.IsHidden && (IsPrimaryField(field) || !field.IsSystem) && !PhysicalNaming.IsComputedTypeCode(field.TypeCode) && !IsAttachment(field);
+    /// <summary>A system field other than the primary key (Date Created, Date Modified, Record Owner, Last Modified By, a non-primary
+    /// Record ID#): a Quickbase Copy Records maps them, so they can be chosen as a destination, but the copy never writes them (the
+    /// destination record keeps its own values).</summary>
+    public static bool IsMappedOnlySystemField(AppField field) => field.IsSystem && !IsPrimaryField(field);
     public static bool IsAttachment(AppField field) =>
         field.TypeCode.Contains("File", StringComparison.OrdinalIgnoreCase) || field.TypeCode.Contains("Attachment", StringComparison.OrdinalIgnoreCase);
 
@@ -77,7 +81,7 @@ public sealed class CopyRecordsDefinition
         foreach (var fid in DestinationFields)
         {
             var field = Field(fid, destination);
-            if (!IsWritable(field)) throw Error($"Destination field '{DisplayName(field)}' is read-only or an attachment.");
+            if (!IsWritable(field) && !IsMappedOnlySystemField(field)) throw Error($"Destination field '{DisplayName(field)}' is read-only or an attachment.");
             if (!mappedFields.Add(field.Fid!.Value))
                 throw Error($"Destination field '{DisplayName(field)}' is mapped more than once. Select a different destination field for each source column.");
         }

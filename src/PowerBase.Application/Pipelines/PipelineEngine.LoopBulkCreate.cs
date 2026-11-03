@@ -177,9 +177,11 @@ public partial class PipelineEngine
 
                 var values = new Dictionary<long, object?>();
                 var mappings = new Dictionary<string, object?>();
+                var addressParts = new PipelineAddressMappings();
                 foreach (var mapping in config.FieldMappings ?? new List<FieldMapping>())
                 {
                     if (string.IsNullOrWhiteSpace(mapping.Field)) continue;
+                    if (await TryCollectAddressPartAsync(mapping, fields, addressParts, mappings, payloadJson, paths[i], allSteps, _fieldRepo, _tableRepo, ct)) continue;
                     var field = ResolvePipelineField(mapping.Field, fields);
                     if (!field.Fid.HasValue) continue;
                     var resolved = EvaluateTokens(await RenderUserTokensForTextAsync(mapping.Value, field, payloadJson, paths[i], allSteps, _fieldRepo, _tableRepo, ct),
@@ -190,6 +192,7 @@ public partial class PipelineEngine
                     values[field.Fid.Value] = parsed;
                     mappings[mapping.Field] = parsed;
                 }
+                addressParts.ApplyTo(values);
                 await PipelineReferenceTargets.EnsureAvailableAsync(fields, values, _tableRepo, ct);
                 foreach (var (fid, value) in await PowerBase.Application.Relationships.ReferenceWriteValidator.ValidateAsync(
                     fields, values, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct))

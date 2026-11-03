@@ -56,7 +56,8 @@ public class GetConnectionFieldsQueryHandler
             IsRequired = f.IsRequired,
             IsUnique = f.IsUnique,
             IsPrimary = f.IsPrimary,
-            IsSystem = f.IsSystem
+            IsSystem = f.IsSystem,
+            IsKeyField = table.KeyFieldId is long keyFieldId ? f.Id == keyFieldId : PowerBase.Application.Pipelines.LookUpRecordKey.IsRecordId(f),
         }).ToList();
     }
 }
