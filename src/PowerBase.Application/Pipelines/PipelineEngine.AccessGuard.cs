@@ -218,7 +218,10 @@ public partial class PipelineEngine
                     {
                         if (mapping.ValueKind != JsonValueKind.Object || !mapping.TryGetProperty("field", out var fieldRef)
                             || fieldRef.ValueKind != JsonValueKind.String) continue;
-                        var field = ResolvePipelineField(fieldRef.GetString(), context.Fields);
+                        // Writing one part of an address (fid_N.city) needs write access to the address field.
+                        var field = PipelineAddressFieldFilter.TryResolve(fieldRef.GetString(), context.Fields, out var address, out _)
+                            ? address
+                            : ResolvePipelineField(fieldRef.GetString(), context.Fields);
                         if (field?.Fid != null && !access.EditableFieldIds.Contains(field.Fid.Value))
                             throw new UnauthorizedActionException(
                                 $"You do not have permission to write to the field '{(!string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name)}' in table '{context.Table.Name}'.");

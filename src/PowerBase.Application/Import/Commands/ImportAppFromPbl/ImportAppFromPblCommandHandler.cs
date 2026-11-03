@@ -101,6 +101,7 @@ public class ImportAppFromPblCommandHandler
     private readonly PblConnectedTablesApplier? _connectedTablesApplier;
     private readonly RelationshipFieldFactory? _reportLinkFactory;
     private readonly PowerBase.Application.FieldReferences.IFieldReferenceIndexer _refIndexer;
+    private readonly PblPipelinesImporter? _pipelinesImporter;
 
     public ImportAppFromPblCommandHandler(
         PblValidator validator,
@@ -131,11 +132,13 @@ public class ImportAppFromPblCommandHandler
         PblPermissionsApplier permissionsApplier,
         PblConnectedTablesApplier? connectedTablesApplier = null,
         RelationshipFieldFactory? reportLinkFactory = null,
-        PowerBase.Application.FieldReferences.IFieldReferenceIndexer? refIndexer = null)
+        PowerBase.Application.FieldReferences.IFieldReferenceIndexer? refIndexer = null,
+        PblPipelinesImporter? pipelinesImporter = null)
     {
         _connectedTablesApplier = connectedTablesApplier;
         _reportLinkFactory = reportLinkFactory;
         _refIndexer = refIndexer ?? PowerBase.Application.FieldReferences.NullFieldReferenceIndexer.Instance;
+        _pipelinesImporter = pipelinesImporter;
         _validator = validator;
         _createAppHandler = createAppHandler;
         _deleteAppHandler = deleteAppHandler;
@@ -206,6 +209,7 @@ public class ImportAppFromPblCommandHandler
         var single = await ImportOneAsync(apps[0], command.Mapping?.ExcludedTableRefs, null, ct);
         if (_connectedTablesApplier is not null)
             await _connectedTablesApplier.ApplyAsync([(apps[0].Document, single)], ct); // reports a connected table whose source app is not here
+        await ImportPipelinesAsync(apps, [(apps[0], single)], command.Mapping?.ActivatePipelines == true, ct);
         return single;
     }
 
@@ -236,6 +240,7 @@ public class ImportAppFromPblCommandHandler
 
         var batch = new ImportBatchReport();
         var importedDocuments = new List<(PblDocument Document, ImportReport Report)>();
+        var importedApps = new List<(ParsedApp App, ImportReport Report)>();
         for (var i = 0; i < included.Count; i++)
         {
             var app = included[i];
@@ -250,6 +255,7 @@ public class ImportAppFromPblCommandHandler
                 var report = await ImportOneAsync(app, excluded, nameOverride, ct);
                 batch.Apps.Add(report);
                 importedDocuments.Add((app.Document, report));
+                importedApps.Add((app, report));
             }
             catch (Exception ex) when (included.Count > 1 && ex is not OperationCanceledException)
             {
@@ -279,7 +285,23 @@ public class ImportAppFromPblCommandHandler
             }
         }
 
+        await ImportPipelinesAsync(apps, importedApps, command.Mapping?.ActivatePipelines == true, ct);
         return batch;
+    }
+
+    /// <summary>The file's Quickbase pipelines, as PowerFlows of the apps just created. Like connected tables they come last — their
+    /// steps read the apps' tables and fields — and a failure is reported, never thrown: the apps are already imported.</summary>
+    private async Task ImportPipelinesAsync(IReadOnlyList<ParsedApp> apps, IReadOnlyList<(ParsedApp App, ImportReport Report)> imported, bool activate, CancellationToken ct)
+    {
+        if (_pipelinesImporter is null || imported.Count == 0 || apps.All(a => (a.Pipelines?.Count ?? 0) == 0))
+            return;
+
+        ImportProgress.Report("Creating PowerFlows", 98);
+        try { await _pipelinesImporter.ImportAsync(apps, imported, ct, activate); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            imported[0].Report.Skipped.Add(new ImportSkippedItem { LogicalRef = "", Name = "PowerFlows", Reason = $"The file's pipelines were not imported ({ex.Message})." });
+        }
     }
 
     /// <summary>Why a summary is still waiting after every round: the target field, or a field its filter uses, was never created.

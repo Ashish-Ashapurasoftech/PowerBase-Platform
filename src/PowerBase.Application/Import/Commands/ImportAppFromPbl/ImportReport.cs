@@ -42,6 +42,43 @@ public sealed class ImportBatchReport
     public int FormsCreated => Apps.Sum(a => a.FormsCreated);
     public int RolesCreated => Apps.Sum(a => a.RolesCreated);
     public int SkippedCount => Apps.Sum(a => a.Skipped.Count);
+    public int PipelinesCreated => Apps.Sum(a => a.PipelinesCreated);
+}
+
+public static class PipelineImportStatuses
+{
+    public const string Created = "Created";
+    /// <summary>The PowerFlow exists but its steps could not be saved; they are listed in the issues.</summary>
+    public const string CreatedWithoutSteps = "CreatedWithoutSteps";
+    public const string NotCreated = "NotCreated";
+}
+
+/// <summary>A note about one pipeline or one of its steps. <see cref="StepId"/> is the Quickbase step id (or its location when the
+/// step has none); <see cref="IsSkippedStep"/> marks a step that is not in the imported PowerFlow.</summary>
+public sealed class PipelineImportIssueItem
+{
+    public string Code { get; init; } = string.Empty;
+    public string Message { get; init; } = string.Empty;
+    public string? StepId { get; init; }
+    public string? StepName { get; init; }
+    public bool IsSkippedStep { get; init; }
+}
+
+/// <summary>What became of one Quickbase pipeline. Imported PowerFlows are always off; <see cref="NeedsReview"/> says the
+/// PowerFlow does not do everything the source did, or has steps saved as drafts, which keep it from being turned on.</summary>
+public sealed class PipelineImportReportItem
+{
+    public string LogicalRef { get; init; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public Guid? PipelinePublicId { get; set; }
+    public string Status { get; set; } = PipelineImportStatuses.NotCreated;
+    public string? SourceOwner { get; init; }
+    public int StepsImported { get; set; }
+    public int StepsSkipped { get; set; }
+    public bool NeedsReview { get; set; }
+    /// <summary>True when the import turned the PowerFlow on (<see cref="Mapping.ImportMapping.ActivatePipelines"/>).</summary>
+    public bool IsActive { get; set; }
+    public List<PipelineImportIssueItem> Issues { get; init; } = [];
 }
 
 public sealed class ImportReport
@@ -59,4 +96,7 @@ public sealed class ImportReport
     public int PagesCreated { get; init; }
     public List<ImportSkippedItem> Skipped { get; init; } = [];
     public List<FormulaTranslationReportItem> FormulaTranslations { get; init; } = [];
+    /// <summary>The file's Quickbase pipelines imported (or not) as PowerFlows of this app. Empty for a file without pipelines.</summary>
+    public List<PipelineImportReportItem> Pipelines { get; init; } = [];
+    public int PipelinesCreated => Pipelines.Count(p => p.PipelinePublicId.HasValue);
 }

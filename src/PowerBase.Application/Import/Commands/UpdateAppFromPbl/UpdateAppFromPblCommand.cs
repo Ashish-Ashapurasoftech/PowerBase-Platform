@@ -48,4 +48,7 @@ public sealed class ImportUpdateReport
 
     public List<ImportSkippedItem> Skipped { get; init; } = [];
     public List<FormulaTranslationReportItem> FormulaTranslations { get; init; } = [];
+
+    /// <summary>The PowerFlows the update created or overwrote, with what needs review in each.</summary>
+    public List<PipelineImportReportItem> Pipelines { get; init; } = [];
 }

@@ -18,11 +18,19 @@ public static class PblDocumentTools
     /// document with its conversion warnings as skipped items.</summary>
     public static (PblDocument Document, List<ImportSkippedItem> Warnings) Load(string content, PblValidator validator)
     {
-        PblDocument document;
-        List<PblIssue> conversionIssues;
+        var (app, warnings) = LoadApp(content, validator);
+        return (app.Document, warnings);
+    }
+
+    /// <summary><see cref="Load"/>, keeping the file's pipelines with the application they belong to.</summary>
+    public static (ParsedApp App, List<ImportSkippedItem> Warnings) LoadApp(string content, PblValidator validator)
+    {
+        ParsedApp app;
         try
         {
-            (document, conversionIssues) = ImportDocumentParser.Parse(content);
+            var apps = ImportDocumentParser.ParseAll(content);
+            ImportDocumentParser.EnsureSingleApp(apps);
+            app = apps[0];
         }
         catch (JsonException ex)
         {
@@ -33,6 +41,7 @@ public static class PblDocumentTools
             throw new ValidationException(new Dictionary<string, string[]> { ["Qbl"] = [$"Could not parse QBL document: {ex.Message}"] });
         }
 
+        var (document, conversionIssues) = (app.Document, app.Issues);
         var conversionErrors = conversionIssues.Where(i => i.Severity == PblIssueSeverity.Error).ToList();
         if (conversionErrors.Count > 0)
             throw new ValidationException(new Dictionary<string, string[]> { ["Qbl"] = conversionErrors.Select(e => e.Message).ToArray() });
@@ -46,7 +55,7 @@ public static class PblDocumentTools
             .Select(i => new ImportSkippedItem { LogicalRef = i.ElementRef ?? "", Name = i.ElementRef ?? "", Reason = i.Message })
             .ToList();
 
-        return (document, warnings);
+        return (app, warnings);
     }
 
     /// <summary>Removes the given tables and everything that hangs off them: their forms, any

@@ -212,11 +212,16 @@ public class SavePipelineStepsCommandHandler
                 await stepValidator.ValidateCopyRecordsStepAsync(dto.ConfigJson ?? "{}", ct);
             if (dto.Subtype == "search-records" && dto.IsValidated)
                 await stepValidator.ValidateSearchRecordsStepAsync(dto.ConfigJson ?? "{}", ct);
+            if (dto.Subtype == "look-up-record" && dto.IsValidated)
+                await stepValidator.ValidateLookUpRecordStepAsync(dto.ConfigJson ?? "{}", ct);
             // Incomplete editor steps are persisted as drafts so later steps are not lost.
             // Validated steps (including activation saves and direct API submissions marked
             // complete) still receive authoritative database-backed required-field validation.
             if (dto.Subtype == "create-record" && dto.IsValidated)
                 await stepValidator.ValidateCreateRecordRequiredFieldsAsync(dto.ConfigJson ?? "{}", ct);
+            // A mapping to one part of an Address (fid_N.city) must name an Address field; steps without one are not read.
+            if (dto.Subtype is "create-record" or "update-record" or "prepare-bulk-upsert")
+                await stepValidator.ValidateAddressPartMappingsAsync(dto.ConfigJson, ct);
             if (dto.Children != null) await ValidateStepsConfigAsync(dto.Children, stepValidator, ct);
             if (dto.ElseChildren != null) await ValidateStepsConfigAsync(dto.ElseChildren, stepValidator, ct);
             if (dto.SuccessChildren != null) await ValidateStepsConfigAsync(dto.SuccessChildren, stepValidator, ct);

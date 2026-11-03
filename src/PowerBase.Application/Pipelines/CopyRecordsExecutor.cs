@@ -502,6 +502,8 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
             for (int i = 0; i < exported.Count; i++)
             {
                 var field = exported[i];
+                // System fields other than the primary key keep the destination's own values, as before they could be mapped.
+                if (CopyRecordsDefinition.IsMappedOnlySystemField(imported[i])) continue;
                 row.TryGetValue(PhysicalNaming.GetPhysicalColumnName(field), out var value);
                 if (value.ValueKind == JsonValueKind.Undefined)
                     throw CopyRecordsDefinition.Error($"Source field '{CopyRecordsDefinition.DisplayName(field)}' has no exported value.");

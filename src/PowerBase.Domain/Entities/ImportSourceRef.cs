@@ -22,4 +22,5 @@ public static class ImportElementTypes
     public const string Role = "Role";
     public const string Variable = "Variable";
     public const string Page = "Page";
+    public const string Pipeline = "Pipeline";
 }

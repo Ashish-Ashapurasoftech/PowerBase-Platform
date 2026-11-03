@@ -70,7 +70,8 @@ public class PipelineConnectionsController : ControllerBase
         var items = fields.Select(f => new ConnectionFieldDto {
             PublicId = f.PublicId, Name = f.Name, Label = f.Label, TypeCode = f.TypeCode,
             Fid = f.Fid, Settings = f.Settings, DefaultValue = f.DefaultValue,
-            IsRequired = f.IsRequired, IsSystem = f.IsSystem, IsUnique = f.IsUnique, IsPrimary = f.IsPrimary
+            IsRequired = f.IsRequired, IsSystem = f.IsSystem, IsUnique = f.IsUnique, IsPrimary = f.IsPrimary,
+            IsKeyField = table.KeyFieldId is long keyFieldId ? f.Id == keyFieldId : PowerBase.Application.Pipelines.LookUpRecordKey.IsRecordId(f)
         }).ToList();
         return Ok(new ApiListResponse<ConnectionFieldDto>(items, items.Count, 1, items.Count));
     }
