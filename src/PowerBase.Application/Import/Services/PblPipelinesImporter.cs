@@ -147,6 +147,8 @@ public class PblPipelinesImporter(
             {
                 if (steps.Count == 0)
                     throw triggerFailure!;
+                // Saved the way the editor leaves each step, so opening the PowerFlow saves nothing (and never turns it off).
+                PblPipelineEditorParity.Apply(steps);
                 var pipeline = await pipelineRepo.GetByPublicIdAsync(pipelinePublicId, ct);
                 await saveStepsHandler.HandleAsync(new SavePipelineStepsCommand(pipelinePublicId, steps, pipeline.RowVersion), ct);
                 foreach (var trigger in dropped)

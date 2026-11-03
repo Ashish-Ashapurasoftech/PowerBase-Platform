@@ -301,7 +301,8 @@ public class PblPipelinesImporterTests
         Saved("ref_ao").ParentBranch.Should().Be("successChildren");
         Saved("ref_ap").ParentBranch.Should().Be("errorChildren");
         _saves[0].Single(s => s.Subtype == "stop").ParentBranch.Should().Be("errorChildren");
-        Config(Saved("ref_ap")).GetProperty("fieldMappings")[0].GetProperty("value").GetString().Should().Be("{{steps.ERROR.error_message}}");
+        // Saved as the editor saves an error-detail chip, so opening the PowerFlow changes nothing.
+        Config(Saved("ref_ap")).GetProperty("fieldMappings")[0].GetProperty("value").GetString().Should().Be("{{ERROR.error_message}}");
         Config(Saved("ref_ao")).GetProperty("fieldMappings")[0].GetProperty("value").GetString().Should().Be("{{steps.ref_an.fid_6}}");
 
         var email = Config(Saved("ref_ar"));
