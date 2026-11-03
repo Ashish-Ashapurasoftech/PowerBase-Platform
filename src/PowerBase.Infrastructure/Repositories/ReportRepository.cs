@@ -277,8 +277,13 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
         WHERE r.PublicId = @reportPublicId AND r.IsDeleted = 0
         """;
 
-    public ReportRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
-        : base(connectionFactory, queryContext) { }
+    private readonly IMetadataCache _cache;
+
+    public ReportRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache cache)
+        : base(connectionFactory, queryContext)
+    {
+        _cache = cache;
+    }
 
     public async Task<Report> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
     {
@@ -290,11 +295,15 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
 
     public async Task<Report?> GetVisibleReportAsync(Guid publicId, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        return await connection.QuerySingleOrDefaultAsync<Report>(
-            new CommandDefinition(GetVisibleReportSql,
-                new { publicId, userId = QueryContext.UserId },
-                cancellationToken: ct));
+        // Visibility depends on the user, so the entry is per user; a report the user may not see (null) is never cached.
+        var userId = QueryContext.UserId;
+        var cached = await _cache.GetOrAddAsync<Report?>(QueryContext.TenantId, MetadataCacheGroups.Access, $"report:{publicId}:u{userId}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            return await connection.QuerySingleOrDefaultAsync<Report>(
+                new CommandDefinition(GetVisibleReportSql, new { publicId, userId }, cancellationToken: ct));
+        });
+        return cached?.Clone();
     }
 
     public async Task<Report?> GetFirstVisibleReportByTableAsync(Guid tablePublicId, CancellationToken ct = default)
@@ -403,6 +412,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
 
     public async Task<(long Id, Guid PublicId)> CreateAsync(Report report, CancellationToken ct = default)
     {
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Access);
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var row = await connection.QuerySingleAsync(
             new CommandDefinition(InsertSql, new
@@ -442,6 +452,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
     public async Task<int> UpdateAsync(Guid publicId, string name, string? description,
         string visibility, string definition, CancellationToken ct = default)
     {
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Access);
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteAsync(
             new CommandDefinition(UpdateReportSql,
@@ -451,6 +462,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
 
     public async Task SetDefaultAsync(Guid tablePublicId, Guid reportPublicId, CancellationToken ct = default)
     {
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Access, inTransaction: true);
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.OpenAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
@@ -467,6 +479,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
 
     public async Task<int> DeleteAsync(Guid publicId, CancellationToken ct = default)
     {
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Access);
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteAsync(
             new CommandDefinition(SoftDeleteReportSql, new { publicId, deletedBy = QueryContext.UserId }, cancellationToken: ct));
@@ -474,6 +487,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
 
     public async Task UpdateFormOverridesAsync(Guid tablePublicId, IEnumerable<(Guid ReportPublicId, Guid? ViewEditFormPublicId)> overrides, CancellationToken ct = default)
     {
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Access, inTransaction: true);
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.OpenAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
@@ -492,6 +506,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
 
     public async Task SetReportRolesAsync(long reportId, IEnumerable<long> roleIds, CancellationToken ct = default)
     {
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Access, inTransaction: true);
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.OpenAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);

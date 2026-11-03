@@ -203,13 +203,20 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
 
     private readonly IConfiguration _configuration;
     private readonly IEncryptionService _encryptionService;
+    private readonly IMetadataCache _cache;
 
-    public AppRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IConfiguration configuration, IEncryptionService encryptionService)
+    public AppRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IConfiguration configuration, IEncryptionService encryptionService, IMetadataCache cache)
         : base(connectionFactory, queryContext)
     {
         _configuration = configuration;
         _encryptionService = encryptionService;
+        _cache = cache;
     }
+
+    private const string AppsCacheGroup = MetadataCacheGroups.Apps;
+
+    /// <summary>Drops the cached apps of this tenant. Called BEFORE each write below (see <see cref="IMetadataCache.Invalidate"/>).</summary>
+    private void AppsChanging(bool inTransaction = false) => _cache.Invalidate(QueryContext.TenantId, AppsCacheGroup, inTransaction);
 
     public async Task<App> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
     {
@@ -221,10 +228,15 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
 
     public async Task<App> GetByIdAsync(long id, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var app = await connection.QuerySingleOrDefaultAsync<App>(
-            new CommandDefinition(GetByIdSql, new { id }, cancellationToken: ct));
-        return app ?? throw new NotFoundException("App", id);
+        // An app that does not exist throws and is never cached. Each caller gets its own copy.
+        var cached = await _cache.GetOrAddAsync(QueryContext.TenantId, AppsCacheGroup, $"id:{id}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            var app = await connection.QuerySingleOrDefaultAsync<App>(
+                new CommandDefinition(GetByIdSql, new { id }, cancellationToken: ct));
+            return app ?? throw new NotFoundException("App", id);
+        });
+        return cached.Clone();
     }
 
     public async Task<IReadOnlyList<App>> ListAsync(int page, int pageSize, CancellationToken ct = default)
@@ -267,6 +279,7 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
 
     public async Task<(Guid PublicId, long Id)> CreateAsync(App app, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default)
     {
+        AppsChanging(transaction is not null);
         var parameters = new
         {
             ownerId = app.OwnerId,
@@ -362,6 +375,7 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
 
     public async Task SetDefaultRoleAsync(long appId, long roleId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default)
     {
+        AppsChanging(transaction is not null);
         var parameters = new { appId, roleId };
         if (transaction is not null)
         {
@@ -381,6 +395,7 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
 
     public async Task<int> UpdateAsync(Guid publicId, string name, string? description, string? icon, string? color, string? formatting, string? securityOptions, bool isEncrypted, CancellationToken ct = default)
     {
+        AppsChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteAsync(
             new CommandDefinition(UpdateSql, new
@@ -392,6 +407,7 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
 
     public async Task<int> UpdateBrandingAsync(Guid publicId, string? branding, string? layoutSettings, CancellationToken ct = default)
     {
+        AppsChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteAsync(
             new CommandDefinition(UpdateBrandingSql, new
@@ -430,6 +446,7 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
 
     public async Task DeleteAsync(Guid publicId, CancellationToken ct = default)
     {
+        AppsChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var affected = await connection.ExecuteAsync(
             new CommandDefinition(SoftDeleteSql, new { publicId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));

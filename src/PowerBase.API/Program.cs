@@ -179,6 +179,8 @@ builder.Services.AddSwaggerGen(c =>
 
 // Infrastructure
 builder.Services.AddMemoryCache();
+builder.Services.Configure<PowerBase.Application.Common.Configurations.MetadataCacheOptions>(builder.Configuration.GetSection(PowerBase.Application.Common.Configurations.MetadataCacheOptions.SectionName));
+builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.IMetadataCache, PowerBase.Infrastructure.Services.MetadataCache>();
 builder.Services.AddHttpClient();
 builder.Services.AddHttpClient("PipelineMakeRequest").ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
 {

@@ -222,15 +222,32 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         UPDATE meta.AppTable SET RecordCount = CASE WHEN RecordCount >= @count THEN RecordCount - @count ELSE 0 END WHERE Id = @id
         """;
 
-    public AppTableRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
-        : base(connectionFactory, queryContext) { }
+    private const string TablesCacheGroup = MetadataCacheGroups.Tables;
+
+    private readonly IMetadataCache _cache;
+
+    public AppTableRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache cache)
+        : base(connectionFactory, queryContext)
+    {
+        _cache = cache;
+    }
+
+    /// <summary>Drops the cached tables of this tenant. Called BEFORE each write below that changes what <see cref="GetByIdAsync"/> returns
+    /// (see <see cref="IMetadataCache.Invalidate"/>). The record-count counters are deliberately not among them: they change on every record
+    /// added or deleted, and nothing reads RecordCount from a table fetched by id (the table detail and lists read it from their own queries).</summary>
+    private void TablesChanging() => _cache.Invalidate(QueryContext.TenantId, TablesCacheGroup);
 
     public async Task<AppTable> GetByIdAsync(long id, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var table = await connection.QuerySingleOrDefaultAsync<AppTable>(
-            new CommandDefinition(GetByIdSql, new { id }, cancellationToken: ct));
-        return table ?? throw new NotFoundException("Table", id);
+        // A table that does not exist throws and is never cached. Each caller gets its own copy.
+        var cached = await _cache.GetOrAddAsync(QueryContext.TenantId, TablesCacheGroup, $"id:{id}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            var table = await connection.QuerySingleOrDefaultAsync<AppTable>(
+                new CommandDefinition(GetByIdSql, new { id }, cancellationToken: ct));
+            return table ?? throw new NotFoundException("Table", id);
+        });
+        return cached.Clone();
     }
 
     public async Task<AppTable> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
@@ -347,6 +364,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     public async Task<(long Id, Guid PublicId)> CreateAsync(AppTable table, CancellationToken ct = default)
     {
+        TablesChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var row = await connection.QuerySingleAsync(
             new CommandDefinition(InsertSql, new
@@ -365,6 +383,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     public async Task UpdatePhysicalNameAsync(long id, string physicalTableName, CancellationToken ct = default)
     {
+        TablesChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdatePhysicalNameSql, new { id, physicalTableName }, cancellationToken: ct));
@@ -372,6 +391,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     public async Task<int> UpdateAsync(Guid publicId, string name, string? singularLabel, string? pluralLabel, string? description, string? icon, long? defaultRecordPickerField1Id = null, long? defaultRecordPickerField2Id = null, long? defaultRecordPickerField3Id = null, bool? isShowInBar = null, CancellationToken ct = default)
     {
+        TablesChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteAsync(
             new CommandDefinition(UpdateTableSql, new
@@ -385,6 +405,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     public async Task<IReadOnlyList<(Guid PublicId, string Name)>> SetShowInBarAsync(long appId, IReadOnlyList<Guid> publicIds, bool isShowInBar, CancellationToken ct = default)
     {
+        TablesChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var parameters = new { appId, publicIds, isShowInBar, modifiedBy = QueryContext.UserId };
         var changed = (await connection.QueryAsync<(Guid PublicId, string Name)>(
@@ -396,6 +417,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     public async Task SetKeyFieldAsync(long tableId, long? keyFieldId, CancellationToken ct = default)
     {
+        TablesChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(SetKeyFieldSql, new { tableId, keyFieldId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
@@ -403,6 +425,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     public async Task SetDisplayFieldAsync(long tableId, long? displayFieldId, CancellationToken ct = default)
     {
+        TablesChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(SetDisplayFieldSql, new { tableId, displayFieldId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
@@ -410,6 +433,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     public async Task SetDefaultRecordPickerFieldsAsync(long tableId, long? field1Id, long? field2Id, long? field3Id, CancellationToken ct = default)
     {
+        TablesChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(SetDefaultRecordPickerFieldsSql, new { tableId, field1Id, field2Id, field3Id, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
@@ -417,6 +441,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     public async Task UpdateDefaultReportSettingsAsync(Guid publicId, string defaultReportSettings, CancellationToken ct = default)
     {
+        TablesChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var affected = await connection.ExecuteAsync(
             new CommandDefinition(UpdateDefaultReportSettingsSql, new
@@ -430,6 +455,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     public async Task UpdateCustomDataRuleAsync(Guid publicId, string? customDataRule, bool isEnabled, CancellationToken ct = default)
     {
+        TablesChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var affected = await connection.ExecuteAsync(
             new CommandDefinition(UpdateCustomDataRuleSql, new
@@ -443,6 +469,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     public async Task SetAutoSaveOnLeaveAsync(Guid publicId, bool isEnabled, CancellationToken ct = default)
     {
+        TablesChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var affected = await connection.ExecuteAsync(
             new CommandDefinition(SetAutoSaveOnLeaveSql, new
@@ -456,6 +483,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     public async Task DeleteAsync(Guid publicId, CancellationToken ct = default)
     {
+        TablesChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var affected = await connection.ExecuteAsync(
             new CommandDefinition(SoftDeleteSql, new { publicId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));

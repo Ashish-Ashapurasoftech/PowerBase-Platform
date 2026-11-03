@@ -33,11 +33,13 @@ public sealed class FieldColumnConversionService : IFieldColumnConversionService
 
     private readonly ITenantConnectionFactory _connectionFactory;
     private readonly IQueryContext _queryContext;
+    private readonly IMetadataCache _metadataCache;
 
-    public FieldColumnConversionService(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
+    public FieldColumnConversionService(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache metadataCache)
     {
         _connectionFactory = connectionFactory;
         _queryContext = queryContext;
+        _metadataCache = metadataCache;
     }
 
     public async Task<ColumnConversionPreview> PreviewAsync(
@@ -192,6 +194,8 @@ public sealed class FieldColumnConversionService : IFieldColumnConversionService
 
     private async Task UpdateMetadataAsync(DbConnection connection, DbTransaction tx, AppField field, FieldTypeMetadata metadata, CancellationToken ct)
     {
+        _metadataCache.Invalidate(_queryContext.TenantId, MetadataCacheGroups.Fields, inTransaction: true); // the field lists are cached (AppFieldRepository)
+        _metadataCache.Invalidate(_queryContext.TenantId, MetadataCacheGroups.Access, inTransaction: true); // field-access maps join the field table
         var affected = await connection.ExecuteAsync(new CommandDefinition(UpdateFieldMetadataSql, new
         {
             id = field.Id,
