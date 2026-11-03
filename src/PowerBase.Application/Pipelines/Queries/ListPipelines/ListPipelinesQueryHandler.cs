@@ -42,8 +42,8 @@ public class ListPipelinesQueryHandler
 
         var userId = _queryContext.UserId;
         // Independent queries on separate connections — run them concurrently.
-        var countTask = _pipelineRepo.CountByUserAsync(userId, query.Search, query.IsActive, ct);
-        var pipelinesTask = _pipelineRepo.ListByUserPagedAsync(userId, page, pageSize, query.Search, sortBy, query.SortDesc, query.IsActive, ct);
+        var countTask = _pipelineRepo.CountByUserAsync(userId, query.Search, query.IsActive, ct, query.FilterAppPublicId);
+        var pipelinesTask = _pipelineRepo.ListByUserPagedAsync(userId, page, pageSize, query.Search, sortBy, query.SortDesc, query.IsActive, ct, query.FilterAppPublicId);
         await Task.WhenAll(countTask, pipelinesTask);
         var totalCount = countTask.Result;
         var pipelines = pipelinesTask.Result;

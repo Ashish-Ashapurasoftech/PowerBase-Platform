@@ -54,6 +54,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
             WHERE p.CreatedBy = @userId AND p.IsDeleted = 0
               AND (@search IS NULL OR p.Name LIKE @search OR p.Description LIKE @search)
               AND (@isActive IS NULL OR p.IsActive = @isActive)
+              AND (@appPublicId IS NULL OR p.AppId = (SELECT a.Id FROM meta.App a WHERE a.PublicId = @appPublicId))
             ORDER BY {0}
             OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
         )
@@ -77,6 +78,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         WHERE p.CreatedBy = @userId AND p.IsDeleted = 0
           AND (@search IS NULL OR p.Name LIKE @search OR p.Description LIKE @search)
           AND (@isActive IS NULL OR p.IsActive = @isActive)
+          AND (@appPublicId IS NULL OR p.AppId = (SELECT a.Id FROM meta.App a WHERE a.PublicId = @appPublicId))
         """;
 
     private const string ListAllActiveSql = $"""
@@ -341,7 +343,8 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         string sortBy,
         bool sortDesc,
         bool? isActive,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        Guid? appPublicId = null)
     {
         var column = sortBy switch
         {
@@ -366,6 +369,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
                         ? null
                         : $"%{search.Trim()}%",
                     isActive,
+                    appPublicId,
                     offset = (page - 1) * pageSize,
                     pageSize
                 },
@@ -377,7 +381,8 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         long userId,
         string? search,
         bool? isActive,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        Guid? appPublicId = null)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<int>(
@@ -389,7 +394,8 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
                     search = string.IsNullOrWhiteSpace(search)
                         ? null
                         : $"%{search.Trim()}%",
-                    isActive
+                    isActive,
+                    appPublicId
                 },
                 cancellationToken: ct));
     }
