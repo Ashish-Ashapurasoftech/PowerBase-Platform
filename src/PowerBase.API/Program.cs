@@ -181,6 +181,19 @@ builder.Services.AddSwaggerGen(c =>
 builder.Services.AddMemoryCache();
 builder.Services.Configure<PowerBase.Application.Common.Configurations.MetadataCacheOptions>(builder.Configuration.GetSection(PowerBase.Application.Common.Configurations.MetadataCacheOptions.SectionName));
 builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.IMetadataCache, PowerBase.Infrastructure.Services.MetadataCache>();
+builder.Services.Configure<PowerBase.API.Middleware.ServerTimingOptions>(builder.Configuration.GetSection(PowerBase.API.Middleware.ServerTimingOptions.SectionName));
+builder.Services.AddScoped<PowerBase.Infrastructure.Services.ServerTiming>();
+builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IServerTiming>(sp => sp.GetRequiredService<PowerBase.Infrastructure.Services.ServerTiming>());
+// JSON responses (report rows, field lists) compress to a fraction of their size; the SPA is on another origin, so this also matters over HTTPS.
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+    options.Providers.Add<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProvider>();
+    options.Providers.Add<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProvider>();
+    options.MimeTypes = Microsoft.AspNetCore.ResponseCompression.ResponseCompressionDefaults.MimeTypes.Concat(["application/json"]);
+});
+builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
+builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
 builder.Services.AddHttpClient();
 builder.Services.AddHttpClient("PipelineMakeRequest").ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
 {
@@ -737,7 +750,9 @@ PowerBase.API.ConnectedTables.ConnectedTablesApiExtensions.AddConnectedTablesMod
 var app = builder.Build();
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
+app.UseResponseCompression();
 app.UseCors("Frontend");
+app.UseMiddleware<PowerBase.API.Middleware.ServerTimingMiddleware>();
 
 if (app.Environment.IsDevelopment())
 {

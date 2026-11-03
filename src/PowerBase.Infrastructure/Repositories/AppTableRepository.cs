@@ -260,10 +260,15 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     public async Task<long> GetAppIdByPublicIdAsync(Guid tablePublicId, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var appId = await connection.ExecuteScalarAsync<long?>(
-            new CommandDefinition(GetAppIdByPublicIdSql, new { publicId = tablePublicId }, cancellationToken: ct));
-        return appId ?? throw new NotFoundException("Table", tablePublicId);
+        // Resolved on nearly every call by the membership check. A table that does not exist throws and is never cached.
+        var cached = await _cache.GetOrAddAsync(QueryContext.TenantId, MetadataCacheGroups.Ids, $"table:{tablePublicId}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            var appId = await connection.ExecuteScalarAsync<long?>(
+                new CommandDefinition(GetAppIdByPublicIdSql, new { publicId = tablePublicId }, cancellationToken: ct));
+            return new CachedId(appId ?? throw new NotFoundException("Table", tablePublicId));
+        });
+        return cached.Value;
     }
 
     public async Task<IReadOnlyList<AppTable>> ListByAppAsync(long appId, CancellationToken ct = default)
@@ -483,6 +488,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     public async Task DeleteAsync(Guid publicId, CancellationToken ct = default)
     {
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Ids);
         TablesChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var affected = await connection.ExecuteAsync(

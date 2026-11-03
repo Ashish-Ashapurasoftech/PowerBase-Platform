@@ -263,10 +263,15 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
 
     public async Task<long> GetIdByPublicIdAsync(Guid publicId, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var id = await connection.ExecuteScalarAsync<long?>(
-            new CommandDefinition(GetIdByPublicIdSql, new { publicId }, cancellationToken: ct));
-        return id ?? throw new NotFoundException("App", publicId);
+        // Resolved on nearly every call by the membership check. An app that does not exist throws and is never cached.
+        var cached = await _cache.GetOrAddAsync(QueryContext.TenantId, MetadataCacheGroups.Ids, $"app:{publicId}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            var id = await connection.ExecuteScalarAsync<long?>(
+                new CommandDefinition(GetIdByPublicIdSql, new { publicId }, cancellationToken: ct));
+            return new CachedId(id ?? throw new NotFoundException("App", publicId));
+        });
+        return cached.Value;
     }
 
     public async Task<Guid> GetPublicIdByIdAsync(long appId, CancellationToken ct = default)
@@ -446,6 +451,7 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
 
     public async Task DeleteAsync(Guid publicId, CancellationToken ct = default)
     {
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Ids);
         AppsChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var affected = await connection.ExecuteAsync(

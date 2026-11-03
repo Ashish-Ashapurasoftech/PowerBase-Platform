@@ -317,10 +317,15 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
 
     public async Task<long> GetAppIdByPublicIdAsync(Guid reportPublicId, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var appId = await connection.ExecuteScalarAsync<long?>(
-            new CommandDefinition(GetAppIdByPublicIdSql, new { publicId = reportPublicId }, cancellationToken: ct));
-        return appId ?? throw new NotFoundException("Report", reportPublicId);
+        // Resolved on nearly every call by the membership check. A report that does not exist throws and is never cached.
+        var cached = await _cache.GetOrAddAsync(QueryContext.TenantId, MetadataCacheGroups.Ids, $"report:{reportPublicId}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            var appId = await connection.ExecuteScalarAsync<long?>(
+                new CommandDefinition(GetAppIdByPublicIdSql, new { publicId = reportPublicId }, cancellationToken: ct));
+            return new CachedId(appId ?? throw new NotFoundException("Report", reportPublicId));
+        });
+        return cached.Value;
     }
 
     public async Task<IReadOnlyList<Report>> ListByAppAsync(long appId, CancellationToken ct = default)
@@ -479,6 +484,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
 
     public async Task<int> DeleteAsync(Guid publicId, CancellationToken ct = default)
     {
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Ids);
         _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Access);
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteAsync(
