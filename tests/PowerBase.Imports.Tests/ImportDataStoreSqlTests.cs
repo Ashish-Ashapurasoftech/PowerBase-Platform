@@ -201,4 +201,22 @@ public class ImportDataStoreSqlTests : IClassFixture<SqlFixture>
         // The table is shared with the other scenario: leave it as it was found.
         await _db.ExecuteAsync($"DELETE FROM data.t_{_db.TableId} WHERE f_6 LIKE 'ID-%'");
     }
+
+    [SqlFact]
+    public async Task A_record_id_lookup_ignores_values_that_cannot_be_an_id_and_deleted_records()
+    {
+        var ids = await _db.Store.InsertAsync(_db.Table, _db.Fields, [new Dictionary<long, object?> { [6] = "RIDLOOKUP", [7] = 1m }], createdBy: 5);
+        var id = ids[0];
+        try
+        {
+            object[] odd = ["abc", "", "  ", -1m, 0m, 1.5m, 1e23m, decimal.MaxValue, "99999999999999999999999", "1e3", long.MaxValue];
+            var found = await _db.Store.FindRecordIdsAsync(_db.Table, _db.Fields[0], [.. odd, id, $" {id} "]);
+            found.Values.Should().OnlyContain(v => v == id, "only the real id matches; nothing may throw for the other shapes");
+            found.Should().ContainKey(id.ToString());
+
+            await _db.ExecuteAsync($"UPDATE data.t_{_db.TableId} SET IsDeleted = 1 WHERE Id = {id}");
+            (await _db.Store.FindRecordIdsAsync(_db.Table, _db.Fields[0], [id])).Should().BeEmpty("a deleted record is not a match");
+        }
+        finally { await _db.ExecuteAsync($"DELETE FROM data.t_{_db.TableId} WHERE f_6 = 'RIDLOOKUP'"); }
+    }
 }

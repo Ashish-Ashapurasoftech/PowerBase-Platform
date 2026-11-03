@@ -19,6 +19,9 @@ public sealed record SearchOutboxAck(Guid RecordPublicId, long Version, bool UpT
 
 public sealed record SearchOutboxStats(long Pending, long Parked, DateTime? OldestPendingUtc);
 
+/// <summary>A record with a change the index has not confirmed yet.</summary>
+public sealed record SearchOutboxPendingRecord(long TableId, long AppId, Guid RecordPublicId);
+
 /// <summary>
 /// The tenant database's record of index changes that have not been confirmed yet (meta.SearchOutbox). All members work on the tenant in
 /// the current <see cref="IQueryContext"/>. Every member is a no-op until the table exists (migration 086), so the application can be
@@ -44,6 +47,17 @@ public interface ISearchOutbox
     Task AcknowledgeAsync(long tableId, IReadOnlyList<SearchOutboxAck> acks, CancellationToken ct = default);
 
     Task<SearchOutboxStats> GetStatsAsync(int maxAttempts, CancellationToken ct = default);
+
+    /// <summary>
+    /// Records of the table with a change the index has not confirmed yet: written, but not (or not yet visibly) indexed. Up to
+    /// <paramref name="max"/> + 1 of them, so a caller can tell there are more than it can handle. Null when the outbox cannot tell (its
+    /// table does not exist yet in this tenant's database).
+    /// </summary>
+    Task<IReadOnlyList<Guid>?> ListPendingRecordsAsync(long tableId, int max, CancellationToken ct = default);
+
+    /// <summary>The same across every table of the tenant (for global search), newest change first: up to <paramref name="max"/> records.
+    /// Null when the outbox cannot tell.</summary>
+    Task<IReadOnlyList<SearchOutboxPendingRecord>?> ListPendingRecordsAsync(int max, CancellationToken ct = default);
 
     /// <summary>Makes rows that ran out of attempts eligible again (the daily sweep). Returns how many.</summary>
     Task<int> ReleaseParkedAsync(int maxAttempts, CancellationToken ct = default);

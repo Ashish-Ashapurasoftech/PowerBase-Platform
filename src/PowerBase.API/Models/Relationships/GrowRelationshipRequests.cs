@@ -46,6 +46,20 @@ public class UpdateDisplayKeyRequest
     public int? DisplayKeyFieldFid { get; set; }
 }
 
+/// <summary>Choose the relationship's reference proxy (Quickbase's "Proxy field").</summary>
+public class UpdateProxyFieldRequest
+{
+    /// <summary>Fid of a lookup of this relationship or a formula field on the child table; null clears the proxy.</summary>
+    public int? ProxyFid { get; set; }
+}
+
+/// <summary>Turn "Display as a link to the parent record" on or off for the relationship's reference field or one of
+/// its lookup fields (Quickbase's DisplayAsLinkToParent).</summary>
+public class UpdateParentLinkRequest
+{
+    public bool DisplayAsLinkToParent { get; set; }
+}
+
 /// <summary>Replace the dependent-dropdown conditions of a relationship's Reference field.</summary>
 public class UpdateReferenceFilterRequest
 {

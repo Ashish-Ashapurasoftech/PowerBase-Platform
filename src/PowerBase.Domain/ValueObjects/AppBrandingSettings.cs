@@ -11,7 +11,7 @@ public class AppBrandingSettings
     public string Theme { get; set; } = "light";
 
     /// <summary>One of the 10 preset accents, or "custom" when <see cref="BrandColorHex"/> is set.</summary>
-    public string Accent { get; set; } = "emerald";
+    public string Accent { get; set; } = "navy";
 
     public string FontFamily { get; set; } = "system";
 

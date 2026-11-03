@@ -26,7 +26,7 @@ public class SnapshotFieldTests
     public void Validate_NoSource_IsAlwaysAllowed()
     {
         var dest = Field(1, 10, "Text", "Snap");
-        FieldSnapshotCapability.Validate(dest, "Snap", null, false, true, true, true, true, [dest]).Should().BeEmpty();
+        FieldSnapshotCapability.Validate(dest, "Snap", null, false, true, true, true, [dest]).Should().BeEmpty();
     }
 
     [Fact]
@@ -34,7 +34,7 @@ public class SnapshotFieldTests
     {
         var source = Field(1, 10, "Number", "Price");
         var dest = Field(2, 11, "Number", "Price at order");
-        FieldSnapshotCapability.Validate(dest, "Price at order", 10, false, false, false, false, false, [source, dest]).Should().BeEmpty();
+        FieldSnapshotCapability.Validate(dest, "Price at order", 10, false, false, false, false, [source, dest]).Should().BeEmpty();
     }
 
     [Fact]
@@ -42,14 +42,14 @@ public class SnapshotFieldTests
     {
         var source = Field(1, 10, "Text", "Name");
         var dest = Field(2, 11, "SingleSelect", "Pick");
-        FieldSnapshotCapability.Validate(dest, "Pick", 10, false, false, false, false, false, [source, dest]).Should().ContainKey("SnapshotSourceFid");
+        FieldSnapshotCapability.Validate(dest, "Pick", 10, false, false, false, false, [source, dest]).Should().ContainKey("SnapshotSourceFid");
     }
 
     [Fact]
     public void Validate_SourceIsItself_IsRejected()
     {
         var dest = Field(2, 11, "Text", "Self");
-        FieldSnapshotCapability.Validate(dest, "Self", 11, false, false, false, false, false, [dest]).Should().ContainKey("SnapshotSourceFid");
+        FieldSnapshotCapability.Validate(dest, "Self", 11, false, false, false, false, [dest]).Should().ContainKey("SnapshotSourceFid");
     }
 
     [Fact]
@@ -57,15 +57,41 @@ public class SnapshotFieldTests
     {
         var source = Field(1, 10, "Boolean", "Flag");
         var dest = Field(2, 11, "Date", "When");
-        FieldSnapshotCapability.Validate(dest, "When", 10, false, false, false, false, false, [source, dest]).Should().ContainKey("SnapshotSourceFid");
+        FieldSnapshotCapability.Validate(dest, "When", 10, false, false, false, false, [source, dest]).Should().ContainKey("SnapshotSourceFid");
     }
 
     [Fact]
-    public void Validate_FormulaSource_IsRejected()
+    public void Validate_SummaryAndListFormulaSources_AreRejected()
     {
-        var source = Field(1, 10, "Formula", "Calc");
         var dest = Field(2, 11, "Text", "Snap");
-        FieldSnapshotCapability.Validate(dest, "Snap", 10, false, false, false, false, false, [source, dest]).Should().ContainKey("SnapshotSourceFid");
+        foreach (var typeCode in new[] { "Summary", "ReportLink", "Formula_ListUser", "Formula_MultiSelect" })
+        {
+            var source = Field(1, 10, typeCode, "Calc");
+            FieldSnapshotCapability.Validate(dest, "Snap", 10, false, false, false, false, [source, dest]).Should().ContainKey("SnapshotSourceFid", typeCode);
+        }
+    }
+
+    [Theory]
+    [InlineData("Formula_Date", "Date")]
+    [InlineData("Formula_DateTime", "DateTime")]
+    [InlineData("Formula_Number", "Currency")]
+    [InlineData("Formula_Text", "Text")]
+    [InlineData("Formula_Duration", "Duration")]
+    [InlineData("Formula_Bool", "Boolean")]
+    [InlineData("Formula_User", "User")]
+    public void Validate_FormulaSource_WithMatchingResultType_IsAllowed(string formulaType, string destType)
+    {
+        var source = Field(1, 10, formulaType, "Calc");
+        var dest = Field(2, 11, destType, "Snap");
+        FieldSnapshotCapability.Validate(dest, "Snap", 10, false, false, false, false, [source, dest]).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Validate_FormulaSource_WithMismatchedResultType_IsRejected()
+    {
+        var source = Field(1, 10, "Formula_Text", "Calc");
+        var dest = Field(2, 11, "Date", "Snap");
+        FieldSnapshotCapability.Validate(dest, "Snap", 10, false, false, false, false, [source, dest]).Should().ContainKey("SnapshotSourceFid");
     }
 
     [Fact]
@@ -73,16 +99,16 @@ public class SnapshotFieldTests
     {
         var lookup = Field(1, 10, "Lookup", "Product price", settings: """{"resultTypeCode":"Currency","sourceTableId":9,"referenceFid":8,"sourceFid":7}""");
         var dest = Field(2, 11, "Currency", "Price at order");
-        FieldSnapshotCapability.Validate(dest, "Price at order", 10, false, false, false, false, false, [lookup, dest]).Should().BeEmpty();
+        FieldSnapshotCapability.Validate(dest, "Price at order", 10, false, false, false, false, [lookup, dest]).Should().BeEmpty();
     }
 
     [Fact]
-    public void Validate_UniqueEncryptedAutoFill_AreRejected()
+    public void Validate_UniqueAndAutoFill_AreRejected()
     {
         var source = Field(1, 10, "Text", "Name");
         var dest = Field(2, 11, "Text", "Snap");
-        var errors = FieldSnapshotCapability.Validate(dest, "Snap", 10, false, false, true, true, true, [source, dest]);
-        errors.Should().ContainKeys("IsUnique", "IsEncrypted", "IsAutoFill");
+        var errors = FieldSnapshotCapability.Validate(dest, "Snap", 10, false, false, true, true, [source, dest]);
+        errors.Should().ContainKeys("IsUnique", "IsAutoFill");
     }
 
     [Fact]
@@ -90,8 +116,8 @@ public class SnapshotFieldTests
     {
         var source = Field(1, 10, "Text", "Name");
         var dest = Field(2, 11, "Text", "Snap");
-        FieldSnapshotCapability.Validate(dest, "Snap", 10, false, true, false, false, false, [source, dest]).Should().ContainKey("IsRequired");
-        FieldSnapshotCapability.Validate(dest, "Snap", 10, true, true, false, false, false, [source, dest]).Should().BeEmpty();
+        FieldSnapshotCapability.Validate(dest, "Snap", 10, false, true, false, false, [source, dest]).Should().ContainKey("IsRequired");
+        FieldSnapshotCapability.Validate(dest, "Snap", 10, true, true, false, false, [source, dest]).Should().BeEmpty();
     }
 
     // ── Write guard ───────────────────────────────────────────────────────────────────────────────
@@ -270,5 +296,234 @@ public class SnapshotFieldTests
         blocked.Should().Throw<ValidationException>();
 
         SnapshotSourceDependencyGuard.EnsureNotSource([source, snap], [source, snap]);
+    }
+
+    // ── Types: Text, Numeric, Date, Date/Time, Time, Duration, Checkbox, Phone, Email, User, List-User, URL ──
+
+    [Theory]
+    [InlineData("Text", "Text")]
+    [InlineData("Text", "TextMultiLine")]
+    [InlineData("RichText", "Text")]
+    [InlineData("Email", "Text")]
+    [InlineData("Text", "Email")]
+    [InlineData("Phone", "Phone")]
+    [InlineData("Url", "Url")]
+    [InlineData("Number", "Currency")]
+    [InlineData("Currency", "Percent")]
+    [InlineData("Percent", "Rating")]
+    [InlineData("Rating", "Number")]
+    [InlineData("Number", "Text")]
+    [InlineData("SingleSelect", "Text")]
+    [InlineData("Date", "Date")]
+    [InlineData("Date", "DateTime")]
+    [InlineData("DateTime", "DateTime")]
+    [InlineData("Time", "Time")]
+    [InlineData("Duration", "Duration")]
+    [InlineData("Boolean", "Boolean")]
+    [InlineData("User", "User")]
+    [InlineData("MultiUser", "MultiUser")]
+    public void Compatible_Pairs_AreAllowed(string from, string to) =>
+        SnapshotTypeCompatibility.IsCompatible(from, to).Should().BeTrue();
+
+    [Theory]
+    [InlineData("Text", "Number")]
+    [InlineData("Text", "Date")]
+    [InlineData("DateTime", "Date")]
+    [InlineData("Date", "Time")]
+    [InlineData("Duration", "Number")]
+    [InlineData("Number", "Duration")]
+    [InlineData("Boolean", "Text")]
+    [InlineData("User", "MultiUser")]
+    [InlineData("MultiUser", "User")]
+    [InlineData("User", "Text")]
+    [InlineData("Number", "Email")]
+    [InlineData("Date", "Text")]
+    public void Incompatible_Pairs_AreRejected(string from, string to) =>
+        SnapshotTypeCompatibility.IsCompatible(from, to).Should().BeFalse();
+
+    [Theory]
+    [InlineData("Duration")]
+    [InlineData("User")]
+    [InlineData("MultiUser")]
+    [InlineData("Boolean")]
+    [InlineData("Time")]
+    [InlineData("Url")]
+    public void Validate_ListedDestinationTypes_AreAccepted(string typeCode)
+    {
+        var source = Field(1, 10, typeCode, "Source");
+        var dest = Field(2, 11, typeCode, "Snap");
+        FieldSnapshotCapability.Validate(dest, "Snap", 10, false, false, false, false, [source, dest]).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Validate_EncryptedTextSnapshot_IsAllowed()
+    {
+        // Encryption is not a reason to refuse a Snapshot: nothing in Validate looks at it any more.
+        var source = Field(1, 10, "Text", "Name");
+        var dest = Field(2, 11, "Text", "Snap");
+        dest.IsEncrypted = true;
+        source.IsEncrypted = true;
+        FieldSnapshotCapability.Validate(dest, "Snap", 10, false, false, false, false, [source, dest]).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Convert_PercentToNumber_ScalesDown_AndBack()
+    {
+        SnapshotTypeCompatibility.Convert(115m, "Percent", "Number").Should().Be(1.15m);
+        SnapshotTypeCompatibility.Convert(1.15m, "Number", "Percent").Should().Be(115m);
+        SnapshotTypeCompatibility.Convert(50m, "Percent", "Percent").Should().Be(50m);
+        SnapshotTypeCompatibility.Convert(7m, "Currency", "Number").Should().Be(7m);
+    }
+
+    [Fact]
+    public async Task ApplyOnCreate_UserSource_CopiesTheStoredUserId()
+    {
+        var source = Field(1, 10, "User", "Owner");
+        var snap = Field(2, 11, "User", "Owner at creation", snapshotSource: 10);
+        var sut = new SnapshotCaptureService(Substitute.For<IRelationalProjector>());
+        var values = new Dictionary<long, object?> { [10] = "42" };
+
+        await sut.ApplyOnCreateAsync(Table, [source, snap], values);
+
+        values[11].Should().Be("42");
+    }
+
+    [Fact]
+    public async Task ApplyOnCreate_MultiUserSource_CopiesTheWholeList()
+    {
+        var source = Field(1, 10, "MultiUser", "Reviewers");
+        var snap = Field(2, 11, "MultiUser", "Reviewers at creation", snapshotSource: 10);
+        var sut = new SnapshotCaptureService(Substitute.For<IRelationalProjector>());
+        var values = new Dictionary<long, object?> { [10] = "[\"4\",\"9\"]" };
+
+        await sut.ApplyOnCreateAsync(Table, [source, snap], values);
+
+        values[11].Should().Be("[\"4\",\"9\"]");
+    }
+
+    [Fact]
+    public async Task ApplyOnCreate_DurationSource_CopiesTheStoredValue()
+    {
+        var source = Field(1, 10, "Duration", "Planned");
+        var snap = Field(2, 11, "Duration", "Planned at creation", snapshotSource: 10);
+        var sut = new SnapshotCaptureService(Substitute.For<IRelationalProjector>());
+        var values = new Dictionary<long, object?> { [10] = 5400 };
+
+        await sut.ApplyOnCreateAsync(Table, [source, snap], values);
+
+        values[11].Should().Be(5400);
+    }
+
+    [Fact]
+    public async Task ApplyOnCreate_PercentSourceIntoNumber_Scales()
+    {
+        var source = Field(1, 10, "Percent", "Rate");
+        var snap = Field(2, 11, "Number", "Rate as number", snapshotSource: 10);
+        var sut = new SnapshotCaptureService(Substitute.For<IRelationalProjector>());
+        var values = new Dictionary<long, object?> { [10] = 115m };
+
+        await sut.ApplyOnCreateAsync(Table, [source, snap], values);
+
+        values[11].Should().Be(1.15m);
+    }
+
+    [Fact]
+    public async Task ApplyOnCreate_EncryptedTextSnapshot_CopiesThePlainValueForTheWriterToEncrypt()
+    {
+        // The record writer encrypts on write; the capture must hand it plain text, never anything already encrypted.
+        var source = Field(1, 10, "Text", "Secret"); source.IsEncrypted = true;
+        var snap = Field(2, 11, "Text", "Secret at creation", snapshotSource: 10); snap.IsEncrypted = true;
+        var sut = new SnapshotCaptureService(Substitute.For<IRelationalProjector>());
+        var values = new Dictionary<long, object?> { [10] = "top secret" };
+
+        await sut.ApplyOnCreateAsync(Table, [source, snap], values);
+
+        values[11].Should().Be("top secret");
+    }
+
+    // ── Formula sources ───────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task ApplyOnCreate_FormulaSource_EvaluatesTheFormulaOnTheNewRecord()
+    {
+        var start = Field(1, 7, "Date", "Start");
+        var formula = Field(2, 10, "Formula_Date", "Due");
+        var snap = Field(3, 11, "Date", "Due at creation", snapshotSource: 10);
+
+        var relational = Substitute.For<IRelationalProjector>();
+        relational.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(call => (IReadOnlyList<IReadOnlyDictionary<long, object?>>)
+                new List<IReadOnlyDictionary<long, object?>> { new Dictionary<long, object?>() });
+
+        var formulas = Substitute.For<PowerBase.Application.Formulas.IFormulaProjector>();
+        formulas.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(call =>
+            {
+                // The formula must see the values the record is about to be written with.
+                var rows = call.ArgAt<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(1);
+                rows[0]["f_7"].Should().Be(new DateTime(2026, 7, 1));
+                return (IReadOnlyList<IReadOnlyDictionary<long, object?>>)
+                    new List<IReadOnlyDictionary<long, object?>> { new Dictionary<long, object?> { [10] = new DateTime(2026, 7, 31) } };
+            });
+
+        var sut = new SnapshotCaptureService(relational, formulas);
+        var values = new Dictionary<long, object?> { [7] = new DateTime(2026, 7, 1) };
+
+        await sut.ApplyOnCreateAsync(Table, [start, formula, snap], values);
+
+        values[11].Should().Be(new DateTime(2026, 7, 31));
+    }
+
+    [Fact]
+    public async Task ApplyOnCreate_FormulaSourceBlank_WritesBlank()
+    {
+        var formula = Field(2, 10, "Formula_Number", "Calc");
+        var snap = Field(3, 11, "Number", "Calc at creation", snapshotSource: 10);
+        var relational = Substitute.For<IRelationalProjector>();
+        relational.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(call => (IReadOnlyList<IReadOnlyDictionary<long, object?>>)
+                new List<IReadOnlyDictionary<long, object?>> { new Dictionary<long, object?>() });
+        var formulas = Substitute.For<PowerBase.Application.Formulas.IFormulaProjector>();
+        formulas.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(call => (IReadOnlyList<IReadOnlyDictionary<long, object?>>)
+                new List<IReadOnlyDictionary<long, object?>> { new Dictionary<long, object?> { [10] = null } });
+        var sut = new SnapshotCaptureService(relational, formulas);
+        var values = new Dictionary<long, object?>();
+
+        await sut.ApplyOnCreateAsync(Table, [formula, snap], values);
+
+        values.Should().ContainKey(11);
+        values[11].Should().BeNull();
+    }
+
+    [Fact]
+    public async Task CaptureForRows_FormulaSource_EvaluatesEachRow()
+    {
+        var formula = Field(2, 10, "Formula_Number", "Calc");
+        var snap = Field(3, 11, "Number", "Calc at creation", snapshotSource: 10);
+        var relational = Substitute.For<IRelationalProjector>();
+        relational.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(call => (IReadOnlyList<IReadOnlyDictionary<long, object?>>)
+                new List<IReadOnlyDictionary<long, object?>> { new Dictionary<long, object?>(), new Dictionary<long, object?>() });
+        var formulas = Substitute.For<PowerBase.Application.Formulas.IFormulaProjector>();
+        formulas.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(call => (IReadOnlyList<IReadOnlyDictionary<long, object?>>)new List<IReadOnlyDictionary<long, object?>>
+            {
+                new Dictionary<long, object?> { [10] = 5m },
+                new Dictionary<long, object?> { [10] = 9m },
+            });
+        var sut = new SnapshotCaptureService(relational, formulas);
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows =
+            [new Dictionary<string, object?>(), new Dictionary<string, object?>()];
+
+        var result = await sut.CaptureForRowsAsync(Table, [formula, snap], snap, rows);
+
+        result.Should().Equal(new object?[] { 5m, 9m });
     }
 }

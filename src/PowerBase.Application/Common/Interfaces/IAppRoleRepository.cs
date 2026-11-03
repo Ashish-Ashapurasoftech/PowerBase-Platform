@@ -6,7 +6,7 @@ namespace PowerBase.Application.Common.Interfaces;
 public record AppRoleDetail(
     long Id, Guid PublicId, long AppId, string Name, bool IsDefault, bool IsSystem,
     IReadOnlyList<string> Permissions, string ManageableRolesType, int? Rank,
-    IReadOnlyList<Guid> ManageableRolePublicIds);
+    IReadOnlyList<Guid> ManageableRolePublicIds, Guid? HomePagePublicId = null);
 
 public interface IAppRoleRepository
 {
@@ -22,4 +22,6 @@ public interface IAppRoleRepository
     Task UpdateNameAsync(long roleId, string name, CancellationToken ct = default);
     /// <summary>Marks the given role as the sole default (IsDefault) role within its app; unsets any other default.</summary>
     Task SetDefaultAsync(long appId, long roleId, CancellationToken ct = default);
+    /// <summary>Sets (or clears, with null) the Dashboard page a role lands on as its app home.</summary>
+    Task SetHomePageAsync(long roleId, long? pageId, CancellationToken ct = default);
 }

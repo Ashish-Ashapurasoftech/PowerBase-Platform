@@ -1,12 +1,10 @@
 namespace PowerBase.Application.Relationships;
 
 /// <summary>One selectable parent record for a Reference field picker: the value to submit when
-/// this option is chosen (the parent row Id as text for the default key, or the parent's key-field
-/// value for a Set-Key table — either way, exactly what's stored in the child's reference column),
-/// up to 3 display values for the multi-column list, and a <see cref="Label"/> for the closed
-/// input — always the parent's descriptive/picker field, so a Set-Key override (which puts the raw
-/// key in <see cref="Value1"/>, e.g. a phone number) still reads the same way the default Record
-/// ID# key does once a record is picked.</summary>
+/// this option is chosen (the parent row Id as text — the picker always submits it), up to 3
+/// display values for the multi-column list, and a <see cref="Label"/> for the closed input. The
+/// columns are only what the parent's record picker (or the form element's own choice) lists, as in
+/// Quickbase; a Set-Key table's key value is not a column but rides along in <see cref="KeyValue"/>.</summary>
 public class ReferenceOption
 {
     public string Id { get; set; } = string.Empty;
@@ -21,4 +19,8 @@ public class ReferenceOption
     public string? Value2 { get; set; }
     public string? Value3 { get; set; }
     public string? Label { get; set; }
+    /// <summary>The parent's key-field value as text, only when the parent has a Set Key (or the relationship a Display
+    /// Key): a record read back from the API shows that text in the Reference field instead of the row Id, so the picker
+    /// uses it to find the option an existing value stands for. Never shown as a column. Null for a Record ID# key.</summary>
+    public string? KeyValue { get; set; }
 }

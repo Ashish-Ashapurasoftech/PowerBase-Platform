@@ -40,6 +40,50 @@ public sealed class PblRelationship
 
     /// <summary>The source Reference field's comment (Quickbase "Comments"). Applied to the field once it exists.</summary>
     public string? ReferenceFieldDescription { get; set; }
+
+    /// <summary>True when the document says exactly which link fields the parent table has (a Quickbase file does): PowerBase then creates the
+    /// parent's report link only when <see cref="ReportLink"/> is set, on its own number, and never adds its own "Add {child}" link — the file's
+    /// own "Add …" formula is imported as a normal field. False (a PowerBase export, the wizard): both links are generated as before.</summary>
+    public bool ExplicitLinks { get; set; }
+
+    /// <summary>The parent's source report link for this relationship (Quickbase's "{child} records"); only read when <see cref="ExplicitLinks"/>.</summary>
+    public PblReportLinkField? ReportLink { get; set; }
+}
+
+/// <summary>A source report link that PowerBase creates as the relationship's own report link, keeping the source label and number.</summary>
+public sealed class PblReportLinkField
+{
+    public string LogicalRef { get; set; } = string.Empty;
+    public string? Label { get; set; }
+
+    /// <summary>The hyperlink text; null = PowerBase's default.</summary>
+    public string? LinkText { get; set; }
+
+    /// <summary>The source field's numeric <c>Id:</c>; kept as the PowerBase Fid on a new app.</summary>
+    public int? SourceId { get; set; }
+
+    public string? Description { get; set; }
+}
+
+/// <summary>A source report link that is not a relationship's own: it opens a filtered view of <see cref="TargetTableRef"/> by matching
+/// <see cref="TargetFieldName"/> against this table's <see cref="SourceFieldName"/> (null = the record's own id).</summary>
+public sealed class PblStandaloneReportLink
+{
+    public string LogicalRef { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string? Label { get; set; }
+    public string? LinkText { get; set; }
+    public int? SourceId { get; set; }
+    public string? Description { get; set; }
+
+    /// <summary>A <see cref="PblTable.LogicalRef"/>.</summary>
+    public string TargetTableRef { get; set; } = string.Empty;
+
+    /// <summary>A <see cref="PblField.Name"/> (or reference/lookup/summary name) on the target table.</summary>
+    public string TargetFieldName { get; set; } = string.Empty;
+
+    /// <summary>A field name on this table; null = the record's own id.</summary>
+    public string? SourceFieldName { get; set; }
 }
 
 /// <summary>A parent field pulled down onto the child table.</summary>

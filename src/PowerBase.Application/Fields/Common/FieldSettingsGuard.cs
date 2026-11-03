@@ -1,6 +1,7 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Fields.Settings;
+using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -20,15 +21,21 @@ public class FieldSettingsGuard
     private readonly IAppRolePermissionRepository _permRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly FieldSettingsValidatorRegistry _settingsRegistry;
+    private readonly IRelationshipRepository? _relRepo;
+    private readonly IAppTableRepository? _tableRepo;
 
     public FieldSettingsGuard(
         IAppRolePermissionRepository permRepo,
         IRecordRepository recordRepo,
-        FieldSettingsValidatorRegistry settingsRegistry)
+        FieldSettingsValidatorRegistry settingsRegistry,
+        IRelationshipRepository? relRepo = null,
+        IAppTableRepository? tableRepo = null)
     {
         _permRepo = permRepo;
         _recordRepo = recordRepo;
         _settingsRegistry = settingsRegistry;
+        _relRepo = relRepo;
+        _tableRepo = tableRepo;
     }
 
     /// <summary>Validates the per-type Settings JSON shape and the General-settings capability
@@ -57,10 +64,10 @@ public class FieldSettingsGuard
     /// Unique / Encrypted / Auto-fill). Throws ValidationException. A no-op when <paramref name="sourceFid"/> is null.</summary>
     public void ValidateSnapshot(
         AppField existing, string label, int? sourceFid, bool editable,
-        bool isRequired, bool isUnique, bool isEncrypted, bool isAutoFill, IReadOnlyList<AppField> tableFields)
+        bool isRequired, bool isUnique, bool isAutoFill, IReadOnlyList<AppField> tableFields)
     {
         var errors = FieldSnapshotCapability.Validate(
-            existing, label, sourceFid, editable, isRequired, isUnique, isEncrypted, isAutoFill, tableFields);
+            existing, label, sourceFid, editable, isRequired, isUnique, isAutoFill, tableFields);
         if (errors.Count > 0)
             throw new ValidationException(errors.AsReadOnly());
     }
@@ -101,6 +108,29 @@ public class FieldSettingsGuard
             });
         }
     }
+
+    /// <summary>A key must stay unique: Unique can't be turned off on the table's key field or on a field a
+    /// relationship uses as its key (see RelationshipKeyRules). Two parents with the same key value would show as
+    /// two identical choices in the picker, and an API / import write by key couldn't tell them apart. Only the
+    /// On → Off change is refused, so a key saved without Unique before this rule can still be edited.</summary>
+    public async Task ValidateKeyStaysUniqueAsync(AppTable table, AppField existing, string label, bool isUnique, CancellationToken ct)
+    {
+        if (isUnique || !existing.IsUnique) return;
+
+        IReadOnlyList<Relationship> relationships = _relRepo is null ? [] : await _relRepo.ListByTableAsync(table.Id, ct);
+        if (!RelationshipKeyRules.IsUniqueLocked(table, existing, relationships)) return;
+
+        var usages = RelationshipKeyRules.KeyUsages(table, existing, relationships);
+        var message = usages.Count > 0
+            ? $"'{label}' is the key of the relationship {string.Join(", ", await DescribeAsync(table, usages, ct))}. " +
+              "A relationship key must stay unique. Change the relationship's key first, then turn Unique off."
+            : $"'{label}' is the key field of {table.Name}. A key field must stay unique. " +
+              "Change the key with Set Key first, then turn Unique off.";
+        throw new ValidationException(new Dictionary<string, string[]> { ["IsUnique"] = [message] });
+    }
+
+    private async Task<IReadOnlyList<string>> DescribeAsync(AppTable table, IReadOnlyList<Relationship> usages, CancellationToken ct) =>
+        _tableRepo is null ? [table.Name] : await RelationshipKeyRules.DescribeAsync(usages, table, _tableRepo, ct);
 
     /// <summary>Validates an ActionButton's configured Capture/Timestamp/Bool-Gate/IP-Capture/
     /// Location/Add-Data/Prompt-Source Fid references against the table's actual fields: each must

@@ -180,6 +180,34 @@ public class SearchOutboxRepository : TenantRepositoryBase, ISearchOutbox
         return new SearchOutboxStats(row.Pending ?? 0, row.Parked ?? 0, row.Oldest is { } o ? DateTime.SpecifyKind(o, DateTimeKind.Utc) : null);
     }
 
+    public async Task<IReadOnlyList<Guid>?> ListPendingRecordsAsync(long tableId, int max, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        if (!await TableExistsAsync(connection, null, ct)) return null;
+
+        // IX_SearchOutbox_Record (TableId, RecordPublicId) answers this without touching other tables' rows.
+        return (await connection.QueryAsync<Guid>(new CommandDefinition("""
+            SELECT DISTINCT TOP (@take) RecordPublicId
+            FROM meta.SearchOutbox
+            WHERE TableId = @tableId
+            """, new { tableId, take = max + 1 }, cancellationToken: ct))).AsList();
+    }
+
+    public async Task<IReadOnlyList<SearchOutboxPendingRecord>?> ListPendingRecordsAsync(int max, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        if (!await TableExistsAsync(connection, null, ct)) return null;
+
+        return (await connection.QueryAsync<SearchOutboxPendingRecord>(new CommandDefinition("""
+            SELECT TOP (@max) TableId, AppId, RecordPublicId
+            FROM meta.SearchOutbox
+            GROUP BY TableId, AppId, RecordPublicId
+            ORDER BY MAX(Id) DESC
+            """, new { max }, cancellationToken: ct))).AsList();
+    }
+
     public async Task<int> ReleaseParkedAsync(int maxAttempts, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);

@@ -209,6 +209,10 @@ public sealed class PblTable
     public string? Icon { get; set; }
     public List<PblField> Fields { get; set; } = [];
 
+    /// <summary>Report links of the source table that do not belong to a relationship (they match on a field other than the child's
+    /// reference field, or are a second link to the same child). Created after the relationships, on the source field number.</summary>
+    public List<PblStandaloneReportLink> ReportLinks { get; set; } = [];
+
     /// <summary>Table/summary reports. Column and sort references are by field <see cref="PblField.Name"/>
     /// within this table — resolved to the created field's Fid at import time.</summary>
     public List<PblReport> Reports { get; set; } = [];
@@ -241,9 +245,17 @@ public sealed class PblTable
     public PblDefaultReportSettings? DefaultReportSettings { get; set; }
 }
 
-/// <summary>Mirrors the JSON PowerBase keeps in <c>AppTable.DefaultReportSettings</c>.</summary>
+/// <summary>The table's "Default report" page: default columns, default dynamic filters and default sort. Applied to the table's hidden
+/// Default Report Settings record once every field exists; a null/empty part leaves PowerBase's own default.</summary>
 public sealed class PblDefaultReportSettings
 {
+    /// <summary>The fields shown as default columns, in order (a <see cref="PblField.Name"/>, or the name or label of a reference, lookup,
+    /// summary or report link). Null = leave the default (every reportable field).</summary>
+    public List<string>? ColumnFieldNames { get; set; }
+
+    /// <summary>For <see cref="DynamicFilterType"/> "Custom": the fields users may filter by on the fly, in order.</summary>
+    public List<string> DynamicFilterFieldNames { get; set; } = [];
+
     /// <summary>A <see cref="PblField.Name"/> on the table; null = default order.</summary>
     public string? SortFieldName { get; set; }
     public bool SortDescending { get; set; }

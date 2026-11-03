@@ -20,6 +20,7 @@ public class BulkDeleteFieldsCommandHandler
     private readonly IRelationshipRepository _relRepo;
     private readonly IFieldReferenceIndexer _refIndexer;
     private readonly IMessagePublisher? _publisher;
+    private readonly ISearchFieldJobs? _fieldJobs;
     private readonly IQueryContext? _queryContext;
 
     public BulkDeleteFieldsCommandHandler(
@@ -32,9 +33,11 @@ public class BulkDeleteFieldsCommandHandler
         IRelationshipRepository relRepo,
         IFieldReferenceIndexer? refIndexer = null,
         IMessagePublisher? publisher = null,
-        IQueryContext? queryContext = null)
+        IQueryContext? queryContext = null,
+        ISearchFieldJobs? fieldJobs = null)
     {
         _publisher = publisher;
+        _fieldJobs = fieldJobs;
         _queryContext = queryContext;
         _relRepo = relRepo;
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
@@ -53,6 +56,7 @@ public class BulkDeleteFieldsCommandHandler
         // Fetch all fields in the table to match their FIDs and system status
         var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
         var fieldsToDelete = fields.Where(f => command.FieldPublicIds.Contains(f.PublicId) && !f.IsSystem).ToList();
+        var deletedFieldIds = fieldsToDelete.Select(f => f.Id).ToList();
 
         // The columns these fields used in the search index, read now: once they are deleted the table no longer says.
         var indexCleanup = _queryContext == null
@@ -131,6 +135,8 @@ public class BulkDeleteFieldsCommandHandler
                 throw;
             }
 
+            await ReferenceProxyRules.ReassignIfRemovedAsync(table.Id, deletedFieldIds, _relRepo, _fieldRepo, ct);
+
             foreach (var p in pipelinesToDeactivate.Values)
             {
                 await _auditRepo.LogActivityAsync(
@@ -146,12 +152,15 @@ public class BulkDeleteFieldsCommandHandler
                 appId: table.AppId,
                 ct: ct);
             await RemoveDeletedFieldsAsync(command.FieldPublicIds, ct);
-            await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct);
+            await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct, _fieldJobs);
 
             return;
         }
 
         var normalDeletedCount = await _fieldRepo.BulkDeleteAsync(command.FieldPublicIds, table.Id, ct);
+
+        // A deleted reference proxy hands its role to the relationship's next lookup (or clears it).
+        await ReferenceProxyRules.ReassignIfRemovedAsync(table.Id, deletedFieldIds, _relRepo, _fieldRepo, ct);
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged,
@@ -161,7 +170,7 @@ public class BulkDeleteFieldsCommandHandler
             appId: table.AppId,
             ct: ct);
         await RemoveDeletedFieldsAsync(command.FieldPublicIds, ct);
-        await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct);
+        await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct, _fieldJobs);
     }
 
     private async Task RemoveDeletedFieldsAsync(IEnumerable<Guid> fieldPublicIds, CancellationToken ct)

@@ -134,6 +134,22 @@ public class UpdateSummaryFieldCommandHandlerTests
     }
 
     [Fact]
+    public async Task Handle_KeepsTheSummarysBehaviorSettings()
+    {
+        // Set on Field Detail (UpdateField), not by this command — rebuilding the settings must not drop them.
+        var s = SavedSettingsOf(_summary.Settings);
+        s.Display = new RelationshipDisplaySettings { Decimals = 1, DisplayBold = true, ColumnWidth = 120 };
+        _summary.Settings = RelationshipFieldFactory.Serialize(s);
+
+        await _handler.HandleAsync(Command("Sum", 6, Where(5, "eq", "Done")));
+
+        SavedSettings().Display.Should().BeEquivalentTo(new RelationshipDisplaySettings { Decimals = 1, DisplayBold = true, ColumnWidth = 120 });
+    }
+
+    private static SummarySettings SavedSettingsOf(string? json) =>
+        JsonSerializer.Deserialize<SummarySettings>(json!, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+
+    [Fact]
     public async Task Handle_EmptyOrNullCriteria_ClearsTheFilter()
     {
         await _handler.HandleAsync(Command("Count", null, new FilterGroup { Logic = "and", Nodes = [] }));

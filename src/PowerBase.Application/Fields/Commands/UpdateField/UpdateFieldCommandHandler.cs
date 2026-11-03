@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Fields.Common;
@@ -32,6 +33,8 @@ public class UpdateFieldCommandHandler
     private readonly IFieldReferenceIndexer _refIndexer;
     private readonly IAppVariableRepository? _variableRepo;
     private readonly FieldSnapshotJobService? _snapshotJobs;
+    private readonly ILogger<UpdateFieldCommandHandler>? _logger;
+    private readonly ISearchFieldJobs? _fieldJobs;
 
     /// <summary>The Number/Currency/Percent/Rating family — the only TypeCodes a field's
     /// "Display As" Behavior Setting is allowed to switch between (see NumericDisplayAs).</summary>
@@ -53,9 +56,13 @@ public class UpdateFieldCommandHandler
         IRelationshipRepository relRepo,
         IFieldReferenceIndexer? refIndexer = null,
         IAppVariableRepository? variableRepo = null,
-        FieldSnapshotJobService? snapshotJobs = null)
+        FieldSnapshotJobService? snapshotJobs = null,
+        ILogger<UpdateFieldCommandHandler>? logger = null,
+        ISearchFieldJobs? fieldJobs = null)
     {
         _snapshotJobs = snapshotJobs;
+        _logger = logger;
+        _fieldJobs = fieldJobs;
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _variableRepo = variableRepo;
         _tableRepo = tableRepo;
@@ -120,10 +127,17 @@ public class UpdateFieldCommandHandler
             : command.IsEncrypted;
         var snapshotSourceFid = existing.IsSystem ? null : command.SnapshotSourceFid;
         var snapshotEditable = snapshotSourceFid.HasValue && command.SnapshotEditable;
-        var isAutoFill = existing.IsSystem || snapshotSourceFid.HasValue ? false : command.IsAutoFill;
+        // A field whose type no longer supports Auto-fill (e.g. Text changed to Formula) can still carry the old
+        // flag on its row; drop it rather than rejecting a save that never asked for it.
+        var isAutoFill = existing.IsSystem || snapshotSourceFid.HasValue || !FieldAutoFillCapability.IsSupported(existing.TypeCode)
+            ? false : command.IsAutoFill;
         var isSharedValues = existing.IsSystem ? false : command.IsSharedValues ?? existing.IsSharedValues;
         var settings = existing.IsSystem
             ? SystemFieldSettingsPolicy.RestrictSettingsJson(existing.TypeCode, command.Settings)
+            // A Reference / Lookup / Summary takes only its Behavior Settings (the "display" object) from the request:
+            // the rest of its settings is the relationship's wiring, which only the relationship commands change.
+            : RelationshipDisplaySettingsPolicy.AppliesTo(existing.TypeCode)
+                ? RelationshipDisplaySettingsPolicy.Merge(existing.TypeCode, existing.Settings, command.Settings)
             // A request that sends no settings leaves them as they are: UpdateFieldSql writes Settings = @settings,
             // so passing null on would silently erase a formula's expression (or any other saved setting).
             : command.Settings ?? existing.Settings;
@@ -141,7 +155,9 @@ public class UpdateFieldCommandHandler
         var sharedErrors = FieldSharedValuesCapability.Validate(existing.TypeCode, label, existing.IsSystem, isSharedValues && !existing.IsSharedValues);
         if (sharedErrors.Count > 0) throw new ValidationException(new Dictionary<string, string[]>(sharedErrors));
         _guard.ValidateActionButtonTargets(existing.TypeCode, settings, tableFields, existing.Id);
-        _guard.ValidateSnapshot(existing, label, snapshotSourceFid, snapshotEditable, isRequired, isUnique, isEncrypted, command.IsAutoFill && snapshotSourceFid.HasValue, tableFields);
+        _guard.ValidateSnapshot(existing, label, snapshotSourceFid, snapshotEditable, isRequired, isUnique, command.IsAutoFill && snapshotSourceFid.HasValue, tableFields);
+        // Before the Display As switch below, which saves the new type straight away.
+        await _guard.ValidateKeyStaysUniqueAsync(table, existing, label, isUnique, ct);
 
         // Formula text is stored by field ID so a rename can't break it (see FormulaCanonicalizer).
         // The label being saved right now is also accepted as a name, so a formula can reference a
@@ -165,6 +181,7 @@ public class UpdateFieldCommandHandler
         // needed for a legacy Rating field created before Rating's catalog type became
         // DECIMAL(18,4) — see database/migrations/tenant/045_alter_fieldtype_rating_decimal.sql).
         var percentRescaled = false;
+        string? switchedToTypeCode = null;
         if (NumericFamilyTypeCodes.Contains(existing.TypeCode) && !string.IsNullOrWhiteSpace(settings))
         {
             NumericSettings? numericSettings = null;
@@ -225,6 +242,7 @@ public class UpdateFieldCommandHandler
                 {
                     await _fieldRepo.UpdateFieldTypeAsync(existing.Id, targetFieldType.Id, settings, isRequired, ct);
                 }
+                switchedToTypeCode = displayAs;
             }
         }
 
@@ -290,6 +308,10 @@ public class UpdateFieldCommandHandler
             throw;
         }
 
+        // Lookups of this field save the type of value they show; they follow the switch (Number → Currency …).
+        if (switchedToTypeCode is not null)
+            await FieldValueTypes.RefreshLookupsOfAsync(existing, switchedToTypeCode, _relRepo, _fieldRepo, ct);
+
         // Backfill: when an optional field becomes required and a default is supplied, fill existing
         // rows whose value is NULL/empty so they remain valid.
         if (isRequired && !string.IsNullOrWhiteSpace(defaultValue) && !existing.IsRequired)
@@ -299,8 +321,9 @@ public class UpdateFieldCommandHandler
             await _recordRepo.BackfillDefaultAsync(table, existing, defaultValue!, ct);
         }
 
-        // Search Index Sync: when search eligibility (IsSearchable || IsFilterable) changes, trigger a backfill or nullify
-        if (isEligible != wasEligible && existing.Fid.HasValue)
+        // Search Index Sync: when search eligibility (IsSearchable || IsFilterable) changes, trigger a backfill or nullify. Searchable
+        // alone changing on a field that stays filterable also rewrites the records: it adds or removes the field's text in quick search.
+        if ((isEligible != wasEligible || (isEligible && command.IsSearchable != wasSearchable)) && existing.Fid.HasValue)
         {
             await SyncSearchIndexAsync(table, existing.Fid.Value, isNullify: !isEligible, ct);
         }
@@ -329,31 +352,11 @@ public class UpdateFieldCommandHandler
             await _refIndexer.ReindexFieldAsync(existing.PublicId, ct);
     }
 
-    private async Task SyncSearchIndexAsync(AppTable table, int fid, bool isNullify, CancellationToken ct)
-    {
-        var plan = await PowerBase.Application.Search.FieldSlotSync.PlanAsync(_fieldRepo, table.Id, fid, isNullify, ct);
-
-        var docs = await _recordRepo.GetFieldBackfillBatchAsync(_queryContext.TenantId, table.AppId, table.Id, fid, isNullify, page: 1, pageSize: 500, ct);
-
-        if (docs.Count > 0 && plan.HasTarget)
-        {
-            await _searchService.BulkIndexRecordsAsync(PowerBase.Application.Search.FieldSlotSync.ToDocuments(docs, plan), ct);
-        }
-
-        // Switching this field on can push the table past what the shared index takes: start moving it to its own index.
-        await PowerBase.Application.Search.SearchWideMigration.StartIfNeededAsync(_fieldRepo, _messagePublisher, _searchService, _queryContext.TenantId, table.AppId, table.Id, ct);
-
-        var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
-        {
-            Action = isNullify ? PowerBase.Application.Common.Models.IndexAction.NullifyField : PowerBase.Application.Common.Models.IndexAction.BackfillField,
-            TenantId = _queryContext.TenantId,
-            AppId = table.AppId,
-            TableId = table.Id,
-            FieldId = fid,
-            Page = 1
-        };
-        _ = _messagePublisher.PublishAsync(msg, default);
-    }
+    /// <summary>The field is saved by now: this never throws, so the audit entry and formula reindex below still run if the index fails.</summary>
+    private Task SyncSearchIndexAsync(AppTable table, int fid, bool isNullify, CancellationToken ct) =>
+        PowerBase.Application.Search.FieldSlotSync.SyncAsync(
+            _fieldRepo, _recordRepo, _searchService, _messagePublisher, _queryContext.TenantId, table.AppId, table.Id, fid, isNullify,
+            clearSlot: null, (ex, message) => _logger?.LogError(ex, "{Message}", message), ct, _fieldJobs);
 
     private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }

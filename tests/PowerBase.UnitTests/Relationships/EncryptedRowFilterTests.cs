@@ -62,4 +62,30 @@ public class EncryptedRowFilterTests
         EncryptedRowFilter.TouchesEncrypted(Tree("and", (7, "eq", "x")), Fields, true).Should().BeTrue();
         EncryptedRowFilter.TouchesEncrypted(Tree("and", (3, "eq", "1")), Fields, true).Should().BeFalse();   // system field
     }
+
+    private static FilterGroup FieldCompare(long fid, long otherFid) => new()
+    {
+        Logic = "and",
+        Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = fid, Operator = "eq", ValueMode = "field", ValueFieldId = otherFid } }],
+    };
+
+    [Fact]
+    public void TouchesEncrypted_CountsTheOtherFieldOfAFieldComparison()
+    {
+        // Code (plain) is equal to the value in Name (encrypted): SQL would compare Code to ciphertext.
+        EncryptedRowFilter.TouchesEncrypted(FieldCompare(7, 6), Fields, false).Should().BeTrue();
+        EncryptedRowFilter.TouchesEncrypted(FieldCompare(7, 3), Fields, false).Should().BeFalse();
+    }
+
+    [Fact]
+    public void FieldComparison_ComparesTheDecryptedValuesOfTheSameRow()
+    {
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows =
+        [
+            new Dictionary<string, object?> { ["Id"] = 1L, ["f_6"] = "a", ["f_7"] = "a" },
+            new Dictionary<string, object?> { ["Id"] = 2L, ["f_6"] = "HR", ["f_7"] = "b" },
+        ];
+
+        EncryptedRowFilter.MatchingIds(rows, Fields, FieldCompare(7, 6)).Should().Equal(1L);
+    }
 }

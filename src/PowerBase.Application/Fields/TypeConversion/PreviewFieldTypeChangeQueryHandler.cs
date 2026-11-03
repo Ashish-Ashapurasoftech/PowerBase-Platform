@@ -39,6 +39,8 @@ public sealed class PreviewFieldTypeChangeQueryHandler
         FieldTypeChangeDryRunResult? dryRun = null;
         if (impact.Blockers.Count == 0)
             dryRun = await FieldTypeChangeDryRun.RunAsync(plan, _columns, SampleSize, ct);
+        if (impact.IsUniqueLocked && dryRun is not null && FieldTypeChangeAnalyzer.KeyDuplicatesBlocker(plan.Field, dryRun.DuplicateValues) is { } keyBlocker)
+            impact.Blockers.Add(keyBlocker);
 
         return new FieldTypeChangePreviewDto
         {

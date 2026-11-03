@@ -641,12 +641,21 @@ public sealed class ImportChunkWriter
         if (keyed.Count == 0) return [];
 
         var matches = _encryptedKeyIndex ?? await _store.FindRecordIdsAsync(_plan.Destination, _key, keyed.DistinctBy(k => k.Key, ImportKey.Comparer).Select(k => k.Row.Values[keyFid]!).ToList(), ct);
+        var onRecordId = ImportTypeCompatibility.IsRecordId(_key);
+        var found = new List<Row>(keyed.Count);
         foreach (var (row, key) in keyed)
         {
             row.MatchKey = key;
             if (matches.TryGetValue(key, out var recordId)) row.MatchedId = recordId;
+            else if (onRecordId)
+            {
+                // The Record ID# is assigned by the system: a row naming one that is not there is a mistake, not a new record.
+                Report(feedback, row, keyFid, ImportOutcome.Errored, ImportReason.RecordIdNotFound, $"No record has the Record ID# '{key}' in {_plan.Destination.Name}, so there is nothing to update.");
+                continue;
+            }
+            found.Add(row);
         }
-        return keyed.Select(k => k.Row).ToList();
+        return found;
     }
 
     /// <summary>Applies defaults, required checks, key handling and the table's data rule. Updates are checked only

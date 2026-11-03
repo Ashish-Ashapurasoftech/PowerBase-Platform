@@ -16,14 +16,51 @@ public sealed class ImportRowFilter
 {
     private readonly FilterGroup _tree;
     private readonly IReadOnlyDictionary<long, AppField> _fields;
+    // "does not have a duplicate": only a filter that has such a condition has an index (and so pays for one).
+    private readonly ImportDuplicateIndex? _duplicates;
+    private readonly List<long> _duplicateFids;
+    private bool _counting;
+
+    public const string NoDuplicateOperator = "noDuplicate";
 
     public ImportRowFilter(FilterGroup tree, IEnumerable<AppField> fields)
     {
         _tree = tree;
         _fields = fields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+        _duplicateFids = DuplicateFields(tree).Distinct().ToList();
+        if (_duplicateFids.Count > 0) _duplicates = new ImportDuplicateIndex();
     }
 
-    public bool Matches(IReadOnlyDictionary<string, object?> row) => MatchesGroup(_tree, row);
+    /// <summary>The fields a filter's "does not have a duplicate" conditions look at, in any group.</summary>
+    public static IEnumerable<long> DuplicateFields(FilterGroup? group)
+    {
+        if (group is null) yield break;
+        foreach (var node in group.Nodes)
+        {
+            if (node.Condition is { } c && string.Equals(c.Operator, NoDuplicateOperator, StringComparison.Ordinal)) yield return c.FieldId;
+            foreach (var inner in DuplicateFields(node.Group)) yield return inner;
+        }
+    }
+
+    /// <summary>The filter has a "does not have a duplicate" condition, so the source must be read once to count values before the rows are filtered.</summary>
+    public bool CountsDuplicates => _duplicates is not null;
+
+    /// <summary>Starts the counting pass: the duplicate conditions pass every row, and each row that passes the filter's other conditions is counted.</summary>
+    public void BeginCountingDuplicates() => _counting = _duplicates is not null;
+
+    /// <summary>Ends the counting pass: from now on a duplicate condition really filters.</summary>
+    public void FinishCountingDuplicates() => _counting = false;
+
+    public bool Matches(IReadOnlyDictionary<string, object?> row)
+    {
+        if (!_counting) return MatchesGroup(_tree, row);
+        // While counting, a duplicate condition passes the row; the rows that pass all the rest are the ones counted.
+        var passes = MatchesGroup(_tree, row);
+        if (passes) foreach (var fid in _duplicateFids) _duplicates!.Add(fid, CellValue(fid, row), RowId(row));
+        return passes;
+    }
+
+    private static long RowId(IReadOnlyDictionary<string, object?> row) => row.TryGetValue("Id", out var id) && id is not null ? Convert.ToInt64(id, CultureInfo.InvariantCulture) : 0;
 
     private bool MatchesGroup(FilterGroup group, IReadOnlyDictionary<string, object?> row)
     {
@@ -39,6 +76,8 @@ public sealed class ImportRowFilter
     {
         var cell = CellValue(c.FieldId, row);
         var op = c.Operator;
+        // A blank is never a duplicate; the first row of a repeated value passes only when the condition says to keep it.
+        if (op == NoDuplicateOperator) return _duplicates is null || _counting || _duplicates.IsKept(c.FieldId, cell, RowId(row), string.Equals(c.Value, "true", StringComparison.OrdinalIgnoreCase));
         if (op == "isEmpty") return IsBlank(cell);
         if (op == "isNotEmpty") return !IsBlank(cell);
 

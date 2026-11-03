@@ -342,7 +342,9 @@ public class AzureSearchService : IAzureSearchService
         var knownFields = _knownFieldsPerIndex.GetOrAdd(indexName, _ => new HashSet<string>(StringComparer.OrdinalIgnoreCase));
 
         // D21 Fast path: if all required slot fields are already known, avoid locking and remote calls
-        var neededFields = docs.SelectMany(d => d.SlotValues?.Keys ?? Enumerable.Empty<string>())
+        // Only columns with a value: a null cannot create a column (its type is unknown) and is skipped at write when the column is
+        // missing, so counting it would send every batch that clears one down the slow path below.
+        var neededFields = docs.SelectMany(d => d.SlotValues?.Where(kv => kv.Value != null).Select(kv => kv.Key) ?? Enumerable.Empty<string>())
             .Concat(docs.Any(d => d.SourceVersion.HasValue) ? new[] { "src_version" } : Array.Empty<string>())
             .Distinct().ToList();
         if (knownFields.Count > 0 && neededFields.All(f => knownFields.Contains(f)))
@@ -494,77 +496,8 @@ public class AzureSearchService : IAzureSearchService
                 await EnsureIndexAndFieldsExistAsync(indexName, dynamicFields, ct);
             }
 
-            var searchDocs = groupDocs.Select(doc => 
-            {
-                var searchDoc = new Dictionary<string, object>
-                {
-                    { "id", doc.PublicId.ToString() },
-                    { "tenantId", doc.TenantId.ToString() },
-                    { "appId", doc.AppId },
-                    { "tableId", doc.TableId },
-                    { "publicId", doc.PublicId.ToString() }
-                };
-
-                var textParts = new List<string>();
-
-                // Only into an index that has the column (an index created before it existed gets it added by the ensure step above).
-                if (doc.SourceVersion.HasValue
-                    && _knownFieldsPerIndex.TryGetValue(indexName, out var knownForVersion) && knownForVersion.Contains("src_version"))
-                {
-                    searchDoc["src_version"] = doc.SourceVersion.Value;
-                }
-
-                // Populate typed slot values if provided (for both standard shard slots and wide table native fields)
-                if (doc.SlotValues != null)
-                {
-                    _knownFieldsPerIndex.TryGetValue(indexName, out var knownInIndex);
-                    var isWideIndex = indexName.StartsWith("pb-tbl-", StringComparison.OrdinalIgnoreCase);
-                    foreach (var kvp in doc.SlotValues)
-                    {
-                        var isKnown = knownInIndex != null && knownInIndex.Contains(kvp.Key);
-
-                        // In standard shard, guard against phantom fields not in index
-                        if (!isWideIndex && kvp.Key.StartsWith("f_") && !isKnown) continue;
-
-                        if (kvp.Value == null)
-                        {
-                            // A cleared value must reach the column (an explicit null in a merge clears it). Without this a
-                            // number/date/boolean that is emptied, or switched off by NullifyField, keeps its old value in
-                            // the index. Only for columns the index really has: naming an unknown one fails the request.
-                            if (isKnown) searchDoc[kvp.Key] = null!;
-                            continue;
-                        }
-
-                        searchDoc[kvp.Key] = kvp.Value;
-                        // Only text the field owner marked searchable goes into the free-text field; a filterable-only
-                        // field keeps its value for filters but must not become findable by typing it.
-                        if ((kvp.Key.StartsWith("str_") || kvp.Key.StartsWith("f_"))
-                            && (doc.SearchTextSlots == null || doc.SearchTextSlots.Contains(kvp.Key)))
-                        {
-                            var s = kvp.Value.ToString();
-                            if (!string.IsNullOrWhiteSpace(s)) textParts.Add(s);
-                        }
-                    }
-                }
-                else
-                {
-                    // Legacy fallback when slot values not precomputed
-                    foreach (var kvp in doc.Values)
-                    {
-                        var fieldName = $"f_{kvp.Key}";
-                        searchDoc[fieldName] = FormatIndexValue(kvp.Value);
-                        var strVal = kvp.Value?.ToString();
-                        if (!string.IsNullOrWhiteSpace(strVal)) textParts.Add(strVal);
-                    }
-                }
-
-                if (textParts.Count > 0)
-                {
-                    searchDoc["search_content"] = string.Join(" ", textParts);
-                }
-
-                return searchDoc;
-            }).ToList();
+            _knownFieldsPerIndex.TryGetValue(indexName, out var knownInIndex);
+            var searchDocs = groupDocs.Select(doc => ToSearchDocument(doc, indexName, knownInIndex)).ToList();
 
             // D19: Chunk by count (max 500) and byte size (max 8 MB) to stay under the 16 MB request limit
             var batches = ChunkByCountAndBytes(searchDocs, maxCount: 500, maxBytes: 8 * 1024 * 1024);
@@ -584,6 +517,91 @@ public class AzureSearchService : IAzureSearchService
         }
 
         return allFailures;
+    }
+
+    /// <summary>The document sent to the index for one record. <paramref name="knownInIndex"/> is the columns the target index has (null
+    /// when not known yet): a null is only written to a column that exists, since naming an unknown one fails the request.</summary>
+    internal static Dictionary<string, object> ToSearchDocument(SearchIndexDocument doc, string indexName, IReadOnlySet<string>? knownInIndex)
+    {
+        var searchDoc = new Dictionary<string, object>
+        {
+            { "id", doc.PublicId.ToString() },
+            { "tenantId", doc.TenantId.ToString() },
+            { "appId", doc.AppId },
+            { "tableId", doc.TableId },
+            { "publicId", doc.PublicId.ToString() }
+        };
+
+        var textParts = new List<string>();
+
+        // Only into an index that has the column (an index created before it existed gets it added by the ensure step).
+        if (doc.SourceVersion.HasValue && knownInIndex != null && knownInIndex.Contains("src_version"))
+        {
+            searchDoc["src_version"] = doc.SourceVersion.Value;
+        }
+
+        // Populate typed slot values if provided (for both standard shard slots and wide table native fields)
+        if (doc.SlotValues != null)
+        {
+            var isWideIndex = indexName.StartsWith("pb-tbl-", StringComparison.OrdinalIgnoreCase);
+            foreach (var kvp in doc.SlotValues)
+            {
+                var isKnown = knownInIndex != null && knownInIndex.Contains(kvp.Key);
+
+                // In standard shard, guard against phantom fields not in index
+                if (!isWideIndex && kvp.Key.StartsWith("f_") && !isKnown) continue;
+
+                if (kvp.Value == null)
+                {
+                    // A cleared value must reach the column (an explicit null in a merge clears it). Without this a
+                    // number/date/boolean that is emptied, or switched off by NullifyField, keeps its old value in
+                    // the index. Only for columns the index really has: naming an unknown one fails the request.
+                    if (isKnown) searchDoc[kvp.Key] = null!;
+                    continue;
+                }
+
+                searchDoc[kvp.Key] = kvp.Value;
+                // Only text the field owner marked searchable goes into the free-text field; a filterable-only
+                // field keeps its value for filters but must not become findable by typing it. A complete document
+                // brings that text ready-made (SearchText), so its columns are not read for it.
+                if (doc.SearchText == null
+                    && (kvp.Key.StartsWith("str_") || kvp.Key.StartsWith("f_"))
+                    && (doc.SearchTextSlots == null || doc.SearchTextSlots.Contains(kvp.Key)))
+                {
+                    var s = kvp.Value.ToString();
+                    if (!string.IsNullOrWhiteSpace(s)) textParts.Add(s);
+                }
+            }
+        }
+        else
+        {
+            // Legacy fallback when slot values not precomputed
+            foreach (var kvp in doc.Values)
+            {
+                var fieldName = $"f_{kvp.Key}";
+                searchDoc[fieldName] = FormatIndexValue(kvp.Value);
+                var strVal = kvp.Value?.ToString();
+                if (!string.IsNullOrWhiteSpace(strVal)) textParts.Add(strVal);
+            }
+        }
+
+        if (doc.SearchText != null)
+        {
+            // Every searchable field of the record, numbers and dates included (the same text a check without the index uses).
+            searchDoc["search_content"] = doc.SearchText.Length > 0 ? doc.SearchText : null!;
+        }
+        else if (textParts.Count > 0)
+        {
+            searchDoc["search_content"] = string.Join(" ", textParts);
+        }
+        else if (doc.CompleteText && doc.SlotValues != null)
+        {
+            // The whole record was sent and none of its searchable text is left (cleared, switched off, deleted): empty the
+            // free-text field, or quick search keeps finding the old text. A partial document never empties it.
+            searchDoc["search_content"] = null!;
+        }
+
+        return searchDoc;
     }
 
     /// <summary>
@@ -774,45 +792,6 @@ public class AzureSearchService : IAzureSearchService
                 if (idsToDelete.Count < 500) break;
             }
         }
-    }
-
-    public async Task<IReadOnlyDictionary<Guid, long>> GetSourceVersionsAsync(
-        long tenantId, long tableId, string? indexName, IReadOnlyList<Guid> publicIds, CancellationToken ct = default)
-    {
-        var versions = new Dictionary<Guid, long>();
-        if (!_isEnabled || publicIds.Count == 0) return versions;
-
-        foreach (var idx in GetShardsForTable(tenantId, tableId, indexName))
-        {
-            var searchClient = GetSearchClient(idx);
-            foreach (var chunk in publicIds.Distinct().Chunk(500))
-            {
-                var options = new SearchOptions
-                {
-                    Filter = $"tenantId eq '{tenantId}' and search.in(id, '{string.Join(",", chunk)}', ',')",
-                    Size = chunk.Length
-                };
-                options.Select.Add("id");
-                options.Select.Add("src_version");
-                try
-                {
-                    var response = await searchClient.SearchAsync<SearchDocument>("*", options, cancellationToken: ct);
-                    await foreach (var result in response.Value.GetResultsAsync().WithCancellation(ct))
-                    {
-                        if (!Guid.TryParse(result.Document["id"]?.ToString(), out var id)) continue;
-                        if (result.Document.TryGetValue("src_version", out var v) && v != null)
-                            versions[id] = Math.Max(versions.TryGetValue(id, out var cur) ? cur : long.MinValue, Convert.ToInt64(v));
-                    }
-                }
-                catch (RequestFailedException ex) when (ex.Status is 404 or 400)
-                {
-                    // 404: the index does not exist yet. 400: it predates the src_version column. Either way nothing is known, so
-                    // the indexer reads the database instead of trusting a message.
-                    break;
-                }
-            }
-        }
-        return versions;
     }
 
     public async Task PurgeTableFromSharedIndexesAsync(long tenantId, long tableId, CancellationToken ct = default)
@@ -1233,13 +1212,6 @@ public class AzureSearchService : IAzureSearchService
         var formattedTerms = terms.Select(t => t.Length >= 3 ? $"({t}* OR {t})" : t);
 
         return string.Join(" AND ", formattedTerms);
-    }
-
-    public async Task EnsureTableSchemaAsync(long tenantId, long tableId, IEnumerable<(int Fid, bool IsSearchable, bool IsFilterable)> fields, CancellationToken ct = default)
-    {
-        if (!_isEnabled) return;
-        var indexName = GetWriteIndexNameForTenant(tenantId);
-        await EnsureIndexAndFieldsExistAsync(indexName, fields.Select(f => $"f_{f.Fid}"), ct);
     }
 
     private static object FormatIndexValue(object? val)

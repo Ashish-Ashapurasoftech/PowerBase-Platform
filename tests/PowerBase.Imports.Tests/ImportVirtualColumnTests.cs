@@ -262,31 +262,25 @@ public class ImportVirtualColumnTests
     };
 
     [Fact]
-    public async Task A_new_import_cannot_write_to_or_match_on_the_record_id()
+    public async Task A_merge_on_the_record_id_can_map_a_source_column_to_it()
     {
         var h = ImportHarness.Create(RecordIdConfig(), Rows());
+
         var plans = await h.PlanBuilder!.BuildAllAsync(RecordIdConfig(), ImportHarness.DestTableId, default);
 
-        ImportRecordIdRule.Problem(plans, new HashSet<(Guid, int)>()).Should().Contain("assigned by the system");
+        plans[0].MergeKey!.Fid.Should().Be(3);
+        plans[0].Mappings.Select(m => m.Destination.Fid).Should().Equal(3, 9);
     }
 
     [Fact]
-    public async Task An_import_that_already_used_the_record_id_keeps_working()
+    public async Task The_record_id_cannot_be_mapped_when_it_is_not_what_records_are_matched_on()
     {
-        var h = ImportHarness.Create(RecordIdConfig(), Rows());
-        var plans = await h.PlanBuilder!.BuildAllAsync(RecordIdConfig(), ImportHarness.DestTableId, default);
-        var legacy = ImportRecordIdRule.Used(RecordIdConfig(), ImportHarness.DestTableId);
-
-        ImportRecordIdRule.Problem(plans, legacy).Should().BeNull();
-    }
-
-    [Fact]
-    public async Task An_import_without_the_record_id_has_nothing_to_refuse()
-    {
-        var cfg = Config([], Field(6, 6), Field(9, 9));
+        var cfg = RecordIdConfig();
+        cfg.MergeKeyFid = 6;
         var h = ImportHarness.Create(cfg, Rows());
-        var plans = await h.PlanBuilder!.BuildAllAsync(cfg, ImportHarness.DestTableId, default);
 
-        ImportRecordIdRule.Problem(plans, new HashSet<(Guid, int)>()).Should().BeNull();
+        var act = () => h.PlanBuilder!.BuildAllAsync(cfg, ImportHarness.DestTableId, default);
+
+        (await act.Should().ThrowAsync<Exception>()).Which.ToString().Should().Contain("cannot be imported into");
     }
 }

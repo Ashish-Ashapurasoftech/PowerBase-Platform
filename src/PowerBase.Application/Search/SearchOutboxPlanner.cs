@@ -24,6 +24,9 @@ public sealed class SearchOutboxOptions
     public int DailySweepHourUtc { get; set; } = 2;
     /// <summary>A pending change older than this makes the health endpoint report Degraded.</summary>
     public int StaleAfterMinutes { get; set; } = 30;
+    /// <summary>A field job whose progress has not moved for this long is re-sent from where it stopped (its page was lost or dead-lettered).
+    /// Every page moves it, so only a job that really stopped waits this long; a duplicate run is harmless and stops at the next page.</summary>
+    public int FieldJobStalledMinutes { get; set; } = 10;
 }
 
 public static class SearchOutboxPlanner

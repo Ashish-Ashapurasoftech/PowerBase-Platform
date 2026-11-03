@@ -256,4 +256,91 @@ public class ImportFormulaValidationTests
 
         result.Diagnostics.Should().NotBeNull();
     }
+
+    // ---- variables ----
+
+    private static ImportVariable Var(string name, string value = "7") => new() { Name = name, Value = value };
+
+    [Fact]
+    public async Task A_formula_may_use_an_import_variable_in_a_table_and_in_a_file()
+    {
+        var table = await new Rig().Check(Table("[Name] & [var_sep]") with { Variables = [Var("var_sep", "|")] });
+        var file = await new Rig().Check(File("[First Name] & [var_sep]") with { Variables = [Var("var_sep", "|")] });
+
+        table.Valid.Should().BeTrue();
+        table.ResultType.Should().Be("Text");
+        file.Valid.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_variable_is_text_so_a_number_needs_a_conversion()
+    {
+        var number = await new Rig().Check(Table("ToNumber([var_rate]) * 2", "Number") with { Variables = [Var("var_rate")] });
+        var text = await new Rig().Check(Table("[var_rate]", "Number") with { Variables = [Var("var_rate")] });
+
+        number.Valid.Should().BeTrue();
+        text.Valid.Should().BeFalse("a variable is always text");
+    }
+
+    [Fact]
+    public async Task A_variable_that_is_not_in_the_import_is_an_unknown_field()
+    {
+        var result = await new Rig().Check(Table("[var_missing]") with { Variables = [Var("var_other")] });
+
+        result.Valid.Should().BeFalse();
+        result.Diagnostics.Should().Contain(d => d.Message.Contains("var_missing"));
+    }
+
+    [Fact]
+    public async Task A_virtual_column_formula_can_use_a_variable_and_so_can_a_formula_that_uses_that_column()
+    {
+        var virtuals = new List<ImportVirtualColumn> { Virtual(V1, "Tagged", "[Name] & [var_tag]") };
+
+        var result = await new Rig().Check(Table("[Tagged] & \"!\"", virtuals: virtuals) with { Variables = [Var("var_tag", "T")] });
+
+        result.Valid.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Without_variables_the_check_is_unchanged_and_a_broken_set_of_variables_is_simply_not_offered()
+    {
+        (await new Rig().Check(Table("[Name]"))).Valid.Should().BeTrue();
+        (await new Rig().Check(Table("[Name] & [var_x]") with { Variables = [Var("nope")] })).Valid.Should().BeFalse();
+    }
+
+    private static ImportVariable Calc(string name, string formula) => new() { Name = name, Kind = ImportVariables.Formula, Formula = formula };
+
+    [Fact]
+    public async Task A_formula_variable_is_typed_in_the_formulas_that_use_it()
+    {
+        var number = await new Rig().Check(Table("[var_rate] * 2", "Number") with { Variables = [Calc("var_rate", "2 + 3")] });
+        var date = await new Rig().Check(Table("[var_day]", "Date") with { Variables = [Calc("var_day", "Today()")] });
+
+        number.Valid.Should().BeTrue();
+        number.ResultType.Should().Be("Number");
+        date.Valid.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task The_formula_of_a_variable_has_no_source_columns_and_cannot_use_itself_but_can_use_the_others()
+    {
+        var variables = new List<ImportVariable> { Calc("var_a", "1"), Calc("var_b", "[var_a] + 1") };
+
+        var usesOther = await new Rig().Check(Table("[var_a] + 1") with { Variables = variables, OwnVariable = "var_b", SourceTableId = null });
+        var usesColumn = await new Rig().Check(Table("[Name]") with { Variables = variables, OwnVariable = "var_b" });
+        var usesItself = await new Rig().Check(Table("[var_b] + 1") with { Variables = variables, OwnVariable = "var_b" });
+
+        usesOther.Valid.Should().BeTrue();
+        usesColumn.Valid.Should().BeFalse("a variable is global: there is no row to read a column from");
+        usesItself.Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_variable_cannot_hold_a_duration_and_says_variable_not_virtual_column()
+    {
+        var result = await new Rig().Check(Table("Days(3)") with { OwnVariable = "var_l", SourceTableId = null });
+
+        result.Valid.Should().BeFalse();
+        result.Diagnostics.Should().Contain(d => d.Message.Contains("variable"));
+    }
 }

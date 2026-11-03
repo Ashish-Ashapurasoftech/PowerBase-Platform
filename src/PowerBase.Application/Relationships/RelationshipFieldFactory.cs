@@ -49,10 +49,11 @@ public sealed class RelationshipFieldFactory
     }
 
     /// <param name="isEncrypted">Marks the field's column as encrypted (needed when its values are copied raw from an encrypted column).</param>
+    /// <param name="explicitFid">Import only: the Fid to keep (a source field's number). Used when it is free and not reserved; otherwise the next free one.</param>
     /// <param name="hidden">Sets <c>IsHidden</c> (kept out of field lists) and keeps the field out of searches, sorts, filters and reports (it is also never auto-added to forms by this method).</param>
     public async Task<AppField> CreateAsync(
         AppTable table, string typeCode, string label, bool isRequired, object settingsObj, CancellationToken ct,
-        bool isEncrypted = false, bool hidden = false)
+        bool isEncrypted = false, bool hidden = false, int? explicitFid = null)
     {
         var fieldType = await _fieldTypeRepo.GetByCodeAsync(typeCode, ct) ?? throw new NotFoundException("FieldType", typeCode);
         var requestedLabel = label;
@@ -77,7 +78,7 @@ public sealed class RelationshipFieldFactory
         var defaults = typeCode == FormulaUrlTypeCode ? FieldAdvancedSettingsCapability.Resolve(typeCode, null) : null;
 
         var fid = await PowerBase.Application.Fields.FieldFidPolicy.ResolveAsync(
-            _fieldRepo, table.Id, requestedLabel, null, ct,
+            _fieldRepo, table.Id, requestedLabel, explicitFid, ct,
             useExpected: typeCode is nameof(Domain.Enums.FieldTypeCode.Lookup) or nameof(Domain.Enums.FieldTypeCode.Reference) or nameof(Domain.Enums.FieldTypeCode.Summary));
         var field = new AppField
         {

@@ -12,15 +12,22 @@ public class UpdateMyPreferencesCommandValidator : AbstractValidator<UpdateMyPre
 
     private static readonly HashSet<string> ValidAccents = new(StringComparer.OrdinalIgnoreCase)
     {
-        "indigo", "emerald", "cyan", "rose", "amber", "violet", "pink", "sky", "orange", "lime",
+        "indigo", "emerald", "cyan", "rose", "amber", "violet", "pink", "sky", "orange", "lime", "navy",
     };
 
     private static readonly HashSet<string> ValidFontSizes = new(StringComparer.OrdinalIgnoreCase) { "sm", "md", "lg" };
     private static readonly HashSet<string> ValidDensities = new(StringComparer.OrdinalIgnoreCase) { "compact", "comfortable", "spacious" };
     private static readonly HashSet<string> ValidBorderModes = new(StringComparer.OrdinalIgnoreCase) { "horizontal", "full-grid", "borderless" };
 
+    private static readonly HashSet<string> ValidSidebarStyles = new(StringComparer.OrdinalIgnoreCase) { "expanded", "collapsed", "mini", "floating" };
+    private static readonly HashSet<string> ValidNavPositions = new(StringComparer.OrdinalIgnoreCase) { "left", "top" };
+
     public UpdateMyPreferencesCommandValidator()
     {
+        RuleFor(x => x.Preferences.SidebarStyle).Must(v => ValidSidebarStyles.Contains(v!))
+            .When(x => x.Preferences.SidebarStyle is not null).WithMessage("Unknown sidebar style.");
+        RuleFor(x => x.Preferences.NavPosition).Must(v => ValidNavPositions.Contains(v!))
+            .When(x => x.Preferences.NavPosition is not null).WithMessage("Unknown navigation position.");
         RuleFor(x => x.Preferences.Theme).Must(v => ValidThemes.Contains(v!))
             .When(x => x.Preferences.Theme is not null).WithMessage("Unknown theme.");
         RuleFor(x => x.Preferences.Accent).Must(v => ValidAccents.Contains(v!))

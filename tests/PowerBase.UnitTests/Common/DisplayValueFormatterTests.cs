@@ -61,6 +61,12 @@ public class DisplayValueFormatterTests
     [InlineData(135.5, "{\"display\":\"HHMMSS\"}", "2:15:30")]
     [InlineData(90, "{\"display\":\"Hours\",\"decimals\":1}", "1.5 hrs")]
     [InlineData(2880, "{\"display\":\"Days\"}", "2 days")]
+    [InlineData(10080, null, "1 wk")]                                  // one of a unit reads singular
+    [InlineData(75, "{\"display\":\"Hours\"}", "1 hr")]
+    [InlineData(1440, "{\"display\":\"Days\"}", "1 day")]
+    [InlineData(10080, "{\"display\":\"Weeks\"}", "1 wk")]
+    [InlineData(1, "{\"display\":\"Minutes\"}", "1 min")]
+    [InlineData(210, "{\"display\":\"Hours\"}", "4 hrs")]
     public void Duration_MatchesFrontendDisplays(double minutes, string? settings, string expected) =>
         Fmt((decimal)minutes, "Duration", settings).Should().Be(expected);
 

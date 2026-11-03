@@ -1,5 +1,7 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Fields;
+using PowerBase.Application.Formulas;
 using PowerBase.Application.Imports;
 using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
@@ -34,8 +36,13 @@ public interface ISnapshotCaptureService
 public sealed class SnapshotCaptureService : ISnapshotCaptureService
 {
     private readonly IRelationalProjector _relational;
+    private readonly IFormulaProjector? _formulas;
 
-    public SnapshotCaptureService(IRelationalProjector relational) => _relational = relational;
+    public SnapshotCaptureService(IRelationalProjector relational, IFormulaProjector? formulas = null)
+    {
+        _relational = relational;
+        _formulas = formulas;
+    }
 
     public Task ApplyOnCreateAsync(AppTable table, IReadOnlyList<AppField> fields, IDictionary<long, object?> values, CancellationToken ct = default) =>
         ApplyOnCreateAsync(table, fields, [values], ct);
@@ -88,14 +95,17 @@ public sealed class SnapshotCaptureService : ISnapshotCaptureService
     private static List<AppField> SnapshotFields(IReadOnlyList<AppField> fields) =>
         fields.Where(f => f.SnapshotSourceFid.HasValue && f.Fid.HasValue && !f.IsDeleted).ToList();
 
-    /// <summary>Lookup values have no column: they are projected from the rows, only when some snapshot reads one.</summary>
+    /// <summary>Lookup and Formula values have no column: they are projected from the rows, only when some snapshot reads one.
+    /// Lookups first (a formula may read them), then the formulas on top — the same two steps a record read takes.</summary>
     private async Task<IReadOnlyList<IReadOnlyDictionary<long, object?>>?> ProjectIfNeededAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<AppField> snapshots,
         IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, CancellationToken ct)
     {
         var readsComputed = snapshots.Any(s =>
             fields.FirstOrDefault(f => f.Fid == s.SnapshotSourceFid) is { } src && PhysicalNaming.IsComputedTypeCode(src.TypeCode));
-        return readsComputed ? await _relational.ProjectAsync(table, fields, rows, ct) : null;
+        if (!readsComputed) return null;
+        var seed = await _relational.ProjectAsync(table, fields, rows, ct);
+        return _formulas is null ? seed : _formulas.Project(fields, rows, seed, table);
     }
 
     private static object? ValueFor(
@@ -114,9 +124,11 @@ public sealed class SnapshotCaptureService : ISnapshotCaptureService
         value = Unwrap(value);
         if (value is null or DBNull) return null;
 
-        // The same type: copied as it is. A compatible one (a number into a text field, …) goes through the import conversion.
-        if (string.Equals(FieldValueTypes.Of(source), snapshot.TypeCode, StringComparison.OrdinalIgnoreCase)) return value;
-        return ImportTypeCompatibility.TryConvert(value, snapshot, out var converted, out _) ? converted : null;
+        // The same type is copied as it is (a User field's stored id, a Multi-user field's list, a Duration …); a compatible one
+        // (a number into a text field, Percent into Number, …) is converted — see SnapshotTypeCompatibility.
+        var sourceType = FieldValueTypes.Of(source);
+        if (sourceType is null || string.Equals(sourceType, snapshot.TypeCode, StringComparison.OrdinalIgnoreCase)) return value;
+        return SnapshotTypeCompatibility.Convert(value, sourceType, snapshot.TypeCode);
     }
 
     private static object? Unwrap(object? value) => value is JsonElement e

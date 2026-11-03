@@ -389,6 +389,7 @@ builder.Services.AddScoped<IFieldVersionRepository, FieldVersionRepository>();
 builder.Services.AddScoped<IFieldTypeRepository, FieldTypeRepository>();
 builder.Services.AddScoped<IRecordRepository, RecordRepository>();
 builder.Services.AddScoped<ISearchOutbox, SearchOutboxRepository>();
+builder.Services.AddScoped<ISearchFieldJobs, SearchFieldJobRepository>();
 
 // Import (Table-to-Table / file) — see PowerBase.Application/Imports
 builder.Services.AddScoped<PowerBase.Application.Imports.IImportDefinitionRepository, PowerBase.Infrastructure.Imports.ImportDefinitionRepository>();
@@ -546,6 +547,8 @@ builder.Services.AddScoped<CreateAppRoleCommandHandler>();
 builder.Services.AddScoped<DeleteAppRoleCommandHandler>();
 builder.Services.AddScoped<UpdateAppRoleCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Apps.Commands.SetDefaultAppRole.SetDefaultAppRoleCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Apps.Commands.SetAppRoleHomePage.SetAppRoleHomePageCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Queries.ResolveHomePage.ResolveHomePageQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Apps.Queries.GetTablePermissions.GetTablePermissionsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Apps.Commands.UpdateTablePermissions.UpdateTablePermissionsCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Apps.Queries.GetFieldPermissions.GetFieldPermissionsQueryHandler>();
@@ -612,6 +615,8 @@ builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateSu
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.RemoveRelationshipField.RemoveRelationshipFieldCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateDisplayKey.UpdateDisplayKeyCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateReferenceFilter.UpdateReferenceFilterCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateProxyField.UpdateProxyFieldCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateParentLink.UpdateParentLinkCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.AddFormSection.AddRelationshipFormSectionCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.RelationshipFieldFactory>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.RelationshipKeyCarryOverService>();
@@ -621,6 +626,7 @@ builder.Services.AddHostedService<PowerBase.API.Workers.ReferenceRelinkWorker>()
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.RelationshipQueriesHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetParentOptionsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.IsParentAllowedQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetParentRecordQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetChildRecordsForParentQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Commands.SetKey.SetKeyCommandHandler>();
 builder.Services.AddScoped<CreateReportCommandHandler>();
@@ -631,6 +637,7 @@ builder.Services.AddScoped<PowerBase.Application.Reports.DeleteJobs.RecordDelete
 builder.Services.AddHostedService<PowerBase.API.Workers.RecordDeleteJobWorker>();
 builder.Services.AddScoped<PowerBase.Application.Fields.SnapshotJobs.IFieldSnapshotJobRepository, PowerBase.Infrastructure.Repositories.FieldSnapshotJobRepository>();
 builder.Services.AddScoped<PowerBase.Application.Fields.SnapshotJobs.FieldSnapshotJobProcessor>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.LookupResultTypeRepairService>();
 builder.Services.AddScoped<PowerBase.Application.Fields.SnapshotJobs.FieldSnapshotJobService>();
 builder.Services.AddHostedService<PowerBase.API.Workers.FieldSnapshotJobWorker>();
 builder.Services.AddScoped<DeleteReportCommandHandler>();

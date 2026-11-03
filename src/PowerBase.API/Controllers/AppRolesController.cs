@@ -6,6 +6,8 @@ using PowerBase.Application.Apps.Commands.CreateAppRole;
 using PowerBase.Application.Apps.Commands.DeleteAppRole;
 using PowerBase.Application.Apps.Commands.UpdateAppRole;
 using PowerBase.Application.Apps.Commands.SetDefaultAppRole;
+using PowerBase.Application.Apps.Commands.SetAppRoleHomePage;
+using PowerBase.API.Models.Pages;
 using PowerBase.Application.Apps.Commands.UpdateTablePermissions;
 using PowerBase.Application.Apps.Commands.UpdateFieldPermissions;
 using PowerBase.Application.Apps.Commands.UpdateRecordFilters;
@@ -30,6 +32,7 @@ public class AppRolesController : ControllerBase
     private readonly UpdateAppRoleCommandHandler _updateHandler;
     private readonly DeleteAppRoleCommandHandler _deleteHandler;
     private readonly SetDefaultAppRoleCommandHandler _setDefaultHandler;
+    private readonly SetAppRoleHomePageCommandHandler _setHomePageHandler;
     private readonly GetTablePermissionsQueryHandler _getTablePermsHandler;
     private readonly UpdateTablePermissionsCommandHandler _updateTablePermsHandler;
     private readonly GetFieldPermissionsQueryHandler _getFieldPermsHandler;
@@ -43,6 +46,7 @@ public class AppRolesController : ControllerBase
         UpdateAppRoleCommandHandler updateHandler,
         DeleteAppRoleCommandHandler deleteHandler,
         SetDefaultAppRoleCommandHandler setDefaultHandler,
+        SetAppRoleHomePageCommandHandler setHomePageHandler,
         GetTablePermissionsQueryHandler getTablePermsHandler,
         UpdateTablePermissionsCommandHandler updateTablePermsHandler,
         GetFieldPermissionsQueryHandler getFieldPermsHandler,
@@ -55,6 +59,7 @@ public class AppRolesController : ControllerBase
         _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
         _setDefaultHandler = setDefaultHandler;
+        _setHomePageHandler = setHomePageHandler;
         _getTablePermsHandler = getTablePermsHandler;
         _updateTablePermsHandler = updateTablePermsHandler;
         _getFieldPermsHandler = getFieldPermsHandler;
@@ -80,6 +85,7 @@ public class AppRolesController : ControllerBase
             ManageableRolesType = r.ManageableRolesType,
             Rank = r.Rank,
             ManageableRolePublicIds = r.ManageableRolePublicIds,
+            HomePagePublicId = r.HomePagePublicId,
         }).ToList();
         return Ok(new ApiResponse<IReadOnlyList<AppRoleResponse>>(response));
     }
@@ -155,6 +161,19 @@ public class AppRolesController : ControllerBase
     public async Task<IActionResult> SetDefault([FromRoute] Guid appId, [FromRoute] Guid rolePublicId, CancellationToken ct)
     {
         await _setDefaultHandler.HandleAsync(new SetDefaultAppRoleCommand(appId, rolePublicId), ct);
+        return NoContent();
+    }
+
+    /// <summary>Set (or clear, with a null PagePublicId) the Dashboard this role lands on as its app home.</summary>
+    [HttpPut("{rolePublicId:guid}/home-page")]
+    [RequireAppPermission(PermissionCodes.RolesManage, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> SetHomePage(
+        [FromRoute] Guid appId, [FromRoute] Guid rolePublicId, [FromBody] SetRoleHomePageRequest request, CancellationToken ct)
+    {
+        await _setHomePageHandler.HandleAsync(new SetAppRoleHomePageCommand(appId, rolePublicId, request.PagePublicId), ct);
         return NoContent();
     }
 

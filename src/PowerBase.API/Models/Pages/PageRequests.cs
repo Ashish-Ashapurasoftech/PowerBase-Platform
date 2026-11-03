@@ -54,6 +54,12 @@ public class BulkDeletePagesRequest
     public List<Guid> PublicIds { get; set; } = [];
 }
 
+public class SetRoleHomePageRequest
+{
+    /// <summary>Null clears the role's home page.</summary>
+    public Guid? PagePublicId { get; set; }
+}
+
 public class SetDefaultHomeRequest
 {
     /// <summary>Null clears the app's default home page.</summary>

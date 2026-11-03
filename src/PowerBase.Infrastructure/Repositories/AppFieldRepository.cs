@@ -312,12 +312,9 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         WHERE PublicId IN @publicIds AND AppTableId = @tableId AND IsSystem = 0 AND IsDeleted = 0
         """;
 
-    private readonly IAzureSearchService _searchService;
-
-    public AppFieldRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IAzureSearchService searchService)
+    public AppFieldRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext)
     {
-        _searchService = searchService;
     }
 
     public async Task<AppField> GetByIdInTableAsync(long fieldId, long tableId, CancellationToken ct = default)
@@ -382,6 +379,53 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             await tx.RollbackAsync(CancellationToken.None);
             throw;
         }
+    }
+
+    // Only a deleted field, and only while it still holds the column the cleanup emptied (compare-and-set, like slot allocation).
+    private const string ReleaseDeletedFieldSlotSql = """
+        UPDATE meta.AppField SET SearchSlot = NULL
+        WHERE AppTableId = @tableId AND Fid = @fid AND IsDeleted = 1 AND SearchSlot = @slot
+        """;
+
+    private const string ReleaseDeletedFieldSlotsSql = """
+        UPDATE meta.AppField SET SearchSlot = NULL, SearchSlotEnd = NULL
+        WHERE AppTableId = @tableId AND Fid = @fid AND IsDeleted = 1 AND SearchSlot = @slot
+        """;
+
+    // A table's own (wide) index has one column per field and no pool to give back: only shared-index slots are listed.
+    private const string ListDeletedSlotHoldersSql = """
+        SELECT af.Id, af.AppTableId, af.Fid, af.IsDeleted, af.SearchSlot, af.SearchSlotEnd, ft.Code AS TypeCode
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId AND af.IsDeleted = 1 AND af.Fid IS NOT NULL
+          AND af.SearchSlot IS NOT NULL AND af.SearchSlot NOT LIKE 'f[_]%'
+        """;
+
+    private const string ListDeletedSlotHolderSql = """
+        SELECT af.Id, af.AppTableId, af.Fid, af.IsDeleted, af.SearchSlot, ft.Code AS TypeCode
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId AND af.IsDeleted = 1 AND af.Fid IS NOT NULL
+          AND af.SearchSlot IS NOT NULL AND af.SearchSlot NOT LIKE 'f[_]%'
+        """;
+
+    public async Task<int> ReleaseDeletedFieldSlotAsync(long tableId, long fid, string slot, CancellationToken ct = default)
+    {
+        if (PowerBase.Application.Search.SearchSlotResolver.IsWideSlot(slot)) return 0;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var columns = await GetSlotColumnsAsync(connection, ct);
+        if (columns is SlotColumns.None or SlotColumns.Unknown) return 0;
+        return await connection.ExecuteAsync(new CommandDefinition(
+            columns == SlotColumns.Both ? ReleaseDeletedFieldSlotsSql : ReleaseDeletedFieldSlotSql, new { tableId, fid, slot }, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyList<AppField>> ListDeletedSlotHoldersAsync(long tableId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var columns = await GetSlotColumnsAsync(connection, ct);
+        if (columns is SlotColumns.None or SlotColumns.Unknown) return [];
+        return (await connection.QueryAsync<AppField>(new CommandDefinition(
+            columns == SlotColumns.Both ? ListDeletedSlotHoldersSql : ListDeletedSlotHolderSql, new { tableId }, cancellationToken: ct))).AsList();
     }
 
     public async Task MarkTableWideAsync(long tableId, CancellationToken ct = default)
@@ -585,11 +629,10 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
                 displayOrder = field.DisplayOrder,
                 createdBy = QueryContext.UserId,
             }, cancellationToken: ct));
-        var result = ((long)row.Id, (Guid)row.PublicId);
-        var tenantId = QueryContext.TenantId;
-        _ = Task.Run(() => _searchService.EnsureTableSchemaAsync(tenantId, field.AppTableId, new[] { (field.Fid!.Value, field.IsSearchable, field.IsFilterable) }, default));
-        
-        return result;
+        // No index column is added here: fields are stored in the shared index's fixed slot columns (or, for a table with its own
+        // index, in columns created on first write). The f_{fid} column this used to add to the shared index was never written or read,
+        // and one per field ever created ran the index toward the service's column limit.
+        return ((long)row.Id, (Guid)row.PublicId);
     }
 
     public async Task UpdatePhysicalColumnNameAsync(long id, string physicalColumnName, CancellationToken ct = default)
@@ -695,38 +738,12 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             modifiedBy = QueryContext.UserId,
         };
 
-        int affected;
-        IDbConnection connection;
-        SqlConnection? ownConnection = null;
+        // No index column is added on update either (see CreateAsync): the field's slot is allocated by the search sync that follows.
         if (transaction is not null)
-        {
-            connection = transaction.Connection!;
-            affected = await connection.ExecuteAsync(new CommandDefinition(UpdateFieldSql, parameters, transaction, cancellationToken: ct));
-        }
-        else
-        {
-            ownConnection = await ConnectionFactory.CreateAsync(ct);
-            connection = ownConnection;
-            affected = await connection.ExecuteAsync(new CommandDefinition(UpdateFieldSql, parameters, cancellationToken: ct));
-        }
+            return await transaction.Connection!.ExecuteAsync(new CommandDefinition(UpdateFieldSql, parameters, transaction, cancellationToken: ct));
 
-        try
-        {
-            if (affected > 0)
-            {
-                var fid = await connection.ExecuteScalarAsync<int>(
-                    new CommandDefinition("SELECT Fid FROM meta.AppField WHERE PublicId = @publicId AND AppTableId = @tableId", new { publicId, tableId }, transaction, cancellationToken: ct));
-                var tenantId = QueryContext.TenantId;
-                _ = Task.Run(() => _searchService.EnsureTableSchemaAsync(tenantId, tableId, new[] { (fid, isSearchable, isFilterable) }, default));
-            }
-        }
-        finally
-        {
-            if (ownConnection is not null)
-                await ownConnection.DisposeAsync();
-        }
-
-        return affected;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteAsync(new CommandDefinition(UpdateFieldSql, parameters, cancellationToken: ct));
     }
 
     public async Task<int> DeleteAsync(Guid publicId, long tableId, CancellationToken ct = default, IDbTransaction? transaction = null)

@@ -18,6 +18,12 @@ public class CreateReportRequest
     /// <summary>Up to 3 report-only calculated columns (see ReportFormulaFields). Table reports: custom columns only.</summary>
     public List<ReportFormulaRequest> ReportFormulas { get; set; } = [];
 
+    /// <summary>Summary/Chart only: the named aggregates (field + Summarize-by + name) that summary formulas read.</summary>
+    public List<SummaryVariableRequest> SummaryVariables { get; set; } = [];
+
+    /// <summary>Summary/Chart only: up to 3 virtual columns calculated per group from the summary variables.</summary>
+    public List<SummaryFormulaRequest> SummaryFormulas { get; set; } = [];
+
     /// <summary>Legacy — never actually applied to Summary/Chart reports (RunSummaryAsync never
     /// receives it). Kept only so old JSON deserializes without data loss; Summary's real sort is
     /// SummarySortFields below.</summary>
@@ -71,6 +77,24 @@ public class ReportFormulaRequest
     public string Name { get; set; } = string.Empty;
     public string TypeCode { get; set; } = "Formula_Text";
     public string? DisplayAs { get; set; }
+    public string Expression { get; set; } = string.Empty;
+}
+
+public class SummaryVariableRequest
+{
+    public long FieldId { get; set; }
+    public string Function { get; set; } = "Sum";
+    public string Name { get; set; } = string.Empty;
+}
+
+public class SummaryFormulaRequest
+{
+    /// <summary>Reserved id (2000000101 to 2000000103) that aggregations and sorts use to refer to this formula.</summary>
+    public long Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string TypeCode { get; set; } = "Formula_Number";
+    public string? DisplayAs { get; set; }
+    public int? DecimalPlaces { get; set; }
     public string Expression { get; set; } = string.Empty;
 }
 

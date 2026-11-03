@@ -46,6 +46,27 @@ public class FieldTypeConversionMatrixTests
         targets.Should().BeEquivalentTo(["Number", "Currency", "Percent", "Rating", "Date"]);
     }
 
+    [Fact]
+    public void GetAllowedTargets_UniqueLockedKey_OnlyTypesThatCanBeUnique()
+    {
+        // A table key with no relationship: any type, as long as it can stay unique.
+        var targets = FieldTypeConversionMatrix.GetAllowedTargets("Text", new FieldConversionConstraints(IsUniqueLocked: true))
+            .Select(t => t.TargetTypeCode).ToList();
+
+        targets.Should().Contain(["Number", "Date", "SingleSelect"]);
+        targets.Should().NotContain(["TextMultiLine", "RichText", "Boolean", "Phone", "Url", "File", "Duration"]);
+        targets.Should().NotContain(t => FieldTypeConversionMatrix.IsFormula(t));
+    }
+
+    [Fact]
+    public void KeyDuplicatesBlocker_OnlyWhenValuesRepeat()
+    {
+        var field = new PowerBase.Domain.Entities.AppField { Name = "f_7", Label = "Department Code" };
+
+        FieldTypeChangeAnalyzer.KeyDuplicatesBlocker(field, 0).Should().BeNull();
+        FieldTypeChangeAnalyzer.KeyDuplicatesBlocker(field, 3).Should().Contain("'Department Code' is a key").And.Contain("3 converted value(s)");
+    }
+
     [Theory]
     [InlineData("Number", "Text", ConversionKind.ScalarToScalar, DataLossLevel.None)]
     [InlineData("Text", "Number", ConversionKind.ScalarToScalar, DataLossLevel.Possible)]

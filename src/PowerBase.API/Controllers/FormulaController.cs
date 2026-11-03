@@ -31,7 +31,9 @@ public class FormulaController : ControllerBase
     public async Task<IActionResult> Validate(Guid tableId, [FromBody] ValidateFormulaRequest request, CancellationToken ct)
     {
         var result = await _validateHandler.HandleAsync(
-            new ValidateFormulaQuery(tableId, request.Expression, request.ExpectedType), ct);
+            new ValidateFormulaQuery(
+                tableId, request.Expression, request.ExpectedType,
+                request.SummaryVariables?.Select(v => new PowerBase.Application.Reports.SummaryVariable { FieldId = v.FieldId, Function = v.Function, Name = v.Name }).ToList()), ct);
         return Ok(new ApiResponse<ValidateFormulaResult>(result));
     }
 

@@ -10,4 +10,6 @@ public class AppRoleResponse
     public string ManageableRolesType { get; init; } = "None";
     public int? Rank { get; init; }
     public IReadOnlyList<Guid> ManageableRolePublicIds { get; init; } = Array.Empty<Guid>();
+    /// <summary>Dashboard page this role lands on as its app home; null = the app default.</summary>
+    public Guid? HomePagePublicId { get; init; }
 }

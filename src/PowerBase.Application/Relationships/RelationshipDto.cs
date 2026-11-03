@@ -10,7 +10,12 @@ public sealed class RelationshipDto
     public string ChildTableName { get; init; } = string.Empty;
     public int ReferenceFid { get; init; }
     public string ReferenceFieldName { get; init; } = string.Empty;
+    /// <summary>Fid of the reference proxy (a lookup of this relationship or a formula field on the child table), or
+    /// null when there is none. Mirrors <see cref="Relationship.ProxyFieldId"/>.</summary>
     public int? ProxyFid { get; init; }
+    /// <summary>Label of the reference proxy field, or null. A formula proxy is not one of <see cref="Fields"/>
+    /// (it isn't a relationship field), so this is how the client names it.</summary>
+    public string? ProxyFieldName { get; init; }
     /// <summary>
     /// Fid of the parent field used as the display key in the reference picker, or null for the
     /// standard key (Record ID# / table global KeyFieldId). Mirrors <see cref="Relationship.DisplayKeyFieldId"/>.

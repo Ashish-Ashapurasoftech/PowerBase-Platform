@@ -61,9 +61,9 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
         var hasDigest = !isRecordId && await conn.ExecuteScalarAsync<int?>(new CommandDefinition(
             "SELECT COL_LENGTH(@table, @column)", new { table = tableName, column = digestColumn }, cancellationToken: ct)) is not null;
 
-        // The Record ID# is numeric: values that are not whole numbers cannot match any record.
+        // The Record ID# is numeric: values that are not whole numbers, or are outside what an id can be, cannot match any record.
         IEnumerable<object> lookup = isRecordId
-            ? values.Select(v => decimal.TryParse(ImportKey.Normalize(v), NumberStyles.Number, CultureInfo.InvariantCulture, out var d) && d == decimal.Truncate(d) ? (object)(long)d : null!)
+            ? values.Select(v => decimal.TryParse(ImportKey.Normalize(v), NumberStyles.Number, CultureInfo.InvariantCulture, out var d) && d == decimal.Truncate(d) && d >= 1 && d <= long.MaxValue ? (object)(long)d : null!)
                 .Where(v => v is not null)
             : values;
 

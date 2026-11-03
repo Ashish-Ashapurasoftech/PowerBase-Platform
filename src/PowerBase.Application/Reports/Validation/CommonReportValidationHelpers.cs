@@ -121,7 +121,8 @@ public static class CommonReportValidationHelpers
     {
         foreach (var agg in aggregations)
         {
-            if (!AllowedAggregateFunctions.Contains(agg.Function))
+            var isSummaryFormula = SummaryFormulaFields.IsSummaryFormulaFid(agg.FieldId) && agg.Function == SummaryFormulaFields.AggregationFunction;
+            if (!isSummaryFormula && !AllowedAggregateFunctions.Contains(agg.Function))
                 AddError(errors, "aggregations", $"Invalid function '{agg.Function}'. Allowed: {string.Join(", ", AllowedAggregateFunctions)}");
             if (!validFieldIds.Contains(agg.FieldId))
                 AddError(errors, "aggregations", $"Unknown field ID in aggregation: {agg.FieldId}");

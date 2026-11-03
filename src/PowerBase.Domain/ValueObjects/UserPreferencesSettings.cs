@@ -14,4 +14,6 @@ public class UserPreferencesSettings
     public string? Density { get; set; }
     public int? PageSize { get; set; }
     public string? BorderMode { get; set; }
+    public string? SidebarStyle { get; set; }
+    public string? NavPosition { get; set; }
 }

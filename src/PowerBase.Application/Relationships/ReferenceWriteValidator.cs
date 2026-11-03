@@ -70,7 +70,8 @@ public static class ReferenceWriteValidator
                 fid => fid,
                 fid => { TryControlling(fid, out var v); return InvariantText(v); });
             var parentFields = await fieldRepo.ListByTableAsync(parent.Id, ct);
-            var clauses = await ReferenceFilterResolver.BuildAsync(settings, fields, parentFields, formValues, tableRepo, fieldRepo, ct);
+            var clauses = await ReferenceFilterResolver.BuildAsync(settings, fields, parentFields, formValues, tableRepo, fieldRepo, ct,
+                relRepo: relRepo, recordRepo: recordRepo);
             if (clauses.Count == 0) return;   // nothing applicable to this submission
             if (!await recordRepo.MatchesReferenceFilterAsync(parent, parentRowId, clauses, ct))
                 throw new ValidationException(new Dictionary<string, string[]>

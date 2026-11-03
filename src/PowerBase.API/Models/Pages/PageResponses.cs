@@ -1,5 +1,13 @@
 namespace PowerBase.API.Models.Pages;
 
+public class ResolvedHomePageResponse
+{
+    /// <summary>Null = no home Dashboard; show the built-in app dashboard.</summary>
+    public Guid? PageId { get; set; }
+    /// <summary>Role | App | None.</summary>
+    public string Source { get; set; } = "None";
+}
+
 public class PageListItemResponse
 {
     public Guid Id { get; set; }

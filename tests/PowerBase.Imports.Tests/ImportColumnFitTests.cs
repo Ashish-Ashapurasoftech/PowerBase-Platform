@@ -141,6 +141,21 @@ public class ImportColumnFitTests
     }
 
     [Fact]
+    public async Task A_column_of_whole_numbers_can_be_chosen_for_the_record_id_by_hand_but_never_matches_it_by_heading()
+    {
+        var recordId = F(3, "Record ID#", "Number", system: true);
+        recordId.PhysicalColumnName = "Id";
+        Fields(recordId, F(6, "Name", "Text"));
+
+        var columns = await Fit(Csv("Id,Record ID#,Name,Mixed\n1,1,Ann,C-1\n2,2,Bob,7\n"));
+
+        Of(columns, "Id").FitsFields.Should().Contain(3);
+        Of(columns, "Mixed").FitsFields.Should().Contain(3); // some values are numbers: the run reports the others row by row
+        Of(columns, "Name").FitsFields.Should().NotContain(3);
+        Of(columns, "Record ID#").FieldFid.Should().BeNull();
+    }
+
+    [Fact]
     public async Task Of_several_fields_that_read_alike_the_one_spelled_like_the_heading_wins()
     {
         Fields(F(6, "Employee-ID", "Text"), F(7, "Employee ID", "Text"));

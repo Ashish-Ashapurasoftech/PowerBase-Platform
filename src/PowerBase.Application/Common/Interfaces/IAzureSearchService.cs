@@ -36,7 +36,6 @@ public interface IAzureSearchService
         long tenantId, long tableId, string? searchText, string? odataFilter, int page, int pageSize,
         IReadOnlyList<string>? orderBy = null, string? indexName = null, CancellationToken ct = default);
     Task<(IReadOnlyList<GlobalSearchResult> Items, long? TotalCount)> SearchGlobalAsync(long tenantId, string searchText, long? appId = null, int page = 1, int pageSize = 50, CancellationToken ct = default);
-    Task EnsureTableSchemaAsync(long tenantId, long tableId, IEnumerable<(int Fid, bool IsSearchable, bool IsFilterable)> fields, CancellationToken ct = default);
     Task PurgeTableRecordsAsync(long tenantId, long tableId, CancellationToken ct = default);
 
     /// <summary>Removes the table's documents from the shared index(es) only, leaving its own index (if any) alone. Used once a table has been moved to its own index.</summary>
@@ -48,8 +47,6 @@ public interface IAzureSearchService
     /// <summary>Whether the table may have its own index: it already has one, or the configured budget of such indexes (they count against the service's index limit) is not used up.</summary>
     Task<bool> CanUseWideIndexAsync(long tableId, CancellationToken ct = default);
 
-    /// <summary>The source version last written for each record that is in the index (records not in the index, or written before versions existed, are absent).</summary>
-    Task<IReadOnlyDictionary<Guid, long>> GetSourceVersionsAsync(long tenantId, long tableId, string? indexName, IReadOnlyList<Guid> publicIds, CancellationToken ct = default);
     Task PurgeAppRecordsAsync(long tenantId, long appId, CancellationToken ct = default);
     Task ResetIndexAsync(string? indexName = null, CancellationToken ct = default);
     Task<bool> CreateIndexAsync(string? indexName = null, bool force = false, CancellationToken ct = default);
@@ -67,6 +64,11 @@ public record AiSearchIdPage(IReadOnlyList<Guid> Ids, string NextCursor)
 
 public record GlobalSearchResult(Guid PublicId, long AppId, long TableId, IReadOnlyDictionary<string, string> Fields);
 
+/// <param name="CompleteText">True when <see cref="SlotValues"/> holds every indexed value of the record (read from the database), so
+/// the free-text field is rebuilt from it, and emptied when no searchable text is left. False for a document that carries only some
+/// fields: the free-text field is then only ever set, never emptied, because part of a record cannot tell what the rest holds.</param>
+/// <param name="SearchText">The record's whole searchable text (see Search.SearchText), set on a complete document: the free-text field is
+/// exactly this. Null on a partial document, whose free-text comes from its searchable text columns.</param>
 public record SearchIndexDocument(
     long TenantId,
     long AppId,
@@ -76,7 +78,9 @@ public record SearchIndexDocument(
     IReadOnlyDictionary<string, object?>? SlotValues = null,
     string? CustomIndexName = null,
     IReadOnlySet<string>? SearchTextSlots = null,
-    long? SourceVersion = null);
+    long? SourceVersion = null,
+    bool CompleteText = false,
+    string? SearchText = null);
 
 /// <summary>One document Azure AI Search rejected or could not take. <see cref="Retryable"/> is true for 409/422/429/503.</summary>
 public record SearchIndexFailure(string Key, int Status, string? Error, bool Retryable);

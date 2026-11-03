@@ -18,7 +18,9 @@ public sealed record SearchTableSlotInfo(
     string? TargetIndex,
     IReadOnlySet<string> SearchTextSlots,
     IReadOnlyDictionary<long, SlotRef>? WideSlotMap,
-    IReadOnlySet<string>? WideSearchTextSlots)
+    IReadOnlySet<string>? WideSearchTextSlots,
+    IReadOnlySet<long> EligibleFids,
+    IReadOnlyList<(long Fid, string? TypeCode)> SearchTextFields)
 {
     /// <summary>The table has outgrown the shared index and is being moved: every write goes to both indexes until the move ends.</summary>
     public bool MigratingToWide => WideSlotMap != null;
@@ -35,6 +37,9 @@ public sealed record SearchTableSlotInfo(
         var stored = new Dictionary<long, SlotRef>();
         var searchText = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var allFids = new HashSet<long>();
+        var eligibleFids = new HashSet<long>();
+        // Every Searchable field's text goes into quick search, whatever its type and whether or not it got a column of its own.
+        var searchTextFields = new List<(long Fid, string? TypeCode)>();
         var wideMap = migrating ? new Dictionary<long, SlotRef>() : null;
         var wideSearchText = migrating ? new HashSet<string>(StringComparer.OrdinalIgnoreCase) : null;
 
@@ -51,6 +56,9 @@ public sealed record SearchTableSlotInfo(
                 stored[fid] = new SlotRef(f.SearchSlot!, f.TypeCode, f.SearchSlotEnd);
 
             if (!SearchSlotResolver.IsSearchEligible(f)) continue;
+            eligibleFids.Add(fid);
+            if (f.IsSearchable && !PowerBase.Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode))
+                searchTextFields.Add((fid, f.TypeCode));
 
             if (migrating)
             {
@@ -76,7 +84,7 @@ public sealed record SearchTableSlotInfo(
         return new SearchTableSlotInfo(
             mapped, stored, allFids, isWide,
             isWide ? SearchSlotResolver.GetTableIndexName(tableId) : null,
-            searchText, wideMap, wideSearchText);
+            searchText, wideMap, wideSearchText, eligibleFids, searchTextFields);
     }
 }
 
@@ -86,22 +94,60 @@ public static class SearchIndexDocumentBuilder
     /// <summary>
     /// One document for the table's current index, plus a second one for its own index while the table is migrating to wide.
     /// <paramref name="values"/> maps field number to the plain (decrypted) value; a field absent from it is left untouched in
-    /// the index, a null clears it.
+    /// the index, a null clears it. Pass <paramref name="complete"/> only when <paramref name="values"/> holds every indexed field
+    /// of the record (a database read): the free-text field is then rebuilt from it instead of only ever being added to.
     /// </summary>
     public static IReadOnlyList<SearchIndexDocument> Build(
         SearchTableSlotInfo info, long tenantId, long appId, long tableId, Guid publicId,
-        IReadOnlyDictionary<long, object?> values, long? sourceVersion)
+        IReadOnlyDictionary<long, object?> values, long? sourceVersion, bool complete = false)
     {
+        // The whole record's searchable text, the same for the shared index and the table's own one (numbers and dates included).
+        var text = complete ? SearchText.Join(info.SearchTextFields, values) : null;
         var docs = new List<SearchIndexDocument>(2)
         {
-            new(tenantId, appId, tableId, publicId, values, Slots(info.SlotMap, values), info.TargetIndex, info.SearchTextSlots, sourceVersion)
+            new(tenantId, appId, tableId, publicId, values, Slots(info.SlotMap, values), info.TargetIndex, info.SearchTextSlots, sourceVersion, complete, text)
         };
 
         if (info.MigratingToWide)
             docs.Add(new SearchIndexDocument(tenantId, appId, tableId, publicId, values, Slots(info.WideSlotMap!, values),
-                info.WideIndexName(tableId), info.WideSearchTextSlots, sourceVersion));
+                info.WideIndexName(tableId), info.WideSearchTextSlots, sourceVersion, complete, text));
 
         return docs;
+    }
+
+    /// <summary>A field's index column(s) to empty when its records are rewritten: the field was switched off, deleted, or moved to
+    /// another column by a type change. <see cref="Slot"/> is null when only the field's column in its own (wide) index applies.</summary>
+    public sealed record FieldColumnClear(long Fid, SlotRef? Slot);
+
+    /// <summary>
+    /// Rewrites one record in full after one of its table's fields changed: every indexed value from <paramref name="record"/> (which
+    /// must be a full database read), the free-text field rebuilt from the searchable text alone, and the columns in
+    /// <paramref name="clear"/> emptied. A cleared column that another field uses now keeps that field's value.
+    /// </summary>
+    public static IReadOnlyList<SearchIndexDocument> BuildRebuild(SearchTableSlotInfo info, SearchIndexDocument record, FieldColumnClear? clear)
+    {
+        var docs = Build(info, record.TenantId, record.AppId, record.TableId, record.PublicId, record.Values, null, complete: true);
+        if (clear == null) return docs;
+
+        var result = new List<SearchIndexDocument>(docs.Count);
+        for (var i = 0; i < docs.Count; i++)
+        {
+            var slots = new Dictionary<string, object?>();
+            if (i == 0)
+            {
+                if (clear.Slot != null) SearchSlotResolver.AddClearedSlots(slots, clear.Slot);
+            }
+            else
+            {
+                // the second document is the table's own index while it is moving there
+                slots[SearchSlotResolver.WideSlot((int)clear.Fid)] = null;
+                slots[SearchSlotResolver.WideEndSlot((int)clear.Fid)] = null;
+            }
+            // Values last: a cleared column that a field (this one included) still writes keeps its current value.
+            foreach (var kv in docs[i].SlotValues ?? new Dictionary<string, object?>()) slots[kv.Key] = kv.Value;
+            result.Add(docs[i] with { SlotValues = slots });
+        }
+        return result;
     }
 
     /// <summary>A single field's change (backfill, or clearing it when it is switched off), for the current index and the wide one while migrating.</summary>
@@ -160,6 +206,21 @@ public static class SearchIndexDocumentBuilder
         return slotValues;
     }
 
+    /// <summary>Empties <paramref name="columns"/> in the documents bound for <paramref name="currentIndex"/> (the table's own index, while
+    /// it moves there, has no such columns), keeping any value a document itself writes into one of them.</summary>
+    public static IReadOnlyList<SearchIndexDocument> ClearColumns(
+        IReadOnlyList<SearchIndexDocument> docs, string? currentIndex, IReadOnlyCollection<string> columns)
+    {
+        if (columns.Count == 0) return docs;
+        return docs.Select(d =>
+        {
+            if (!string.Equals(d.CustomIndexName, currentIndex, StringComparison.OrdinalIgnoreCase)) return d;
+            var slots = columns.ToDictionary(c => c, _ => (object?)null, StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in d.SlotValues ?? new Dictionary<string, object?>()) slots[kv.Key] = kv.Value;
+            return d with { SlotValues = slots };
+        }).ToList();
+    }
+
     /// <summary>
     /// Merges several documents for the same record (same index) into one, oldest first, so a later value wins and a document
     /// is never sent twice in one request (the service does not define which duplicate wins). The result carries the highest
@@ -187,16 +248,13 @@ public static class SearchIndexDocumentBuilder
                 ? Math.Max(existing.SourceVersion.Value, d.SourceVersion.Value)
                 : existing.SourceVersion ?? d.SourceVersion;
 
-            merged[key] = d with { Values = values, SlotValues = slots, SourceVersion = version };
+            // Complete once either part is: the merged slots hold everything the complete one did, with later values on top.
+            merged[key] = d with
+            {
+                Values = values, SlotValues = slots, SourceVersion = version,
+                CompleteText = existing.CompleteText || d.CompleteText, SearchText = d.SearchText ?? existing.SearchText
+            };
         }
         return merged.Values.ToList();
     }
-
-    /// <summary>
-    /// Whether a message must be answered from the database instead of from its own payload. A payload is a snapshot taken at
-    /// commit time. It is trustworthy only when this is the first delivery and nothing newer has reached the index; a
-    /// redelivered message, or one older than what the index already holds, may overwrite newer values with old ones.
-    /// </summary>
-    public static bool NeedsAuthoritativeRead(bool hasPayload, int deliveryCount, long messageVersion, long? indexedVersion) =>
-        !hasPayload || deliveryCount > 1 || (indexedVersion.HasValue && messageVersion < indexedVersion.Value);
 }

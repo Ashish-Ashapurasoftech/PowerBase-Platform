@@ -18,9 +18,11 @@ public sealed record ImportFormulaColumn(int Fid, string Name);
 /// <param name="FileColumns">A file source: its columns (all text) are what the formula may use.</param>
 /// <param name="VirtualColumns">The import's virtual columns, which the formula may also use.</param>
 /// <param name="OwnFid">When the formula defines a virtual column, that column's id: it cannot use itself, and its result must be one a virtual column can hold.</param>
+/// <param name="Variables">The import's variables, which the formula may also use as <c>[var_name]</c> (typed by their results, like a virtual column).</param>
+/// <param name="OwnVariable">When the formula defines a variable, that variable's name: it may use functions and the other variables but no source column, and cannot use itself.</param>
 public sealed record ImportFormulaCheck(
     string Expression, string? ExpectedType, Guid? SourceTableId, List<ImportFormulaColumn>? FileColumns,
-    List<ImportVirtualColumn>? VirtualColumns, int? OwnFid);
+    List<ImportVirtualColumn>? VirtualColumns, int? OwnFid, List<ImportVariable>? Variables = null, string? OwnVariable = null);
 
 /// <summary>Checks a formula typed on the import screen the way the import will compile it: against the source's fields (a table's, or a
 /// file's columns) and the import's virtual columns. The table formula check only knows a table's own fields, so it cannot serve a file or
@@ -35,10 +37,15 @@ public sealed class ValidateImportFormulaHandler(
     public async Task<ValidateFormulaResult> HandleAsync(Guid appId, ImportFormulaCheck check, CancellationToken ct)
     {
         await access.RequireMembershipByAppPublicIdAsync(appId, ct);
-        var source = await SourceFieldsAsync(appId, check, ct);
+        // A variable's own formula is global: no source column is offered, and the import's virtual columns (which belong to rows) are not either.
+        var definesVariable = check.OwnVariable is not null;
+        var source = definesVariable ? [] : await SourceFieldsAsync(appId, check, ct);
 
-        // What the formula may also use: every other virtual column that works on its own. A broken one is simply not offered.
-        var others = (check.VirtualColumns ?? []).Where(v => check.OwnFid is null || v.Fid != check.OwnFid).ToList();
+        // What the formula may also use: the variables (typed by their results, but never the one being defined) and every other virtual column that works on its
+        // own. A broken one is simply not offered; the whole set is checked when the import is saved.
+        var variableColumns = ImportVariables.AsColumns(check.Variables ?? []).Where(v => !string.Equals(v.Name, check.OwnVariable?.Trim(), StringComparison.OrdinalIgnoreCase));
+        var virtualColumns = definesVariable ? [] : (check.VirtualColumns ?? []).Where(v => check.OwnFid is null || v.Fid != check.OwnFid);
+        var others = variableColumns.Concat(virtualColumns).ToList();
         var (virtuals, _) = ImportVirtual.Resolve(others, source, engine, lenient: true);
         var schema = new AppFieldSchema(virtuals.Count == 0 ? source : source.Concat(virtuals.Select(v => v.Field)).ToList());
 
@@ -52,10 +59,10 @@ public sealed class ValidateImportFormulaHandler(
         var compiled = engine.Compile(expression, schema, FormulaTypeMap.ParseExpected(check.ExpectedType));
         var diagnostics = compiled.Diagnostics.Select(FormulaDiagnosticDto.From).ToList();
         var valid = !compiled.HasErrors;
-        if (valid && check.OwnFid is not null && ImportVirtual.FieldTypeOf(compiled.ResultType) is null)
+        if (valid && (check.OwnFid is not null || definesVariable) && ImportVirtual.FieldTypeOf(compiled.ResultType) is null)
         {
             valid = false;
-            diagnostics.Add(Error($"A virtual column cannot hold {compiled.ResultType}. Make the formula return text, a number, a checkbox, a date or a date and time.", expression));
+            diagnostics.Add(Error($"A {(definesVariable ? "variable" : "virtual column")} cannot hold {compiled.ResultType}. Make the formula return text, a number, a checkbox, a date or a date and time.", expression));
         }
         return new ValidateFormulaResult { Valid = valid, ResultType = compiled.ResultType.ToString(), Diagnostics = diagnostics };
     }

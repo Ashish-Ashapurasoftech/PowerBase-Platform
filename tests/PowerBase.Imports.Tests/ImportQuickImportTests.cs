@@ -171,9 +171,76 @@ public class ImportQuickImportTests
         var q = new Quick();
 
         await ((Func<Task>)(() => q.Run(FileConfig(c => c.Schedule = new ImportSchedule { Enabled = true, Type = "hourly", Interval = 1 })))).Should().ThrowAsync<ValidationException>().WithMessage("*scheduled*");
-        await ((Func<Task>)(() => q.Run(FileConfig(c => c.AdditionalTargets = [new ImportTargetConfig { DestinationTableId = Guid.NewGuid() }])))).Should().ThrowAsync<ValidationException>().WithMessage("*this table only*");
         await ((Func<Task>)(() => q.Run(FileConfig(c => c.OnlyChangedSinceLastRun = true)))).Should().ThrowAsync<ValidationException>().WithMessage("*saved imports*");
         q.Created.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_one_time_import_takes_what_a_template_takes_variables_a_table_filter_and_further_tables()
+    {
+        var q = new Quick();
+
+        // Variables and a table's own filter go through the same save checks and start a run.
+        var filter = new PowerBase.Application.Reports.FilterGroup { Nodes = [new() { Condition = new() { FieldId = 1001, Operator = "contains", Value = "{{var_part}}" } }] };
+        var start = await q.Run(FileConfig(c =>
+        {
+            c.Variables = [new ImportVariable { Name = "var_part", Value = "a" }];
+            c.TableConditions = filter;
+        }));
+        start.RunId.Should().NotBeEmpty();
+        q.Created!.OptionsJson.Should().Contain("var_part");
+
+        // Another table is no longer refused up front: the plan builder judges it (here the table does not exist).
+        var act = () => q.Run(FileConfig(c => c.AdditionalTargets = [new ImportTargetConfig { DestinationTableId = Guid.NewGuid() }]));
+        var ex = await Record.ExceptionAsync(act);
+        ex?.Message.Should().NotContain("this table only");
+    }
+
+    [Fact]
+    public async Task A_one_time_merge_can_match_on_the_record_id_and_is_saved_and_started_like_a_template_would()
+    {
+        var q = new Quick();
+        var cfg = FileConfig(c =>
+        {
+            c.ImportType = ImportTypes.Merge;
+            c.MergeKeyFid = 3;
+            c.File!.Columns = ["Record ID", "Qty"];
+            c.Mappings = [new() { DestFid = 3, SourceFid = 1001 }, new() { DestFid = 7, SourceFid = 1002 }];
+        });
+
+        var start = await q.Run(cfg);
+
+        start.RunId.Should().NotBeEmpty();
+        q.Created!.MergeKeyFid.Should().Be(3);
+        q.Created.ImportType.Should().Be(ImportTypes.Merge);
+    }
+
+    [Fact]
+    public async Task A_one_time_merge_on_the_record_id_without_a_column_for_it_is_refused_before_anything_starts()
+    {
+        var q = new Quick();
+        var cfg = FileConfig(c => { c.ImportType = ImportTypes.Merge; c.MergeKeyFid = 3; });
+
+        var act = () => q.Run(cfg);
+
+        await act.Should().ThrowAsync<ValidationException>().WithMessage("*Record ID#*");
+        q.Created.Should().BeNull("a refused setup leaves no definition behind");
+    }
+
+    [Fact]
+    public async Task A_one_time_import_with_a_formula_variable_is_saved_with_it_and_started()
+    {
+        var q = new Quick();
+        var cfg = FileConfig(c =>
+        {
+            c.Variables = [new ImportVariable { Name = "var_limit", Kind = ImportVariables.Formula, Formula = "2 + 3" }];
+            c.Mappings.Add(new ImportFieldMapping { DestFid = 9, Source = ImportMappingSource.Formula, Formula = "ToText([var_limit] * 2)" });
+        });
+
+        var start = await q.Run(cfg);
+
+        start.RunId.Should().NotBeEmpty();
+        q.Created!.OptionsJson.Should().Contain("var_limit").And.Contain("formula");
     }
 
     [Fact]

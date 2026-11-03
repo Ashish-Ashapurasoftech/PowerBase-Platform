@@ -169,8 +169,8 @@ public class RelationshipQueriesHandler
                 && FormulaTypeMap.ParseFormulaUrlSettings(f.Settings)?.RelationshipId == rel.Id))
                 fields.Add(new(f.PublicId, f.Fid ?? 0, f.Label ?? f.Name, "addrecord", f.TypeCode));
 
-            var proxyFid = rel.ProxyFieldId.HasValue
-                ? childFields.FirstOrDefault(f => f.Id == rel.ProxyFieldId.Value)?.Fid
+            var proxyField = rel.ProxyFieldId.HasValue
+                ? childFields.FirstOrDefault(f => f.Id == rel.ProxyFieldId.Value)
                 : null;
 
             // Resolve DisplayKeyFieldId → its Fid for the frontend (Task 6).
@@ -187,7 +187,8 @@ public class RelationshipQueriesHandler
                 ChildTableName = child.Name,
                 ReferenceFid = rel.ReferenceFid,
                 ReferenceFieldName = refField?.Name ?? string.Empty,
-                ProxyFid = proxyFid,
+                ProxyFid = proxyField?.Fid,
+                ProxyFieldName = proxyField is null ? null : proxyField.Label ?? proxyField.Name,
                 DisplayKeyFid = displayKeyFid,
                 Fields = fields,
             });

@@ -61,6 +61,13 @@ public class ReportDefinition
     /// a filter, a sort, a group-by level or an aggregation like any Formula field, without ever being stored.</summary>
     public List<ReportFormula> ReportFormulas { get; set; } = [];
 
+    /// <summary>Summary/Chart only: the named aggregates ("Revenue (tot)") that <see cref="SummaryFormulas"/> read. See <see cref="SummaryFormulaFields"/>.</summary>
+    public List<SummaryVariable> SummaryVariables { get; set; } = [];
+
+    /// <summary>Summary/Chart only: up to <see cref="SummaryFormulaFields.MaxFormulas"/> virtual columns calculated per output row from
+    /// <see cref="SummaryVariables"/>. An aggregation whose FieldId is a formula's Id (Function "Formula") shows it as a Summarize value / chart Y value.</summary>
+    public List<SummaryFormula> SummaryFormulas { get; set; } = [];
+
     /// <summary>Table-only. Null when not a Table report or when nothing has been customized.</summary>
     public ReportOptions? Options { get; set; }
 
@@ -92,6 +99,29 @@ public class ReportFormula
     public string TypeCode { get; set; } = "Formula_Text";
     /// <summary>Formula_Number only: Number, Currency, Percent or Rating (the dropdown's "Numeric - Currency" etc.).</summary>
     public string? DisplayAs { get; set; }
+    public string Expression { get; set; } = string.Empty;
+}
+
+/// <summary>One aggregate a summary formula can read: <see cref="Function"/> of <see cref="FieldId"/>, referred to in formulas as [Name].</summary>
+public class SummaryVariable
+{
+    public long FieldId { get; set; }
+    /// <summary>Sum, Avg, Min, Max, StdDev, Median or DistinctCount — whichever the field's type allows.</summary>
+    public string Function { get; set; } = "Sum";
+    public string Name { get; set; } = string.Empty;
+}
+
+public class SummaryFormula
+{
+    /// <summary>Reserved id (<see cref="SummaryFormulaFields.FirstId"/> + 0..2) that Aggregations and SummarySortFields use to refer to this formula.</summary>
+    public long Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+    /// <summary>One of <see cref="SummaryFormulaFields.AllowedTypeCodes"/> (Chart reports: <see cref="SummaryFormulaFields.ChartTypeCodes"/>).</summary>
+    public string TypeCode { get; set; } = "Formula_Number";
+    /// <summary>Formula_Number only: Number, Currency, Percent or Rating.</summary>
+    public string? DisplayAs { get; set; }
+    /// <summary>Formula_Number only: the result is rounded to this many places. Null = unrounded.</summary>
+    public int? DecimalPlaces { get; set; }
     public string Expression { get; set; } = string.Empty;
 }
 
@@ -144,6 +174,13 @@ public class FilterGroup
     /// <summary>"and" or "or"</summary>
     public string Logic { get; set; } = "and";
     public List<FilterNode> Nodes { get; set; } = [];
+
+    /// <summary>Null when the group holds no condition anywhere in it (no nodes, or only empty sub-groups) — such a group
+    /// filters nothing, so callers must see it as "no filter" (a non-null tree makes a report take the search-index path).</summary>
+    public static FilterGroup? NullIfEmpty(FilterGroup? group) => HasCondition(group) ? group : null;
+
+    private static bool HasCondition(FilterGroup? group) =>
+        group is not null && group.Nodes.Any(n => n.Condition is not null || HasCondition(n.Group));
 }
 
 /// <summary>Either Condition or Group is set — never both.</summary>

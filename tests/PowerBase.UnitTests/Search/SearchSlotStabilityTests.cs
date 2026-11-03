@@ -368,18 +368,6 @@ public class SearchSlotStabilityTests
         merged.Single(d => d.CustomIndexName == "pb-tbl-3").SlotValues!["f_6"].Should().Be("in the wide index");
     }
 
-    [Theory]
-    // hasPayload, deliveryCount, messageVersion, indexedVersion, expectedDatabaseRead
-    [InlineData(true, 1, 100L, null, false)]   // first delivery, nothing in the index yet
-    [InlineData(true, 1, 100L, 90L, false)]    // newer than what the index holds
-    [InlineData(true, 1, 100L, 100L, false)]   // same version: safe to apply again
-    [InlineData(true, 1, 100L, 150L, true)]    // older than the index: stale
-    [InlineData(true, 2, 100L, null, true)]    // redelivered: the order of arrival is unknown
-    [InlineData(false, 1, 100L, null, true)]   // no payload: the database is the only source
-    public void A_message_is_answered_from_the_database_unless_its_payload_can_be_trusted(
-        bool hasPayload, int deliveryCount, long messageVersion, long? indexedVersion, bool expected) =>
-        SearchIndexDocumentBuilder.NeedsAuthoritativeRead(hasPayload, deliveryCount, messageVersion, indexedVersion).Should().Be(expected);
-
     // ---- moving a table to its own index
 
     [Fact]

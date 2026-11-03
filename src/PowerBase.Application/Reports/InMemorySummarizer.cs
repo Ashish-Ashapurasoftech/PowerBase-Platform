@@ -564,7 +564,7 @@ internal static class InMemorySummarizer
     }
 
     /// <summary>ORDER BY ordering: NULL first, text case-insensitively, other values by their natural order.</summary>
-    private sealed class ValueOrder : IComparer<object?>
+    internal sealed class ValueOrder : IComparer<object?>
     {
         public static readonly ValueOrder Instance = new();
 

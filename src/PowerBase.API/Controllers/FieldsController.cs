@@ -150,7 +150,8 @@ public class FieldsController : ControllerBase
     public async Task<IActionResult> Get(Guid tableId, Guid publicId, CancellationToken ct)
     {
         var result = await _getHandler.HandleAsync(new GetFieldQuery(tableId, publicId), ct);
-        return Ok(new ApiResponse<FieldDetailResponse>(MapToDetailResponse(result.Field, result.HasRecords)));
+        return Ok(new ApiResponse<FieldDetailResponse>(
+            MapToDetailResponse(result.Field, result.HasRecords, result.IsKeyField, result.RelationshipKeyUsages)));
     }
 
     /// <summary>List every supported field type configuration (reference data — not tenant- or table-scoped).</summary>
@@ -236,6 +237,23 @@ public class FieldsController : ControllerBase
     {
         var result = await jobs.CancelAsync(tableId, publicId, jobId, ct);
         return Ok(new ApiResponse<FieldSnapshotJobResponse>(MapToSnapshotJobResponse(result)));
+    }
+
+    /// <summary>Repairs the saved value type of this table's Lookup fields: a lookup whose parent field's type was changed
+    /// earlier can still say the old type (a Date lookup of what is now a Number), which hides it from places that read it —
+    /// such as a Snapshot's source list. Safe to run any time; returns how many lookups were corrected.</summary>
+    [HttpPost("tables/{tableId:guid}/fields/refresh-lookup-types")]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<int>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> RefreshLookupTypes(
+        [FromServices] IAppTableRepository tableRepo, [FromServices] IAppFieldRepository fieldRepo,
+        [FromServices] PowerBase.Application.Relationships.LookupResultTypeRepairService repair,
+        Guid tableId, CancellationToken ct)
+    {
+        var table = await tableRepo.GetByPublicIdAsync(tableId, ct);
+        var repaired = await repair.RepairTableAsync(await fieldRepo.ListByTableAsync(table.Id, ct), ct);
+        return Ok(new ApiResponse<int>(repaired));
     }
 
     /// <summary>Paginated audit/version history for a field, newest first.</summary>
@@ -410,7 +428,7 @@ public class FieldsController : ControllerBase
         IsKeyField = f.IsKeyField,
     };
 
-    private static FieldDetailResponse MapToDetailResponse(AppField f, bool hasRecords) => new()
+    private static FieldDetailResponse MapToDetailResponse(AppField f, bool hasRecords, bool isKeyField, IReadOnlyList<string>? relationshipKeyUsages) => new()
     {
         Id = f.Id,
         PublicId = f.PublicId,
@@ -436,6 +454,8 @@ public class FieldsController : ControllerBase
         Settings = f.Settings,
         CreatedOn = f.CreatedOn,
         HasRecords = hasRecords,
+        IsKeyField = isKeyField,
+        RelationshipKeyUsages = relationshipKeyUsages ?? [],
     };
 
     private static FieldVersionListItemResponse MapToVersionListItemResponse(

@@ -330,13 +330,24 @@ public class ImportTableFilterTests
     // ---- saving ----
 
     [Fact]
-    public async Task A_table_filter_on_an_import_into_one_table_is_refused_because_the_import_conditions_already_do_that()
+    public async Task A_table_filter_on_an_import_into_one_table_is_accepted_and_combined_with_the_import_conditions()
     {
+        // Business feedback 2026-10-29: the first table may have its own filter even when it is the only table (see ImportSingleTableFilterTests for the runs).
         var cfg = Config(c => { c.AdditionalTargets = []; c.TableConditions = Cond(6, "eq", "x"); });
+
+        var plans = await ImportHarness.Create(cfg, Source()).PlanBuilder!.BuildAllAsync(cfg, ImportHarness.DestTableId, default);
+
+        plans.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task A_table_that_reads_sheets_separately_is_still_filtered_in_each_sheet_not_by_a_table_wide_filter()
+    {
+        var cfg = Config(c => { c.AdditionalTargets = []; c.TableConditions = Cond(6, "eq", "x"); c.SheetMappings = [new ImportSheetMapping { Sheet = "S" }]; });
 
         var act = () => ImportHarness.Create(cfg, Source()).PlanBuilder!.BuildAllAsync(cfg, ImportHarness.DestTableId, default);
 
-        await act.Should().ThrowAsync<ValidationException>().WithMessage("*more than one table*");
+        await act.Should().ThrowAsync<ValidationException>().WithMessage("*sheet by sheet*");
     }
 
     [Fact]
