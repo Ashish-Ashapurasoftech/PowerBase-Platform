@@ -541,9 +541,9 @@ public class PblPipelinesImporterTests
     }
 
     [Fact]
-    public async Task TriggerOnTableNotInFile_FollowedByAStepThatCannotStartAPowerFlow_IsStillReportedAsNotSaved()
+    public async Task TriggerOnTableNotInFile_FollowedByCreateRecord_SavesTheCreateRecordAsTheFirstStep()
     {
-        // Create Record cannot start a PowerFlow, so once the trigger is left out nothing can be saved.
+        // Create Record can start a PowerFlow (as in Quickbase), so once the trigger is left out it is saved on its own.
         var pause = TriggerOnForeignTable.IndexOf("- Type: QB::PipelineStep::Clock", StringComparison.Ordinal);
         var create = TriggerOnForeignTable.IndexOf("- Type: QB::PipelineStep::Quickbase", pause, StringComparison.Ordinal);
         var withoutPause = TriggerOnForeignTable[..pause] + TriggerOnForeignTable[create..];
@@ -551,10 +551,9 @@ public class PblPipelinesImporterTests
         var report = await ImportAsync(withoutPause);
 
         var item = report.Pipelines.Single();
-        item.Status.Should().Be(PipelineImportStatuses.CreatedWithoutSteps);
-        item.Issues.Should().Contain(i => i.Code == "PIPELINE_STEPS_NOT_SAVED");
-        item.Issues.Should().NotContain(i => i.Code == "PIPELINE_TRIGGER_NOT_SAVED");
-        _saves.Should().BeEmpty();
+        item.Status.Should().Be(PipelineImportStatuses.Created);
+        item.Issues.Should().Contain(i => i.Code == "PIPELINE_TRIGGER_NOT_SAVED");
+        _saves.Should().ContainSingle().Which.Should().ContainSingle().Which.Subtype.Should().Be("create-record");
     }
 
     [Fact]

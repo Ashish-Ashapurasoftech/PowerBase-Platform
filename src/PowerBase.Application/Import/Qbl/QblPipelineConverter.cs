@@ -665,13 +665,15 @@ public static class QblPipelineConverter
         {
             var first = _pipeline.Steps.FirstOrDefault();
             if (first is null || first.Type == "trigger" || first.Subtype is "search-records" or "look-up-record" or "copy-records" or "prepare-bulk-upsert"
-                    or "pause" or "import-with-csv" or "handle-errors" or "send-email-outlook" or "make-request")
+                    or "pause" or "import-with-csv" or "handle-errors" or "send-email-outlook" or "make-request"
+                    // As in Quickbase, these actions can start a PowerFlow run by hand or on a schedule.
+                    or "create-record" or "update-record" or "delete-record" or "upload-file" or "call-another-pipeline")
                 return;
 
             _pipeline.Issues.Add(new PblPipelineIssue
             {
                 Code = "PIPELINE_NO_VALID_START",
-                Message = $"The PowerFlow was created without steps: PowerFlows must start with a trigger, Search Records, Look Up a Record, Copy Records, Make Request, Import with CSV, Handle Errors, Prepare Bulk Record Upsert, Pause or Send an Email, and the first imported step is '{first.Name}'. Add the steps by hand.",
+                Message = $"The PowerFlow was created without steps: PowerFlows must start with a trigger, Search Records, Look Up a Record, Copy Records, Make Request, Import with CSV, Handle Errors, Prepare Bulk Record Upsert, Pause, Send an Email, Create Record or Call Another PowerFlow, and the first imported step is '{first.Name}'. Add the steps by hand.",
                 ChangesExecution = true,
             });
             foreach (var step in Flatten(_pipeline.Steps))

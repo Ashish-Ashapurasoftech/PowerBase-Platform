@@ -509,28 +509,16 @@ public partial class PipelineEngine : IPipelineEngine
             {
                 if (normalizedEventName == "activation")
                 {
-                    var isQueryRoot = firstQueryStep?.Type == "query" && (firstQueryStep.Subtype == "search-records" || firstQueryStep.Subtype == "look-up-record");
-                    var isPrepareBulkRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "prepare-bulk-upsert";
-                    var isCopyRecordsRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "copy-records";
-                    var isMakeRequestRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "make-request";
-                    var isPauseRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "pause";
-                    var isImportWithCsvRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "import-with-csv";
-                    if (!isQueryRoot && !isPrepareBulkRoot && !isCopyRecordsRoot && !isMakeRequestRoot && !isPauseRoot && !isImportWithCsvRoot)
+                    if (!PipelineScheduleEligibility.IsRunnableRoot(firstQueryStep))
                     {
-                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Activation trigger event requires a Search/Query, Make Request, Copy Records, Import with CSV, Prepare Bulk Record Upsert, or Pause first step.");
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Activation trigger event requires a Search/Query, Make Request, Copy Records, Import with CSV, Prepare Bulk Record Upsert, Pause, Send Email, Create Record, Update Record, Delete Record, Upload a File or Call Another PowerFlow first step.");
                     }
                 }
                 else if (normalizedEventName == "pipeline_schedule")
                 {
-                    var isQueryRoot = firstQueryStep?.Type == "query" && (firstQueryStep.Subtype == "search-records" || firstQueryStep.Subtype == "look-up-record");
-                    var isPrepareBulkRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "prepare-bulk-upsert";
-                    var isCopyRecordsRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "copy-records";
-                    var isMakeRequestRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "make-request";
-                    var isPauseRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "pause";
-                    var isImportWithCsvRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "import-with-csv";
-                    if (!isQueryRoot && !isPrepareBulkRoot && !isCopyRecordsRoot && !isMakeRequestRoot && !isPauseRoot && !isImportWithCsvRoot)
+                    if (!PipelineScheduleEligibility.IsRunnableRoot(firstQueryStep))
                     {
-                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("PowerFlow schedule trigger event requires a Search/Query, Make Request, Copy Records, Import with CSV, Prepare Bulk Record Upsert, or Pause first step.");
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("PowerFlow schedule trigger event requires a Search/Query, Make Request, Copy Records, Import with CSV, Prepare Bulk Record Upsert, Pause, Send Email, Create Record, Update Record, Delete Record, Upload a File or Call Another PowerFlow first step.");
                     }
                     if (activeSteps.Any(s => s.Type == "trigger"))
                     {
@@ -2509,7 +2497,14 @@ public partial class PipelineEngine : IPipelineEngine
                 throw new InvalidOperationException("Update record step configuration is invalid or missing tableId.");
 
             var resolvedRecordIdStr = EvaluateTokens(config.TargetRecordId, payloadJson, executionPath, allSteps);
-            if (!Guid.TryParse(resolvedRecordIdStr, out var recordPublicId))
+            Guid recordPublicId;
+            if (PipelineRecordSource.IsRecordId(step.ConfigJson))
+            {
+                // "Record ID" mode: the step names the record by its Record ID (or PublicId) in its own table.
+                var (idTable, idFields) = await GetRecordStepMetadataAsync(tableRepo, fieldRepo, Guid.Parse(config.TableId), ct);
+                recordPublicId = await PipelineRecordSource.ResolveAsync(resolvedRecordIdStr, idTable, idFields, recordRepo, ct);
+            }
+            else if (!Guid.TryParse(resolvedRecordIdStr, out recordPublicId))
                 throw new InvalidOperationException($"Failed to resolve target record public ID from: '{config.TargetRecordId}'");
 
             var tableGuid = Guid.Parse(config.TableId);
@@ -2543,7 +2538,7 @@ public partial class PipelineEngine : IPipelineEngine
 
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
                 TableId = config.TableId,
-                TargetRecordId = resolvedRecordIdStr,
+                TargetRecordId = PipelineRecordSource.IsRecordId(step.ConfigJson) ? recordPublicId.ToString() : resolvedRecordIdStr,
                 FieldMappings = resolvedMappings,
                 Metadata = BuildAuditFieldMetadata(table, fields)
             });
@@ -2636,12 +2631,20 @@ public partial class PipelineEngine : IPipelineEngine
                 throw new InvalidOperationException("Delete record step configuration is invalid or missing tableId/targetRecordId.");
 
             var resolvedRecordIdStr = EvaluateTokens(config.TargetRecordId, payloadJson, executionPath, allSteps);
-            if (!Guid.TryParse(resolvedRecordIdStr, out var recordPublicId))
+            Guid recordPublicId;
+            if (PipelineRecordSource.IsRecordId(step.ConfigJson))
+            {
+                // "Record ID" mode: the step names the record by its Record ID (or PublicId) in its own table.
+                stepRun.InputContext = SerializeAndSanitizeAudit(new { TableId = config.TableId, TargetRecordId = resolvedRecordIdStr });
+                var (idTable, idFields) = await GetRecordStepMetadataAsync(tableRepo, fieldRepo, Guid.Parse(config.TableId), ct);
+                recordPublicId = await PipelineRecordSource.ResolveAsync(resolvedRecordIdStr, idTable, idFields, recordRepo, ct);
+            }
+            else if (!Guid.TryParse(resolvedRecordIdStr, out recordPublicId))
                 throw new InvalidOperationException($"Failed to resolve target record public ID from: '{config.TargetRecordId}'");
 
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
                 TableId = config.TableId,
-                TargetRecordId = resolvedRecordIdStr
+                TargetRecordId = PipelineRecordSource.IsRecordId(step.ConfigJson) ? recordPublicId.ToString() : resolvedRecordIdStr
             });
 
             var tableGuid = Guid.Parse(config.TableId);
@@ -4065,32 +4068,53 @@ public partial class PipelineEngine : IPipelineEngine
             var resolvedFileName = UploadFileStepContract.NormalizeFileName(
                 EvaluateTokens(config.FileName, payloadJson, executionPath, allSteps));
 
-            stepRun.InputContext = SerializeAndSanitizeAudit(new {
-                FileUrl = resolvedSource,
-                FileName = resolvedFileName,
-                FileRecordStepId = config.FileRecordStepId,
-                TargetFileField = config.TargetFileField
-            });
+            var uploadByRecordId = PipelineRecordSource.IsRecordId(step.ConfigJson);
+            var resolvedUploadRecordId = uploadByRecordId ? EvaluateTokens(config.TargetRecordId, payloadJson, executionPath, allSteps) : null;
+            stepRun.InputContext = uploadByRecordId
+                ? SerializeAndSanitizeAudit(new {
+                    FileUrl = resolvedSource,
+                    FileName = resolvedFileName,
+                    RecordId = resolvedUploadRecordId,
+                    TargetFileField = config.TargetFileField
+                })
+                : SerializeAndSanitizeAudit(new {
+                    FileUrl = resolvedSource,
+                    FileName = resolvedFileName,
+                    FileRecordStepId = config.FileRecordStepId,
+                    TargetFileField = config.TargetFileField
+                });
 
-            if (string.IsNullOrWhiteSpace(config.FileRecordStepId))
-                throw new InvalidOperationException("Upload a File requires a target record step.");
-            var targetStep = allSteps.FirstOrDefault(candidate =>
-                candidate.Id.ToString() == config.FileRecordStepId || candidate.RefId == config.FileRecordStepId)
-                ?? throw new InvalidOperationException("The selected Upload a File record step is unavailable.");
-            var metadataStep = targetStep;
-            if (targetStep.Type == "loop")
+            AppTable table;
+            PipelineStep? targetStep = null;
+            if (uploadByRecordId)
             {
-                var loopSourceId = UploadFileStepContract.ReadConfigValue(targetStep.ConfigJson, "loopOverStepId");
-                metadataStep = allSteps.FirstOrDefault(candidate =>
-                    candidate.Id.ToString() == loopSourceId || candidate.RefId == loopSourceId)
-                    ?? throw new InvalidOperationException("The selected Upload a File loop source is unavailable.");
+                // "Record ID" mode: the step names its table and the record's Record ID itself.
+                if (!Guid.TryParse(PipelineRecordSource.TableId(step.ConfigJson), out var recordTableId))
+                    throw new InvalidOperationException("Upload a File requires a table.");
+                table = await tableRepo.GetByPublicIdAsync(recordTableId, ct);
             }
-            var targetTableId = UploadFileStepContract.ReadConfigValue(
-                metadataStep.ConfigJson, "tablePublicId", "tableId", "tableLabel");
-            if (!Guid.TryParse(targetTableId, out var tablePublicId))
-                throw new InvalidOperationException("The selected Upload a File record step has no valid table.");
+            else
+            {
+                if (string.IsNullOrWhiteSpace(config.FileRecordStepId))
+                    throw new InvalidOperationException("Upload a File requires a target record step.");
+                targetStep = allSteps.FirstOrDefault(candidate =>
+                    candidate.Id.ToString() == config.FileRecordStepId || candidate.RefId == config.FileRecordStepId)
+                    ?? throw new InvalidOperationException("The selected Upload a File record step is unavailable.");
+                var metadataStep = targetStep;
+                if (targetStep.Type == "loop")
+                {
+                    var loopSourceId = UploadFileStepContract.ReadConfigValue(targetStep.ConfigJson, "loopOverStepId");
+                    metadataStep = allSteps.FirstOrDefault(candidate =>
+                        candidate.Id.ToString() == loopSourceId || candidate.RefId == loopSourceId)
+                        ?? throw new InvalidOperationException("The selected Upload a File loop source is unavailable.");
+                }
+                var targetTableId = UploadFileStepContract.ReadConfigValue(
+                    metadataStep.ConfigJson, "tablePublicId", "tableId", "tableLabel");
+                if (!Guid.TryParse(targetTableId, out var tablePublicId))
+                    throw new InvalidOperationException("The selected Upload a File record step has no valid table.");
 
-            var table = await tableRepo.GetByPublicIdAsync(tablePublicId, ct);
+                table = await tableRepo.GetByPublicIdAsync(tablePublicId, ct);
+            }
             var fields = await fieldRepo.ListByTableAsync(table.Id, ct);
             var selectedFields = !string.IsNullOrWhiteSpace(config.TargetFileField)
                 ? new[] { config.TargetFileField }
@@ -4105,12 +4129,18 @@ public partial class PipelineEngine : IPipelineEngine
                     !string.Equals(field.TypeCode, "File", StringComparison.OrdinalIgnoreCase)))
                 throw new InvalidOperationException("A selected field is not a file attachment field.");
 
-            object? recordOutput = null;
-            if (targetStep.Type == "trigger") contextDict.TryGetValue("trigger", out recordOutput);
-            else stepsDict.TryGetValue(targetStep.RefId, out recordOutput);
-            var recordPublicId = UploadFileStepContract.ResolveRecordPublicId(recordOutput);
-            if (recordPublicId == Guid.Empty)
-                throw new InvalidOperationException("The selected Upload a File record could not be resolved.");
+            Guid recordPublicId;
+            if (targetStep is null)
+                recordPublicId = await PipelineRecordSource.ResolveAsync(resolvedUploadRecordId, table, fields, recordRepo, ct);
+            else
+            {
+                object? recordOutput = null;
+                if (targetStep.Type == "trigger") contextDict.TryGetValue("trigger", out recordOutput);
+                else stepsDict.TryGetValue(targetStep.RefId, out recordOutput);
+                recordPublicId = UploadFileStepContract.ResolveRecordPublicId(recordOutput);
+                if (recordPublicId == Guid.Empty)
+                    throw new InvalidOperationException("The selected Upload a File record could not be resolved.");
+            }
 
             // Attaching a file modifies the record: the owner needs Modify on the table, the record must be
             // within the role's row rules, and each target field must be writable for the role.
@@ -6274,6 +6304,8 @@ public partial class PipelineEngine : IPipelineEngine
         public string? FileRecordStepId { get; set; }
         public List<SelectedFileField>? SelectedFileFields { get; set; }
         public string? TargetFileField { get; set; }
+        /// <summary>"Record ID" mode (<see cref="PipelineRecordSource"/>): the record's Record ID or PublicId in the step's table.</summary>
+        public string? TargetRecordId { get; set; }
     }
 
     private class SelectedFileField

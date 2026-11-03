@@ -824,6 +824,33 @@ public class QblPipelineConverterTests
                 Steps:
                   - Type: QB::PipelineStep::Webhooks
                     Properties: { Id: aa, Name: Incoming, Channel: { Resource: request, Id: webhooks, Selector: incoming } }
+                  - Type: QB::PipelineStep::Condition
+                    Properties: { Type: branch, Name: Condition }
+                    Then:
+                      - Type: QB::PipelineStep::Quickbase
+                        Properties:
+                          Id: ab
+                          Name: Create Record
+                          Channel: { Resource: record, Id: quickbase, Selector: create }
+            """);
+
+        // A Condition still cannot start a PowerFlow.
+        pipeline.Steps.Should().BeEmpty();
+        pipeline.Issues.Should().Contain(i => i.Code == "PIPELINE_NO_VALID_START");
+        pipeline.Issues.Should().Contain(i => i.StepId == "ab" && i.Code == "PIPELINE_STEP_NOT_SAVED" && i.IsSkippedStep);
+    }
+
+    [Fact]
+    public void UnsupportedTrigger_FollowedByCreateRecord_KeepsTheCreateRecordAsTheFirstStep()
+    {
+        // As in Quickbase, Create Record can start a PowerFlow.
+        var pipeline = ConvertOne("""
+              $Pipeline_P:
+                Type: QB::Pipeline
+                Properties: { Name: P }
+                Steps:
+                  - Type: QB::PipelineStep::Webhooks
+                    Properties: { Id: aa, Name: Incoming, Channel: { Resource: request, Id: webhooks, Selector: incoming } }
                   - Type: QB::PipelineStep::Quickbase
                     Properties:
                       Id: ab
@@ -831,9 +858,8 @@ public class QblPipelineConverterTests
                       Channel: { Resource: record, Id: quickbase, Selector: create }
             """);
 
-        pipeline.Steps.Should().BeEmpty();
-        pipeline.Issues.Should().Contain(i => i.Code == "PIPELINE_NO_VALID_START");
-        pipeline.Issues.Should().Contain(i => i.StepId == "ab" && i.Code == "PIPELINE_STEP_NOT_SAVED" && i.IsSkippedStep);
+        pipeline.Steps.Should().ContainSingle().Which.Subtype.Should().Be("create-record");
+        pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_NO_VALID_START");
     }
 
     [Fact]

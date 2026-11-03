@@ -989,6 +989,8 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
 
                 // The record is gone by now; the engine captured its numeric id before deleting.
                 long? deletedRid = outputDict.TryGetValue("DeletedRecordId", out var delRidObj) && long.TryParse(delRidObj?.ToString(), out var delRid) ? delRid : null;
+                // A step naming its record by Record ID that failed before deleting still shows the Record ID it was given.
+                if (deletedRid == null && long.TryParse(targetRecordGuidStr, out var givenRid)) deletedRid = givenRid;
 
                 friendlyInput["Table"] = tableName;
                 friendlyInput["Record ID"] = deletedRid;
