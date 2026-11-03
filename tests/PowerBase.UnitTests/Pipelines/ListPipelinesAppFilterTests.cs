@@ -66,4 +66,15 @@ public class ListPipelinesAppFilterTests
         Sql("ListByUserPagedSqlTemplate").Should().Contain(filter);
         Sql("CountByUserSql").Should().Contain(filter);
     }
+
+    [Fact]
+    public void Repository_ListAndCountSql_LeaveOutTheDeletedAppsPowerFlows()
+    {
+        var type = typeof(PowerBase.Infrastructure.Repositories.PipelineRepository);
+        string Sql(string name) => (string)type.GetField(name, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
+        const string liveApp = "EXISTS (SELECT 1 FROM meta.App live WHERE live.Id = p.AppId AND live.IsDeleted = 0)";
+
+        Sql("ListByUserPagedSqlTemplate").Should().Contain(liveApp);
+        Sql("CountByUserSql").Should().Contain(liveApp, "the total must match the rows the list shows");
+    }
 }
