@@ -219,10 +219,10 @@ public class SavePipelineStepsCommandValidatorTests
     [Fact]
     public async Task Validate_InvalidFirstStepType_ReturnsError()
     {
-        // Arrange
+        // Arrange — Stop still cannot start a PowerFlow.
         var command = new SavePipelineStepsCommand(
             Guid.NewGuid(),
-            new List<SavePipelineStepDto> { CreateActionStep() },
+            new List<SavePipelineStepDto> { CreateStopStep() },
             Array.Empty<byte>()
         );
 
@@ -232,6 +232,64 @@ public class SavePipelineStepsCommandValidatorTests
         // Assert
         result.IsValid.Should().BeFalse();
         result.Errors.Should().Contain(e => e.ErrorMessage.Contains("A PowerFlow must begin with"));
+    }
+
+    private static SavePipelineStepDto FirstStep(string type, string subtype, object? config = null) => new()
+    {
+        PublicId = Guid.NewGuid(),
+        RefId = "ref_1",
+        Type = type,
+        Subtype = subtype,
+        IsValidated = false,
+        ConfigJson = config is null ? null : System.Text.Json.JsonSerializer.Serialize(config)
+    };
+
+    [Theory]
+    [InlineData("action", "create-record")]
+    [InlineData("action", "call-another-pipeline")]
+    public async Task Validate_QuickbaseActionsThatNeedNoEarlierStep_CanStartAPowerFlow(string type, string subtype)
+    {
+        var result = await _validator.ValidateAsync(new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { FirstStep(type, subtype) }, Array.Empty<byte>()));
+
+        result.Errors.Should().NotContain(e => e.ErrorMessage.Contains("A PowerFlow must begin with"));
+    }
+
+    [Theory]
+    [InlineData("action", "update-record")]
+    [InlineData("action", "delete-record")]
+    [InlineData("file", "upload-file")]
+    public async Task Validate_RecordSteps_CanStartAPowerFlow(string type, string subtype)
+    {
+        var table = Guid.NewGuid().ToString();
+        var result = await _validator.ValidateAsync(new SavePipelineStepsCommand(Guid.NewGuid(),
+            new List<SavePipelineStepDto> { FirstStep(type, subtype, new { tableId = table, targetRecordId = "{{steps.ref_0.RecordPublicId}}" }) }, Array.Empty<byte>()));
+        result.Errors.Should().NotContain(e => e.ErrorMessage.Contains("A PowerFlow must begin with"));
+    }
+
+    [Fact]
+    public async Task Validate_RecordIdMode_RequiresATableAndARecordId()
+    {
+        var step = FirstStep("action", "update-record", new { recordSource = "id" });
+        step.IsValidated = true;
+
+        var result = await _validator.ValidateAsync(new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { step }, Array.Empty<byte>()));
+
+        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("requires a valid table selection"));
+        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("requires a Record ID"));
+        result.Errors.Should().NotContain(e => e.ErrorMessage.Contains("targetRecordId"));
+    }
+
+    [Fact]
+    public async Task Validate_StepTargetUpdate_AfterATrigger_IsUnchanged()
+    {
+        // Regression: Update Record against the trigger's record keeps validating exactly as before.
+        var trigger = new SavePipelineStepDto { PublicId = Guid.NewGuid(), RefId = "ref_1", Type = "trigger", Subtype = "new-event", IsValidated = false };
+        var update = new SavePipelineStepDto { PublicId = Guid.NewGuid(), RefId = "ref_2", Type = "action", Subtype = "update-record", IsValidated = true,
+            ConfigJson = "{\"tableId\":\"" + Guid.NewGuid() + "\",\"targetRecordId\":\"{{trigger.RecordPublicId}}\"}" };
+
+        var result = await _validator.ValidateAsync(new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { trigger, update }, Array.Empty<byte>()));
+
+        result.Errors.Should().NotContain(e => e.ErrorMessage.Contains("ref_2"));
     }
 
     [Fact]

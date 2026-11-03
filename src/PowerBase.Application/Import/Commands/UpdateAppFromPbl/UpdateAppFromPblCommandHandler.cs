@@ -49,14 +49,19 @@ public class UpdateAppFromPblCommandHandler
     private readonly IAppAccessService _accessService;
     private readonly IAuditRepository _auditRepo;
     private readonly IQueryContext _queryContext;
+    private readonly PblPipelinesImporter? _pipelinesImporter;
+    private readonly IPipelineRepository? _pipelineRepo;
 
     public UpdateAppFromPblCommandHandler(
         PblValidator validator, ImportDiffBuilder diffBuilder, ImportAppFromPblCommandHandler importer,
         ImportSourceRefRecorder recorder, IImportSourceRefRepository sourceRefRepo, PblExtrasImporter extrasImporter,
         BulkCreateFieldsCommandHandler bulkCreateHandler, UpdateFieldCommandHandler updateFieldHandler,
         IAppSeeder appSeeder, IAppRepository appRepo, IAppTableRepository tableRepo, IAppFieldRepository fieldRepo,
-        IAppAccessService accessService, IAuditRepository auditRepo, IQueryContext queryContext)
+        IAppAccessService accessService, IAuditRepository auditRepo, IQueryContext queryContext,
+        PblPipelinesImporter? pipelinesImporter = null, IPipelineRepository? pipelineRepo = null)
     {
+        _pipelinesImporter = pipelinesImporter;
+        _pipelineRepo = pipelineRepo;
         _validator = validator;
         _diffBuilder = diffBuilder;
         _importer = importer;
@@ -79,16 +84,19 @@ public class UpdateAppFromPblCommandHandler
         await _accessService.RequireAppRoleAsync(command.TargetAppPublicId, ADMINISTRATOR_ROLE, ct);
 
         var mapping = command.Mapping ?? new ImportMapping();
-        var (document, warnings) = PblDocumentTools.Load(command.Content, _validator);
+        var (parsedApp, warnings) = PblDocumentTools.LoadApp(command.Content, _validator);
+        var document = parsedApp.Document;
         PblDocumentTools.ExcludeTables(document, mapping.ExcludedTableRefs);
 
-        var diff = await _diffBuilder.BuildAsync(document, command.TargetAppPublicId, mapping, ct);
+        var diff = await _diffBuilder.BuildAsync(document, command.TargetAppPublicId, mapping, ct, parsedApp.Pipelines);
         var appId = await _appRepo.GetIdByPublicIdAsync(command.TargetAppPublicId, ct);
 
         var plan = ImportUpdatePlanner.Plan(diff, mapping);
 
         var outcomes = plan.Outcomes;
         var skipped = new List<ImportSkippedItem>(warnings);
+        foreach (var unreadable in (parsedApp.Pipelines ?? []).Where(p => p.IsUnreadable))
+            skipped.AddRange(unreadable.Issues.Select(i => new ImportSkippedItem { Name = unreadable.Name, Reason = i.Message }));
         var formulaTranslations = new List<FormulaTranslationReportItem>();
         var failures = new List<string>();
 
@@ -187,7 +195,7 @@ public class UpdateAppFromPblCommandHandler
         }
 
         // ---- Stage 4: approved overwrites ----
-        foreach (var item in plan.Overwrites)
+        foreach (var item in plan.Overwrites.Where(i => i.ElementType != ImportElementTypes.Pipeline))
         {
             var (ok, reason) = await OverwriteAsync(item, document, appId, command.TargetAppPublicId, skipped, ct);
             outcomes.Add(new ImportElementOutcome
@@ -196,6 +204,9 @@ public class UpdateAppFromPblCommandHandler
                 Outcome = ok ? ImportOutcome.Overwritten : ImportOutcome.Failed, Reason = reason,
             });
         }
+
+        // ---- Stage 4b: PowerFlows, last — their steps read the tables and fields added above ----
+        var pipelineItems = await ApplyPipelinesAsync(parsedApp, plan, diff, appId, command.TargetAppPublicId, outcomes, failures, ct);
 
         // ---- Stage 5: remember what now exists, so retries and later updates match it ----
         var recorded = await _recorder.RecordAsync(subset, command.TargetAppPublicId, ct);
@@ -237,8 +248,76 @@ public class UpdateAppFromPblCommandHandler
             Failures = failures,
             Skipped = skipped,
             FormulaTranslations = formulaTranslations,
+            Pipelines = pipelineItems,
         };
     }
+
+    /// <summary>Creates the approved new PowerFlows and overwrites the approved existing ones, resolving every table and field
+    /// to the one the diff matched in the app. Each PowerFlow gets an outcome; a created one is recorded so a later update of
+    /// the same file matches it instead of creating it again.</summary>
+    private async Task<List<PipelineImportReportItem>> ApplyPipelinesAsync(
+        Import.Qbl.ParsedApp parsedApp, ImportUpdatePlan plan, ImportDiffResult diff, long appId, Guid appPublicId,
+        List<ImportElementOutcome> outcomes, List<string> failures, CancellationToken ct)
+    {
+        var pipelineDiff = diff.Items.Where(i => i.ElementType == ImportElementTypes.Pipeline).ToList();
+        var addRefs = pipelineDiff.Where(i => plan.AddKeys.Contains(ImportSourceRefRecorder.Key(i.ElementType, i.SourceLogicalRef)))
+            .Select(i => i.SourceLogicalRef).ToHashSet(StringComparer.Ordinal);
+        var overwrites = plan.Overwrites.Where(i => i.ElementType == ImportElementTypes.Pipeline && i.TargetElementPublicId.HasValue)
+            .ToDictionary(i => i.SourceLogicalRef, i => i.TargetElementPublicId!.Value, StringComparer.Ordinal);
+        if (addRefs.Count == 0 && overwrites.Count == 0)
+            return [];
+
+        if (_pipelinesImporter is null)
+        {
+            foreach (var item in pipelineDiff.Where(i => addRefs.Contains(i.SourceLogicalRef) || overwrites.ContainsKey(i.SourceLogicalRef)))
+                outcomes.Add(Outcome(item, ImportOutcome.Failed, "PowerFlows cannot be imported here."));
+            return [];
+        }
+
+        static bool Usable(ImportDiffItem i) => i.TargetElementId.HasValue && i.Status != ImportDiffStatus.Conflict;
+        var targets = new PblPipelinesImporter.ExistingAppTargets(
+            diff.Items.Where(i => i.ElementType == ImportElementTypes.Table && Usable(i))
+                .GroupBy(i => i.SourceLogicalRef, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.First().TargetElementId!.Value, StringComparer.Ordinal),
+            diff.Items.Where(i => i.ElementType == ImportElementTypes.Field && Usable(i))
+                .GroupBy(i => i.SourceLogicalRef, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.First().TargetElementId!.Value, StringComparer.Ordinal));
+
+        List<PipelineImportReportItem> results;
+        try
+        {
+            results = await _pipelinesImporter.ImportIntoExistingAppAsync(parsedApp, appPublicId, diff.TargetAppName, addRefs, overwrites, targets, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            failures.Add($"PowerFlows could not be imported: {ex.Message}. Re-running the import will not duplicate the ones already added.");
+            results = [];
+        }
+
+        var created = new List<(string ElementType, string SourceLogicalRef, long ElementId)>();
+        foreach (var item in pipelineDiff.Where(i => addRefs.Contains(i.SourceLogicalRef) || overwrites.ContainsKey(i.SourceLogicalRef)))
+        {
+            var isOverwrite = overwrites.ContainsKey(item.SourceLogicalRef);
+            var result = results.FirstOrDefault(r => string.Equals(r.LogicalRef, item.SourceLogicalRef, StringComparison.Ordinal));
+            if (result?.PipelinePublicId is not { } publicId)
+            {
+                outcomes.Add(Outcome(item, ImportOutcome.Failed, Describe(result) ?? "The PowerFlow was not created."));
+                continue;
+            }
+            if (!isOverwrite && _pipelineRepo is not null)
+                created.Add((ImportElementTypes.Pipeline, item.SourceLogicalRef, await _pipelineRepo.GetIdByPublicIdAsync(publicId, ct)));
+
+            if (result.Status != PipelineImportStatuses.Created)
+                outcomes.Add(Outcome(item, isOverwrite ? ImportOutcome.Failed : ImportOutcome.Added, Describe(result)));
+            else
+                outcomes.Add(Outcome(item, isOverwrite ? ImportOutcome.Overwritten : ImportOutcome.Added,
+                    result.NeedsReview ? "Turned off: review it before turning it on (see the PowerFlow's issues)." : null));
+        }
+        if (created.Count > 0)
+            await _sourceRefRepo.UpsertManyAsync(appId, created, ct);
+        return results;
+    }
+
+    private static string? Describe(PipelineImportReportItem? item) =>
+        item is null || item.Issues.Count == 0 ? null : string.Join(" ", item.Issues.Select(i => i.Message).Distinct().Take(3));
 
     private static ImportElementOutcome Outcome(ImportDiffItem item, string outcome, string? reason) =>
         ImportUpdatePlanner.Outcome(item, outcome, reason);

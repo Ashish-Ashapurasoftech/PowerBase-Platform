@@ -86,6 +86,7 @@ public class PipelinesController : ControllerBase
         [FromQuery] string sortBy = "createdOn",
         [FromQuery] bool sortDesc = true,
         [FromQuery] bool? isActive = null,
+        [FromQuery] Guid? filterAppId = null,
         CancellationToken ct = default)
     {
         var query = new ListPipelinesQuery(
@@ -95,7 +96,8 @@ public class PipelinesController : ControllerBase
             search,
             sortBy,
             sortDesc,
-            isActive);
+            isActive,
+            filterAppId);
 
         var result = await _listHandler.HandleAsync(query, ct);
         var items = result.Items.Select(MapToListItemResponse).ToList();

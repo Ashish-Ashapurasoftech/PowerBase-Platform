@@ -48,6 +48,10 @@ public sealed class ImportMapping
     /// <summary>Per-application choices (New App only). An application not listed is imported as is.</summary>
     public List<ImportMappingApp> Apps { get; set; } = [];
 
+    /// <summary>Quickbase files carry no on/off state for pipelines, so imported PowerFlows are off. When set, each PowerFlow
+    /// that imported completely is turned on through the same activation checks as the editor's toggle.</summary>
+    public bool ActivatePipelines { get; set; }
+
     public ImportMappingApp? ForApp(string appRef) => Apps.FirstOrDefault(a => string.Equals(a.AppRef, appRef, StringComparison.Ordinal));
 
     private static readonly JsonSerializerOptions JsonOptions = new()
