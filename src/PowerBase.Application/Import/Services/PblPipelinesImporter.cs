@@ -228,7 +228,9 @@ public class PblPipelinesImporter(
         }
 
         var timeZone = string.IsNullOrWhiteSpace(pipeline.CrontabTimezone) ? null : pipeline.CrontabTimezone.Trim();
-        var command = new UpdatePipelineScheduleCommand(pipelinePublicId, "custom", null, null, null, null, null, null, null, timeZone ?? string.Empty, pipeline.Crontab.Trim());
+        var schedule = PowerBase.Application.Import.Qbl.QblCrontabSchedule.From(pipeline.Crontab);
+        var command = new UpdatePipelineScheduleCommand(pipelinePublicId, schedule.ScheduleType, schedule.Interval, schedule.TimeOfDay, schedule.Weekdays,
+            schedule.MonthDay, schedule.MonthOfYear, null, null, timeZone ?? string.Empty, schedule.CronExpression);
         var validation = new UpdatePipelineScheduleCommandValidator().Validate(command);
         if (!validation.IsValid)
         {
@@ -247,6 +249,11 @@ public class PblPipelinesImporter(
         {
             PipelineId = pipelineId,
             ScheduleType = command.ScheduleType,
+            Interval = command.Interval,
+            TimeOfDay = command.TimeOfDay,
+            Weekdays = command.Weekdays,
+            MonthDay = command.MonthDay,
+            MonthOfYear = command.MonthOfYear,
             TimeZone = command.TimeZone,
             CronExpression = command.CronExpression,
             NextRunOn = null,
