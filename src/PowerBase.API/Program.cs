@@ -417,6 +417,7 @@ builder.Services.AddScoped<PowerBase.Application.Imports.IPowerFlowImportActions
 builder.Services.AddScoped<PowerBase.Application.Imports.StartPowerFlowImportHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.ListAppImportDefinitionsHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.ValidateImportFormulaHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.ValidatePipelineFormula.ValidatePipelineFormulaHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.ListImportHistoryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.Files.ColumnFitHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.IReferenceOriginalFields, PowerBase.Application.Imports.ReferenceOriginalFields>();

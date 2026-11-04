@@ -3593,6 +3593,103 @@ public class PipelineEngineTests
             Arg.Any<System.Data.IDbTransaction?>(),
             Arg.Any<bool>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
+
+    // ---- Formula values ("<>" on a step value) ----
+
+    private static string FormulaValue(string expression, params (string Token, string Type)[] fields) =>
+        PipelineFormulaValue.Create(new PipelineFormulaValue.Definition(expression, fields.Select(f => new PipelineFormulaValue.Field(f.Token, f.Type)).ToList()));
+
+    private string EvaluateValue(string value, string payloadJson) =>
+        (string)typeof(PipelineEngine).GetMethod("EvaluateTokens", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(_engine, new object?[] { value, payloadJson, null, null })!;
+
+    [Fact]
+    public void Formula_Value_ReadsEarlierStepFieldsWithTheirTypes()
+    {
+        var payload = """{"steps":{"ref_aa":{"fid_3":42,"fid_20":"Ann","fid_1":"2026-01-15"}}}""";
+
+        EvaluateValue(FormulaValue("\"CST000\" & ToText([{{steps.ref_aa.fid_3}}])", ("{{steps.ref_aa.fid_3}}", "number")), payload).Should().Be("CST00042");
+        EvaluateValue(FormulaValue("[{{steps.ref_aa.fid_3}}] * 2", ("{{steps.ref_aa.fid_3}}", "number")), payload).Should().Be("84");
+        EvaluateValue(FormulaValue("[{{steps.ref_aa.fid_20}}] & \"!\"", ("{{steps.ref_aa.fid_20}}", "text")), payload).Should().Be("Ann!");
+        EvaluateValue(FormulaValue("AdjustMonth([{{steps.ref_aa.fid_1}}], 1)", ("{{steps.ref_aa.fid_1}}", "date")), payload).Should().Be("2026-02-15");
+    }
+
+    [Fact]
+    public void Formula_Value_AFieldWithNoValue_IsBlankInTheFormula()
+    {
+        var payload = """{"steps":{"ref_aa":{"fid_20":""}}}""";
+
+        EvaluateValue(FormulaValue("If([{{steps.ref_aa.fid_20}}] = \"\", \"none\", [{{steps.ref_aa.fid_20}}])", ("{{steps.ref_aa.fid_20}}", "text")), payload)
+            .Should().Be("none");
+    }
+
+    [Fact]
+    public void Formula_Value_OrdinaryValues_AreUnchanged()
+    {
+        var payload = """{"steps":{"ref_aa":{"fid_20":"Ann"}}}""";
+
+        EvaluateValue("Hello {{steps.ref_aa.fid_20}}", payload).Should().Be("Hello Ann");
+        EvaluateValue("@formula is just text", payload).Should().Be("@formula is just text");
+    }
+
+    [Fact]
+    public async Task Formula_ConditionRight_IsComparedAsAValue_NotAsAnotherStepsField()
+    {
+        var step = new PipelineStep
+        {
+            Id = 100, RefId = "ref_cond", Type = "condition", Subtype = "if-else",
+            ConfigJson = JsonSerializer.Serialize(new
+            {
+                ruleGroups = new[]
+                {
+                    new
+                    {
+                        logicalOp = "AND",
+                        rules = new[]
+                        {
+                            new { type = "rule", left = "CST00042", op = "equals",
+                                  right = FormulaValue("\"CST000\" & ToText([{{steps.ref_aa.fid_3}}])", ("{{steps.ref_aa.fid_3}}", "number")) },
+                        },
+                    },
+                },
+            }),
+        };
+        var payload = """{"steps":{"ref_aa":{"fid_3":42,"fid_20":"CST00042"}}}""";
+        var method = typeof(PipelineEngine).GetMethod("ExecuteStepWithServicesAsync", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        var resultJson = await (Task<string>)method!.Invoke(_engine, new object[] {
+            step, payload, new Dictionary<string, object>(), new List<PipelineStep> { step }, new Dictionary<string, object>(), 1L, new PipelineStepRun(), new List<PipelineEngine.RawStepAuditSnapshot>(), "step_1",
+            _recordRepo, _tableRepo, _fieldRepo, _recordWriteService, Substitute.For<IPipelineTriggerInterceptor>(), Substitute.For<ITenantUnitOfWork>(), Substitute.For<IPipelineStepIdempotencyRepository>(), Substitute.For<IFileStorageService>(), _pipelineRecordSearchService, CancellationToken.None
+        })!;
+
+        resultJson.Should().Contain("\"Matched\":true");
+    }
+
+    [Fact]
+    public void Formula_StepSave_RefusesAValidatedStepWithABrokenFormula_AndKeepsAGoodOne()
+    {
+        var good = JsonSerializer.Serialize(new { fieldMappings = new[] { new { field = "fid_6", value = FormulaValue("\"A\" & \"B\"") } } });
+        var broken = JsonSerializer.Serialize(new { fieldMappings = new[] { new { field = "fid_6", value = FormulaValue("ToText(") } } });
+
+        FluentActions.Invoking(() => PipelineFormulaValue.ValidateStepConfig(good, "Create Record", new PowerBase.Formula.FormulaEngine())).Should().NotThrow();
+        FluentActions.Invoking(() => PipelineFormulaValue.ValidateStepConfig("""{"x":"plain {{steps.ref_aa.fid_1}}"}""", "S", new PowerBase.Formula.FormulaEngine())).Should().NotThrow();
+        FluentActions.Invoking(() => PipelineFormulaValue.ValidateStepConfig(broken, "Create Record", new PowerBase.Formula.FormulaEngine()))
+            .Should().Throw<ValidationException>();
+    }
+
+    [Fact]
+    public void Formula_ValidateWhileTyping_UsesTheEditorsFieldNames()
+    {
+        var handler = new PowerBase.Application.Pipelines.Queries.ValidatePipelineFormula.ValidatePipelineFormulaHandler(new PowerBase.Formula.FormulaEngine());
+        var fields = new List<PowerBase.Application.Pipelines.Queries.ValidatePipelineFormula.PipelineFormulaCheckField> { new("On New Event › Record ID#", "number") };
+
+        var ok = handler.Handle(new("\"CST000\" & ToText([On New Event › Record ID#])", fields));
+        ok.Valid.Should().BeTrue();
+        ok.ResultType.Should().Be("Text");
+
+        var unknown = handler.Handle(new("[Nope] & \"x\"", fields));
+        unknown.Valid.Should().BeFalse();
+        unknown.Diagnostics.Should().NotBeEmpty();
+        unknown.Diagnostics[0].Start.Should().Be(0, "the error points at the text the editor shows");
+    }
 }
-
-

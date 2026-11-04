@@ -4608,7 +4608,9 @@ public partial class PipelineEngine : IPipelineEngine
 
                     var leftCategory = await ResolveRuleTypeCategoryAsync(rule.Left, payloadJson, allSteps, fieldRepo, tableRepo, ct);
 
-                    if (!string.IsNullOrWhiteSpace(rule.Right) && System.Text.RegularExpressions.Regex.IsMatch(rule.Right.Trim(), @"\{\{\s*(?:steps\.|trigger\.|variables\.)"))
+                    // A formula on the right is a computed value (like a typed one), not another step's field: no field types to match.
+                    if (!string.IsNullOrWhiteSpace(rule.Right) && !PipelineFormulaValue.IsFormula(rule.Right)
+                        && System.Text.RegularExpressions.Regex.IsMatch(rule.Right.Trim(), @"\{\{\s*(?:steps\.|trigger\.|variables\.)"))
                     {
                         var rightCategory = await ResolveRuleTypeCategoryAsync(rule.Right, payloadJson, allSteps, fieldRepo, tableRepo, ct);
                         // A time of day against a date & time compares the time it holds (both were dates before times had their own type).
@@ -4793,6 +4795,8 @@ public partial class PipelineEngine : IPipelineEngine
         IAppFieldRepository fieldRepo, IAppTableRepository tableRepo, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(input) || !input.Contains("{{", StringComparison.Ordinal)) return input;
+        // A formula reads its fields as values (a user as its id); rewriting tokens inside it would break the formula.
+        if (PipelineFormulaValue.IsFormula(input)) return input;
         if (destination.TypeCode is "User" or "MultiUser" or "Formula_User" or "Formula_ListUser") return input;
         var tokens = Regex.Matches(input, @"\{\{[^{}]*\}\}").Select(m => m.Value).Distinct().ToList();
         foreach (var token in tokens)
@@ -5086,9 +5090,82 @@ public partial class PipelineEngine : IPipelineEngine
             $"fid_{f.Id}".Equals(fieldRef, StringComparison.OrdinalIgnoreCase));
     }
 
+    private PowerBase.Formula.FormulaEngine? _fallbackFormulaEngine;
+
+    /// <summary>The app's formula engine (the one every other formula runs on), from the step's services.</summary>
+    private PowerBase.Formula.FormulaEngine StepFormulaEngine =>
+        CurrentStepServices.GetService<PowerBase.Formula.FormulaEngine>() ?? (_fallbackFormulaEngine ??= new PowerBase.Formula.FormulaEngine());
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, string> _formulaAppIds = new();
+
+    /// <summary>The evaluation options a step value's formula runs with, built as the record formulas build them (FormulaProjector):
+    /// the clock, the acting user and the user directory, the fields' types, the PowerFlow's app and the frontend's URLs. A step value
+    /// belongs to no table, so TableId is empty.</summary>
+    private PowerBase.Formula.Evaluation.EvaluationOptions FormulaEvaluationOptions(IReadOnlyList<AppField> fields, List<PipelineStep>? allSteps)
+    {
+        var services = CurrentStepServices;
+        var query = services.GetService<IQueryContext>() ?? _queryContext;
+        var users = services.GetService<IUserRepository>();
+        var runtime = services.GetService<IFormulaRuntimeContext>();
+        return new PowerBase.Formula.Evaluation.EvaluationOptions
+        {
+            UtcNow = DateTime.UtcNow,
+            UserLookup = users is null ? null : new FormulaUserDirectory(users).Lookup,
+            FieldTypes = FormulaTypeMap.FieldTypesByFid(fields),
+            CurrentUser = query.UserId > 0
+                ? new PowerBase.Formula.Types.UserRef(query.UserId.ToString(CultureInfo.InvariantCulture), query.UserEmail, query.UserName)
+                : null,
+            AppId = FormulaAppId(allSteps, services),
+            TableId = string.Empty,
+            UrlRoot = runtime?.UrlRoot ?? string.Empty,
+            ReturnUrl = runtime?.ReturnUrl ?? string.Empty,
+        };
+    }
+
+    /// <summary>The PowerFlow's app public id (what AppID() returns), looked up once per PowerFlow. The evaluator is synchronous, so the
+    /// lookup blocks, as FormulaProjector's does.</summary>
+    private string FormulaAppId(List<PipelineStep>? allSteps, IServiceProvider services)
+    {
+        var pipelineId = allSteps?.FirstOrDefault(s => s.PipelineId > 0)?.PipelineId ?? 0;
+        if (pipelineId <= 0) return string.Empty;
+        return _formulaAppIds.GetOrAdd(pipelineId, id =>
+        {
+            try
+            {
+                var pipeline = _pipelineRepo.GetByIdAsync(id).GetAwaiter().GetResult();
+                var apps = services.GetService<IAppRepository>();
+                return pipeline is null || apps is null ? string.Empty : apps.GetPublicIdByIdAsync(pipeline.AppId).GetAwaiter().GetResult().ToString();
+            }
+            catch (Exception)
+            {
+                return string.Empty;
+            }
+        });
+    }
+
+    /// <summary>One field a formula reads. A field with no value is blank in the formula (the formula decides what blank means),
+    /// where a plain reference to it would fail the step.</summary>
+    private string? ResolveFormulaToken(string token, string payloadJson, string? executionPath, List<PipelineStep>? allSteps)
+    {
+        if (string.IsNullOrEmpty(payloadJson)) return null;
+        try
+        {
+            var value = EvaluateTokens(token, payloadJson, executionPath, allSteps);
+            return value == token ? null : value;
+        }
+        catch (PipelineStepException)
+        {
+            return null;
+        }
+    }
+
     private string EvaluateTokens(string? input, string payloadJson, string? executionPath = null, List<PipelineStep>? allSteps = null)
     {
         if (string.IsNullOrEmpty(input)) return string.Empty;
+        // A value written as a formula: each field it reads is resolved like any reference, then the formula runs on them.
+        if (PipelineFormulaValue.IsFormula(input))
+            return PipelineFormulaValue.Evaluate(input, token => ResolveFormulaToken(token, payloadJson, executionPath, allSteps),
+                StepFormulaEngine, fields => FormulaEvaluationOptions(fields, allSteps));
         if (string.IsNullOrEmpty(payloadJson)) return input;
         if (input.Contains(".fid_", StringComparison.OrdinalIgnoreCase))
         {
