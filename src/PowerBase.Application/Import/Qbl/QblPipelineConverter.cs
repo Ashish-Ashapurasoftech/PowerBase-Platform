@@ -1190,7 +1190,7 @@ public static class QblPipelineConverter
                     Incomplete("PIPELINE_FIELD_NOT_FOUND", $"Filter field '{key}' does not match a field of the step's table; the filter was left empty.");
                     return null;
                 }
-                if (MapOperator(expression, FilterCategory(field.Type, expression), forCondition: false) is not var (op, value))
+                if (MapOperator(expression, FilterCategory(field.Type, expression), forCondition: false, field.Type) is not var (op, value))
                     return null;
                 return new Dictionary<string, object?>(StringComparer.Ordinal)
                 {
@@ -1225,7 +1225,7 @@ public static class QblPipelineConverter
                 if (left is string { Length: 0 })
                     return null;
                 var field = tested.Table is null ? null : FieldByKey(tested.Table.Value, key, tested, "export_fields");
-                if (MapOperator(expression, FilterCategory(field?.Type, expression), forCondition: true) is not var (op, value))
+                if (MapOperator(expression, FilterCategory(field?.Type, expression), forCondition: true, field?.Type) is not var (op, value))
                     return null;
                 return new Dictionary<string, object?>(StringComparer.Ordinal)
                 {
@@ -1254,6 +1254,30 @@ public static class QblPipelineConverter
                 };
             }
 
+            /// <summary>Quickbase compares an "on date" filter on the day in the filter's time zone. For a Date field (a calendar day, no
+            /// time) the zone changes nothing, so the day is kept as it is. For a Date/Time field a fixed day becomes the instant its
+            /// midnight starts in that zone — the value the editor's date picker stores — and a Search / trigger filter matches the 24
+            /// hours from there, i.e. that day in the zone. A day that comes from a step ({{…}}) is only known when the PowerFlow
+            /// runs, and a condition compares instants differently, so those keep the day and say the zone was not applied.</summary>
+            private object? OnDateInZone(object? day, string zone, string? fieldType, bool forCondition)
+            {
+                var kind = fieldType?.Split("::") is { Length: >= 3 } parts ? parts[2] : null;
+                if (kind is "Date" or "WorkDate")
+                    return day;
+                var text = day?.ToString()?.Trim();
+                if (kind is "DateTime" or "DateCreated" or "DateModified" && !forCondition
+                    && !string.IsNullOrEmpty(text) && !text.Contains("{{", StringComparison.Ordinal)
+                    && DateTime.TryParseExact(text, ["yyyy-MM-dd", "MM-dd-yyyy", "MM/dd/yyyy", "M/d/yyyy", "yyyy/MM/dd"],
+                        System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var date)
+                    && TimeZoneInfo.TryFindSystemTimeZoneById(zone, out var timeZone))
+                {
+                    var midnight = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(date.Date, DateTimeKind.Unspecified), timeZone);
+                    return midnight.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture);
+                }
+                reader.Note(source, "PIPELINE_FILTER_TIME_ZONE", $"The filter compares the day in the time zone '{zone}', which can only be applied to a fixed day on a Date/Time field; this one is compared in the app's time zone.", changesExecution: true);
+                return day;
+            }
+
             /// <summary>The editor's operator list a field gets (NUMBER, DATE, BOOLEAN or TEXT). A field of unknown type is judged by
             /// the operator and value: an ordering of a number compares numbers, of anything else dates.</summary>
             private static string FilterCategory(string? type, IReadOnlyDictionary<string, object?> expression)
@@ -1276,7 +1300,7 @@ public static class QblPipelineConverter
 
             /// <summary>A Quickbase filter operator and value → the PowerFlows operator the editor offers for the field's type (the
             /// Search/trigger filter editor and the condition editor use different names) and the value it stores.</summary>
-            private (string Op, object Value)? MapOperator(IReadOnlyDictionary<string, object?> expression, string category, bool forCondition)
+            private (string Op, object Value)? MapOperator(IReadOnlyDictionary<string, object?> expression, string category, bool forCondition, string? fieldType = null)
             {
                 var op = Scalar(expression, "Operator") ?? string.Empty;
                 expression.TryGetValue("Value", out var raw);
@@ -1312,10 +1336,9 @@ public static class QblPipelineConverter
                     return (mapped.Value.Op, NONE);
                 if (name == "on_date" && raw is IList<object?> { Count: > 0 } onDate)
                 {
-                    // Quickbase keeps the day and its time zone; PowerFlows compares the day in the app's time zone.
-                    if (onDate.Count > 1)
-                        reader.Note(source, "PIPELINE_FILTER_TIME_ZONE", $"The filter's time zone '{onDate[1]}' is not imported; the day is compared in the app's time zone.", changesExecution: true);
                     raw = onDate[0];
+                    if (onDate.Count > 1 && onDate[1]?.ToString() is { Length: > 0 } zone)
+                        raw = OnDateInZone(raw, zone, fieldType, forCondition);
                 }
                 return (mapped.Value.Op, Text(raw, forCondition ? "Condition value" : "Filter value"));
             }

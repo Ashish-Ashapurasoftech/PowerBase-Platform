@@ -1206,4 +1206,111 @@ public class QblPipelineMoreStepsTests
             .Which.Message.Should().Contain("column 'email' → 'Employee Code'").And.Contain("Header Row '1'");
         pipeline.Issues.Should().NotContain(i => i.StepId == "au" && i.Code == "PIPELINE_SETTING_NOT_IMPORTED");
     }
+
+    // ---- "on date" filters with a time zone ----
+
+    /// <summary><see cref="Convert"/> on an app whose Employee table also has a Date field "Hire Date" (key hire_date).</summary>
+    private static PblPipeline ConvertWithDateField(params string[] parts)
+    {
+        var steps = string.Join("\n", parts.Select(Dedent));
+        var nameLine = App.Replace("\r", "").Split('\n').First(l => l.TrimStart().StartsWith("$Field_Name:", StringComparison.Ordinal));
+        var indent = nameLine[..(nameLine.Length - nameLine.TrimStart().Length)];
+        var app = App.Replace(nameLine.TrimStart(), "$Field_Hire_Date:\n" + indent + "  Type: QB::Field::Date\n" + indent + "  Id: 40\n" + indent
+            + "  Properties: { Label: Hire Date }\n" + indent + "$Field_Name:");
+        var content = app + "\n  $Pipeline_P:\n    Type: QB::Pipeline\n    Properties: { Name: P }\n    Steps:\n" + Indent(steps, 6) + "\n" + Accounts;
+        return QblPipelineConverter.ConvertAll(QblSerializer.Deserialize(content), content).Should().ContainSingle().Subject;
+    }
+
+    private static Dictionary<string, object?> OnlySearchRule(PblPipeline pipeline) =>
+        Rules(Step(pipeline, "ref_ab").Config["filterGroups"]).Should().ContainSingle().Subject;
+
+    [Fact]
+    public void OnDateInAZone_OnADateField_KeepsTheDay_TheZoneChangesNothing()
+    {
+        var pipeline = ConvertWithDateField(Trigger(), Search(Relational("hire_date", "on_date", "['2026-01-01', America/New_York]")));
+
+        var rule = OnlySearchRule(pipeline);
+        rule["operator"].Should().Be("is");
+        rule["value"].Should().Be("2026-01-01");
+        pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_FILTER_TIME_ZONE");
+    }
+
+    [Fact]
+    public void OnDateInAZone_OnADateFieldFromAStep_KeepsTheToken_TheZoneChangesNothing()
+    {
+        var pipeline = ConvertWithDateField(Trigger(), Search(Relational("hire_date", "on_date", "['{{aa.date_created}}', America/New_York]")));
+
+        OnlySearchRule(pipeline)["value"].Should().NotBe("");
+        pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_FILTER_TIME_ZONE");
+    }
+
+    [Theory]
+    [InlineData("2026-01-01", "2026-01-01T05:00:00.000Z")] // New York winter: UTC-5
+    [InlineData("2026-07-01", "2026-07-01T04:00:00.000Z")] // New York summer: UTC-4
+    [InlineData("07-01-2026", "2026-07-01T04:00:00.000Z")]
+    public void OnDateInAZone_OnADateTimeField_StartsTheDayAtMidnightInThatZone(string day, string instant)
+    {
+        var pipeline = Convert(Trigger(), Search(Relational("date_created", "on_date", $"['{day}', America/New_York]")));
+
+        var rule = OnlySearchRule(pipeline);
+        rule["operator"].Should().Be("is");
+        rule["value"].Should().Be(instant);
+        pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_FILTER_TIME_ZONE");
+    }
+
+    [Fact]
+    public void NotOnDateInAZone_OnADateTimeField_AlsoUsesThatZone()
+    {
+        var pipeline = Convert(Trigger(), Search(Relational("date_created", "!on_date", "['2026-01-01', America/New_York]")));
+
+        var rule = OnlySearchRule(pipeline);
+        rule["operator"].Should().Be("is-not");
+        rule["value"].Should().Be("2026-01-01T05:00:00.000Z");
+    }
+
+    [Fact]
+    public void OnDateInAZone_OnADateTimeFieldFromAStep_KeepsTheTokenAndSaysTheZoneIsNotApplied()
+    {
+        var pipeline = Convert(Trigger(), Search(Relational("date_created", "on_date", "['{{aa.date_created}}', America/New_York]")));
+
+        OnlySearchRule(pipeline)["value"].Should().NotBe("");
+        pipeline.Issues.Should().ContainSingle(i => i.Code == "PIPELINE_FILTER_TIME_ZONE").Which.Message.Should().Contain("America/New_York");
+    }
+
+    [Fact]
+    public void OnDateInAnUnknownZone_KeepsTheDayAndSaysTheZoneIsNotApplied()
+    {
+        var pipeline = Convert(Trigger(), Search(Relational("date_created", "on_date", "['2026-01-01', Mars/Base]")));
+
+        OnlySearchRule(pipeline)["value"].Should().Be("2026-01-01");
+        pipeline.Issues.Should().ContainSingle(i => i.Code == "PIPELINE_FILTER_TIME_ZONE");
+    }
+
+    [Fact]
+    public void OnDateInAZone_InACondition_KeepsTheDayAndSaysTheZoneIsNotApplied()
+    {
+        var pipeline = Convert(Trigger(), $$"""
+                  - Type: QB::PipelineStep::Condition
+                    Properties:
+                      Name: Condition
+                      Filters:
+                        Type: composite-expression
+                        Notation: postfix
+                        Expression:
+            {{Relational("date_created", "on_date", "['2026-01-01', America/New_York]", "aa")}}
+            """);
+
+        var rule = Rules(Flatten(pipeline.Steps).Single(s => s.Subtype == "if-else").Config["ruleGroups"]).Should().ContainSingle().Subject;
+        rule["right"].Should().Be("2026-01-01");
+        pipeline.Issues.Should().ContainSingle(i => i.Code == "PIPELINE_FILTER_TIME_ZONE");
+    }
+
+    [Fact]
+    public void OnDateWithoutAZone_IsUnchanged()
+    {
+        var pipeline = Convert(Trigger(), Search(Relational("date_created", "on_date", "'2026-01-01'")));
+
+        OnlySearchRule(pipeline)["value"].Should().Be("2026-01-01");
+        pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_FILTER_TIME_ZONE");
+    }
 }

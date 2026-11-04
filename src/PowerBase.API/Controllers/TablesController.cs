@@ -289,6 +289,7 @@ public class TablesController : ControllerBase
         PublicId = t.PublicId,
         Name = t.Name,
         SingularLabel = t.SingularLabel,
+        PluralLabel = t.PluralLabel,
         Icon = t.Icon,
         IsShowInBar = t.IsShowInBar,
     };

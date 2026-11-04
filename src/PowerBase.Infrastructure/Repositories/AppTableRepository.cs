@@ -66,7 +66,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
     // No paging/search/sort — every table in the app, ordered to match the rest of the app's
     // canonical nav ordering (DisplayOrder, falling back to creation order for ties).
     private const string ListNavByAppSql = """
-        SELECT t.PublicId, t.Name, t.SingularLabel, t.Icon, t.IsShowInBar
+        SELECT t.PublicId, t.Name, t.SingularLabel, t.PluralLabel, t.Icon, t.IsShowInBar
         FROM meta.AppTable t
         WHERE t.AppId = @appId
           AND t.IsDeleted = 0

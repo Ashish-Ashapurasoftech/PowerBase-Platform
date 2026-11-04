@@ -10,6 +10,7 @@ public class AppTableNavItemDto
     public Guid PublicId { get; set; }
     public string Name { get; set; } = string.Empty;
     public string? SingularLabel { get; set; }
+    public string? PluralLabel { get; set; }
     public string? Icon { get; set; }
     public bool IsShowInBar { get; set; }
 }

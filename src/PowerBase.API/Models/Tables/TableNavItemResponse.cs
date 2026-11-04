@@ -9,6 +9,7 @@ public class TableNavItemResponse
     public Guid PublicId { get; init; }
     public string Name { get; init; } = string.Empty;
     public string? SingularLabel { get; init; }
+    public string? PluralLabel { get; init; }
     public string? Icon { get; init; }
     public bool IsShowInBar { get; init; }
 }
