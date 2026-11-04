@@ -629,7 +629,9 @@ BEGIN
 
         IF @CopyUsers = 1
         BEGIN
-            -- Nobody is emailed; the copier's own Administrator row is added below.
+            -- Nobody is emailed. Everyone keeps their roles, the copier included (Quickbase: "keep their existing roles in
+            -- the new app"); a user may hold several roles. The copier's own Administrator row is added below, so a
+            -- non-admin copier ends up with their original role plus Administrator.
             INSERT INTO meta.AppUser (AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, AddedBy,
                                       CreatedOn, ShowInUserPickers, IsFromGroup, GroupId)
             SELECT @NewAppId, u.UserId, u.UserPublicId, u.UserName, u.UserEmail, m.NewId, u.Status, @UserId, @now,

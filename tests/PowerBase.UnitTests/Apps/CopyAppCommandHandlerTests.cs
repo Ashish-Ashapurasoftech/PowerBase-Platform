@@ -81,6 +81,25 @@ public class CopyAppCommandHandlerTests
     }
 
     [Fact]
+    public async Task HandleAsync_CallerGoneAfterCopy_StillLogsActivity()
+    {
+        // The request is cancelled (tab closed) once the copy has committed.
+        using var request = new CancellationTokenSource();
+        _copyRepo.CopySchemaAsync(Arg.Any<AppSchemaCopyRequest>(), Arg.Any<CancellationToken>())
+            .Returns(_ =>
+            {
+                request.Cancel();
+                return new AppSchemaCopyResult(NEW_APP_ID, _newPublicId, [], []);
+            });
+
+        await CreateSut().HandleAsync(new CopyAppCommand(_sourcePublicId, "Copy of HR", null), request.Token);
+
+        await _auditRepo.Received(2).LogActivityAsync(
+            AuditActions.Created, AuditEntityTypes.App, _newPublicId.ToString(), Arg.Any<string>(), Arg.Any<long?>(),
+            null, null, Arg.Is<CancellationToken>(t => !t.CanBeCanceled));
+    }
+
+    [Fact]
     public async Task HandleAsync_CopyUsersAndEncryptedApp_PassesBothToProcedure()
     {
         GivenSourceApp(securityOptions: null, isEncrypted: true);

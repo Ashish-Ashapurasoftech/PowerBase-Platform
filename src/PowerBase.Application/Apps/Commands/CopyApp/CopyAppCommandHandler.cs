@@ -78,12 +78,13 @@ public class CopyAppCommandHandler
             source.Id, name, description, _queryContext.UserId, copier.PublicId, copier.Name, copier.Email,
             command.CopyUsers, source.IsEncrypted, command.ProgressId), ct);
 
+        // The copy is committed: log it even if the caller has gone away meanwhile (closed tab), so the request's token is not used.
         await _auditRepo.LogActivityAsync(
             AuditActions.Created, AuditEntityTypes.App, copy.NewAppPublicId.ToString(),
-            $"Application copied from {source.Name}: {name}", appId: copy.NewAppId, ct: ct);
+            $"Application copied from {source.Name}: {name}", appId: copy.NewAppId, ct: CancellationToken.None);
         await _auditRepo.LogActivityAsync(
             AuditActions.Created, AuditEntityTypes.App, copy.NewAppPublicId.ToString(),
-            $"Application copied to {name}", appId: source.Id, ct: ct);
+            $"Application copied to {name}", appId: source.Id, ct: CancellationToken.None);
 
         return new CopyAppResult
         {
