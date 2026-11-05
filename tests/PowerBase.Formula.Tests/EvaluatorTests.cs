@@ -116,7 +116,7 @@ public class EvaluatorTests
     // Wave 2 — Split/Join round trips
     [InlineData("Join(Split(\"a-b-c\", \"-\"), \"+\")", "a+b+c")]
     [InlineData("Join(Split(\"a,b,c\", \",\"), \"\")", "abc")]
-    [InlineData("ToText(Split(\"a,b\", \",\"))", "a\nb")]   // list → text joins with newline
+    [InlineData("ToText(Split(\"a,b\", \",\"))", "a; b")]   // list → text joins with "; "
     public void Text_results(string expr, string expected)
     {
         var v = FormulaEval.Const(expr);
