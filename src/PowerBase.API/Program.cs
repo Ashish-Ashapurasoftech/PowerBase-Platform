@@ -658,6 +658,18 @@ builder.Services.AddScoped<PowerBase.Application.Reports.Queries.ListReportPicke
 builder.Services.AddScoped<ResolveDefaultReportQueryHandler>();
 builder.Services.AddScoped<RunReportQueryHandler>();
 builder.Services.AddScoped<ExportReportQueryHandler>();
+// Quickbase-compatible API v1 (QuickbaseApi/V1) — new services only; existing registrations unchanged.
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbSchemaService>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Common.QbIdResolver>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbReferenceTypes>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbReportService>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbUserValueResolver>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbRecordService>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbXmlDispatcher>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbXmlRecordActions>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbXmlUserActions>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbUserProvisioning>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbXmlImportActions>();
 builder.Services.AddScoped<PowerBase.Application.Reports.Queries.GetRolesReportsMatrix.GetRolesReportsMatrixQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Reports.Commands.UpdateReportVisibilityMatrix.UpdateReportVisibilityMatrixCommandHandler>();
 builder.Services.AddScoped<ListUsersQueryHandler>();
@@ -761,6 +773,8 @@ app.UseStaticFiles(new StaticFileOptions
 });
 
 app.UseMiddleware<QueryContextMiddleware>();
+// Quickbase XML API (/db/*): copies a usertoken/ticket request parameter into the Authorization header. Other paths untouched.
+app.UseMiddleware<PowerBase.API.QuickbaseApi.Xml.QbXmlTokenMiddleware>();
 app.UseMiddleware<JwtMiddleware>();
 app.MapControllers();
 // Liveness of the search pipeline (workers, outbox backlog, search service): counts and times only, no record data. Point an uptime probe
