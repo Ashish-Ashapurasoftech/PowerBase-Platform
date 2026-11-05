@@ -14,7 +14,7 @@ namespace PowerBase.Application.Import.Jobs;
 /// <summary>Files larger than this, or holding several applications, are imported in the background instead of while the user waits.</summary>
 public static class AppImportJobPolicy
 {
-    public const long BackgroundThresholdBytes = 3L * 1024 * 1024;
+    public const long BackgroundThresholdBytes = 1L * 1024 * 1024;
     public static bool RunsInBackground(long fileSizeBytes, int appCount = 1) =>
         fileSizeBytes > BackgroundThresholdBytes || appCount > 1;
 
