@@ -8,6 +8,13 @@ public interface IEncryptionService
     Task<string> GenerateAndWrapDekAsync(long tenantId, long appId, CancellationToken ct = default);
 
     /// <summary>
+    /// Wraps the SAME Data Encryption Key under another app's derived key: unwraps <paramref name="wrappedDek"/> with
+    /// <paramref name="fromAppId"/>'s key and wraps the result with <paramref name="toAppId"/>'s. Used by Copy App with data,
+    /// whose copied ciphertext must stay readable in the new app without being decrypted.
+    /// </summary>
+    Task<string> RewrapDekAsync(string wrappedDek, long tenantId, long fromAppId, long toAppId, CancellationToken ct = default);
+
+    /// <summary>
     /// Encrypts plaintext data using the App's unwrapped Data Encryption Key (DEK).
     /// </summary>
     Task<string> EncryptDataAsync(string plaintext, string wrappedDek, long tenantId, long appId, CancellationToken ct = default);
