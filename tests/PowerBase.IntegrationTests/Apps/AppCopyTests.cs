@@ -37,6 +37,37 @@ public class AppCopyTests : IntegrationTestBase
     }
 
     [Fact]
+    public async Task Copy_WithData_Returns201WithTheRecordsUnderNewIds()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token, "Copy With Data Source App");
+        var departments = await CreateTableAsync(token, appId, "Departments");
+        await CreateFieldAsync(token, departments, "Text", "Department Name");
+        var sourceRecords = new[] { await CreateRecordAsync(token, departments), await CreateRecordAsync(token, departments) };
+        var progressId = Guid.NewGuid();
+
+        var response = await PostAsync($"/apps/{appId}/copy",
+            new { name = "Copy With Data", withData = true, progressId }, token);
+
+        response.StatusCode.Should().Be(HttpStatusCode.Created);
+        var copy = await ReadData<CopyDto>(response);
+        copy.RecordsCopied.Should().Be(2);
+
+        var copiedTables = await ReadListData<TableDto>(await GetAsync($"/apps/{copy.PublicId}/tables", token));
+        var copiedDepartments = copiedTables.Single(t => t.Name == "Departments");
+        var records = await ReadListData<RecordDto>(await GetAsync($"/tables/{copiedDepartments.PublicId}/records", token));
+        records.Should().HaveCount(2);
+        records.Select(r => r.Id).Should().NotIntersectWith(sourceRecords);
+
+        // The progress of a copy with data stays readable from the database, with its result.
+        var progress = await ReadData<ProgressDto>(await GetAsync($"/apps/{appId}/copy/progress/{progressId}", token));
+        progress.IsDone.Should().BeTrue();
+        progress.IsFailed.Should().BeFalse();
+        progress.AppPublicId.Should().Be(copy.PublicId);
+        progress.RecordsCopied.Should().Be(2);
+    }
+
+    [Fact]
     public async Task Copy_NameAlreadyUsed_Returns409()
     {
         var (token, _) = await SignupAsync();
@@ -66,7 +97,8 @@ public class AppCopyTests : IntegrationTestBase
         response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
 
-    private record CopyDto(Guid PublicId, string Name, List<WarningDto> Warnings);
+    private record CopyDto(Guid PublicId, string Name, List<WarningDto> Warnings, long? RecordsCopied);
+    private record ProgressDto(int Percent, bool IsDone, bool IsFailed, Guid? AppPublicId, long? RecordsCopied);
     private record WarningDto(string Code, string Message);
     private record TableDto(Guid PublicId, string Name);
     private record RecordDto(Guid Id);

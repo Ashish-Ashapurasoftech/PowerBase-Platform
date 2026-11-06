@@ -79,6 +79,20 @@ public class AesEncryptionService : IEncryptionService
         return Convert.ToBase64String(wrappedDek);
     }
 
+    public async Task<string> RewrapDekAsync(string wrappedDek, long tenantId, long fromAppId, long toAppId, CancellationToken ct = default)
+    {
+        var masterKey = await GetMasterKeyAsync(ct);
+        var dek = UnwrapDek(masterKey, wrappedDek, tenantId, fromAppId);
+        try
+        {
+            return Convert.ToBase64String(EncryptAesGcm(dek, DeriveKeyEncryptionKey(masterKey, tenantId, toAppId)));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(dek);
+        }
+    }
+
     public async Task<string> EncryptDataAsync(string plaintext, string wrappedDekBase64, long tenantId, long appId, CancellationToken ct = default)
     {
         if (string.IsNullOrEmpty(plaintext)) return plaintext;

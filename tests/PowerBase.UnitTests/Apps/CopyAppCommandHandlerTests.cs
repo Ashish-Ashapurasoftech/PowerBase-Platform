@@ -22,6 +22,7 @@ public class CopyAppCommandHandlerTests
     private readonly IAppAccessService _appAccessService = Substitute.For<IAppAccessService>();
     private readonly IUserRepository _userRepo = Substitute.For<IUserRepository>();
     private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
+    private readonly IMessagePublisher _messagePublisher = Substitute.For<IMessagePublisher>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
 
     private readonly Guid _sourcePublicId = Guid.NewGuid();
@@ -41,7 +42,12 @@ public class CopyAppCommandHandlerTests
     }
 
     private CopyAppCommandHandler CreateSut() =>
-        new(_appRepo, _copyRepo, _appUserRepo, _appAccessService, _userRepo, _auditRepo, _queryContext);
+        new(_appRepo, _copyRepo, _appUserRepo, _appAccessService, _userRepo, _auditRepo, _messagePublisher, _queryContext);
+
+    private void GivenDataCopy(params long[] tablesWithRecords) =>
+        _copyRepo.CopyWithDataAsync(Arg.Any<AppDataCopyRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new AppDataCopyResult(NEW_APP_ID, _newPublicId,
+                [new AppCopyWarning { Code = "CODE_PAGE", Message = "Code page \"Home\" was copied as it is." }], 1506503, tablesWithRecords));
 
     private void GivenSourceApp(string? securityOptions, bool isEncrypted = false) =>
         _appRepo.GetByPublicIdAsync(_sourcePublicId, Arg.Any<CancellationToken>())
@@ -205,6 +211,123 @@ public class CopyAppCommandHandlerTests
         await CreateSut().Invoking(s => s.HandleAsync(new CopyAppCommand(_sourcePublicId, "HR", null)))
             .Should().ThrowAsync<DuplicateException>();
         await _copyRepo.DidNotReceive().CopySchemaAsync(Arg.Any<AppSchemaCopyRequest>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task HandleAsync_WithData_CopiesRecordsInsteadOfStructureOnly()
+    {
+        GivenDataCopy(201, 202);
+
+        var result = await CreateSut().HandleAsync(new CopyAppCommand(
+            _sourcePublicId, "Copy of HR", null, CopyUsers: true, WithData: true, IncludeFiles: false));
+
+        result.PublicId.Should().Be(_newPublicId);
+        result.RecordsCopied.Should().Be(1506503);
+        result.Warnings.Should().ContainSingle(w => w.Code == "CODE_PAGE");
+        await _copyRepo.Received(1).CopyWithDataAsync(
+            Arg.Is<AppDataCopyRequest>(r => !r.IncludeFiles && r.Schema.CopyUsers && r.Schema.SourceAppId == SOURCE_APP_ID && r.Schema.NewName == "Copy of HR"),
+            Arg.Any<CancellationToken>());
+        await _copyRepo.DidNotReceive().CopySchemaAsync(Arg.Any<AppSchemaCopyRequest>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task HandleAsync_WithData_CopyDoesNotStopWithTheRequest()
+    {
+        // The dialog may be closed and the tab refreshed while the copy runs: its first step must not be rolled back then.
+        GivenDataCopy();
+        using var request = new CancellationTokenSource();
+
+        await CreateSut().HandleAsync(new CopyAppCommand(_sourcePublicId, "Copy of HR", null, WithData: true), request.Token);
+
+        await _copyRepo.Received(1).CopyWithDataAsync(Arg.Any<AppDataCopyRequest>(), Arg.Is<CancellationToken>(t => !t.CanBeCanceled));
+    }
+
+    [Fact]
+    public async Task HandleAsync_WithData_RemovesStaleCopiesFirst()
+    {
+        GivenDataCopy();
+
+        await CreateSut().HandleAsync(new CopyAppCommand(_sourcePublicId, "Copy of HR", null, WithData: true));
+
+        Received.InOrder(() =>
+        {
+            _copyRepo.DiscardStaleDataCopiesAsync(Arg.Any<CancellationToken>());
+            _copyRepo.CopyWithDataAsync(Arg.Any<AppDataCopyRequest>(), Arg.Any<CancellationToken>());
+        });
+    }
+
+    [Fact]
+    public async Task HandleAsync_WithData_StaleCleanUpFails_StillCopies()
+    {
+        GivenDataCopy();
+        _copyRepo.DiscardStaleDataCopiesAsync(Arg.Any<CancellationToken>()).ThrowsAsync(new InvalidOperationException("busy"));
+
+        var result = await CreateSut().HandleAsync(new CopyAppCommand(_sourcePublicId, "Copy of HR", null, WithData: true));
+
+        result.RecordsCopied.Should().Be(1506503);
+    }
+
+    [Fact]
+    public async Task HandleAsync_WithData_QueuesASearchReindexPerTableWithRecords()
+    {
+        GivenDataCopy(201, 202);
+        _queryContext.TenantId.Returns(44);
+        var published = new List<SearchIndexMessage>();
+        await _messagePublisher.PublishBatchAsync(Arg.Do<IEnumerable<SearchIndexMessage>>(m => published.AddRange(m)), Arg.Any<CancellationToken>());
+
+        await CreateSut().HandleAsync(new CopyAppCommand(_sourcePublicId, "Copy of HR", null, WithData: true));
+
+        published.Should().HaveCount(2);
+        published.Should().OnlyContain(m => m.Action == IndexAction.ReindexTable && m.TenantId == 44 && m.AppId == NEW_APP_ID && m.AfterId == 0);
+        published.Select(m => m.TableId).Should().BeEquivalentTo(new long[] { 201, 202 });
+    }
+
+    [Fact]
+    public async Task HandleAsync_WithData_SearchQueueFails_TheCopyStillSucceeds()
+    {
+        GivenDataCopy(201);
+        _messagePublisher.PublishBatchAsync(Arg.Any<IEnumerable<SearchIndexMessage>>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("Service Bus down"));
+
+        var result = await CreateSut().HandleAsync(new CopyAppCommand(_sourcePublicId, "Copy of HR", null, WithData: true));
+
+        result.PublicId.Should().Be(_newPublicId);
+    }
+
+    [Fact]
+    public async Task HandleAsync_WithData_LogsTheRecordCount()
+    {
+        GivenDataCopy();
+
+        await CreateSut().HandleAsync(new CopyAppCommand(_sourcePublicId, "Copy of HR", null, WithData: true));
+
+        await _auditRepo.Received(1).LogActivityAsync(
+            AuditActions.Created, AuditEntityTypes.App, _newPublicId.ToString(),
+            "Application copied from HR with 1506503 records: Copy of HR", NEW_APP_ID, null, null, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task HandleAsync_WithDataByNonAdministratorAllowedToCopy_ThrowsAndCopiesNothing()
+    {
+        GivenRole("Participant");
+        GivenSourceApp("{\"allowNonAdminsToCopy\":true}");
+
+        await CreateSut().Invoking(s => s.HandleAsync(new CopyAppCommand(_sourcePublicId, "Copy of HR", null, WithData: true)))
+            .Should().ThrowAsync<UnauthorizedActionException>().WithMessage("*administrators*data*");
+        await _copyRepo.DidNotReceive().CopyWithDataAsync(Arg.Any<AppDataCopyRequest>(), Arg.Any<CancellationToken>());
+        await _copyRepo.DidNotReceive().CopySchemaAsync(Arg.Any<AppSchemaCopyRequest>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task HandleAsync_WithDataBySuperAdmin_Copies()
+    {
+        _queryContext.IsSuperAdmin.Returns(true);
+        GivenRole(null);
+        GivenDataCopy();
+
+        var result = await CreateSut().HandleAsync(new CopyAppCommand(_sourcePublicId, "Copy of HR", null, WithData: true));
+
+        result.RecordsCopied.Should().Be(1506503);
     }
 
     [Fact]

@@ -523,6 +523,8 @@ builder.Services.AddScoped<CreateTenantCommandHandler>();
 builder.Services.AddScoped<CreateAppCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Apps.Commands.CopyApp.CopyAppCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Apps.Queries.GetAppCopyProgress.GetAppCopyProgressQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Apps.Queries.ListMyAppCopies.ListMyAppCopiesQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Apps.Commands.DismissAppCopy.DismissAppCopyCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Import.Pbl.PblValidator>();
 builder.Services.AddScoped<PowerBase.Application.Import.FormulaTranslation.FormulaTranslator>();
 builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportPreview.ImportPreviewQueryHandler>();

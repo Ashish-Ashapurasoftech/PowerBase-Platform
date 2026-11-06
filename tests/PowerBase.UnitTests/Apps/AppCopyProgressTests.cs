@@ -3,6 +3,7 @@ using Microsoft.Extensions.Caching.Memory;
 using NSubstitute;
 using PowerBase.Application.Apps.Queries.GetAppCopyProgress;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Common.Models;
 using PowerBase.Infrastructure.Repositories;
 using PowerBase.Infrastructure.Services;
 
@@ -144,17 +145,39 @@ public class AppCopyProgressTests
     }
 
     [Fact]
-    public void QueryHandler_ReadsTheCallersProgressOnly()
+    public async Task QueryHandler_ReadsTheCallersProgressOnly()
     {
         var store = NewStore();
         var id = Guid.NewGuid();
         store.Report(id, USER_ID, 25, "Creating tables 4 of 13");
         var caller = Substitute.For<IQueryContext>();
+        var copyRepo = Substitute.For<IAppCopyRepository>();
 
         caller.UserId.Returns(USER_ID);
-        new GetAppCopyProgressQueryHandler(store, caller).Handle(id)!.Percent.Should().Be(25);
+        (await new GetAppCopyProgressQueryHandler(store, copyRepo, caller).HandleAsync(id))!.Percent.Should().Be(25);
 
         caller.UserId.Returns(OTHER_USER_ID);
-        new GetAppCopyProgressQueryHandler(store, caller).Handle(id).Should().BeNull();
+        (await new GetAppCopyProgressQueryHandler(store, copyRepo, caller).HandleAsync(id)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task QueryHandler_CopyWithData_ReadsTheRunFromTheDatabaseFirst()
+    {
+        var store = NewStore();
+        var id = Guid.NewGuid();
+        // The structure step reported in memory; the run in the database has moved on since.
+        store.Report(id, USER_ID, 3, "Saving the copy");
+        var caller = Substitute.For<IQueryContext>();
+        caller.UserId.Returns(USER_ID);
+        var copyRepo = Substitute.For<IAppCopyRepository>();
+        var newApp = Guid.NewGuid();
+        copyRepo.GetDataCopyProgressAsync(id, USER_ID, Arg.Any<CancellationToken>())
+            .Returns(new AppCopyProgress(100, "Done", IsDone: true, IsFailed: false, NewAppPublicId: newApp, RecordsCopied: 1506503));
+
+        var progress = await new GetAppCopyProgressQueryHandler(store, copyRepo, caller).HandleAsync(id);
+
+        progress!.IsDone.Should().BeTrue();
+        progress.NewAppPublicId.Should().Be(newApp);
+        progress.RecordsCopied.Should().Be(1506503);
     }
 }
