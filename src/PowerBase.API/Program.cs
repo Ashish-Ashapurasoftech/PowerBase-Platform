@@ -116,6 +116,7 @@ using PowerBase.Infrastructure.Repositories;
 using PowerBase.Infrastructure.Services;
 using PowerBase.Infrastructure.UOW;
 using Serilog;
+using Azure.Monitor.OpenTelemetry.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -150,9 +151,27 @@ builder.Services.AddCors(options =>
         }
         policy.AllowAnyHeader()
               .AllowAnyMethod()
-              .AllowCredentials();
+              .AllowCredentials()
+              // Every API call carries an Authorization header, so the browser sends an OPTIONS preflight first. Without a
+              // max age it re-asks within seconds, doubling the round trips; 2 hours is the most Chromium honours.
+              .SetPreflightMaxAge(TimeSpan.FromHours(2));
     });
 });
+
+// Request, SQL and HTTP dependency, and Live Metrics telemetry for Application Insights. App Service supplies
+// APPLICATIONINSIGHTS_CONNECTION_STRING; without one (local runs) nothing is added. The App Service codeless agent does not
+// instrument this .NET 8 app on Linux, so the app does it itself.
+var azureMonitorConnection = builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"]
+    ?? builder.Configuration["ApplicationInsights:ConnectionString"];
+if (!string.IsNullOrWhiteSpace(azureMonitorConnection) && !azureMonitorConnection.StartsWith("<"))
+{
+    builder.Services.AddOpenTelemetry().UseAzureMonitor(o =>
+    {
+        o.ConnectionString = azureMonitorConnection;
+        // The background workers poll SQL every few seconds; sampling keeps that volume, and the ingestion bill, down.
+        o.SamplingRatio = builder.Configuration.GetValue("ApplicationInsights:SamplingRatio", 0.25f);
+    });
+}
 
 
 builder.Services.AddControllers();
