@@ -365,6 +365,8 @@ builder.Services.AddScoped<PowerBase.Application.Pages.Queries.ListNavPages.List
 
 // Repositories
 builder.Services.AddScoped<IAppRepository, AppRepository>();
+builder.Services.AddScoped<IAppCopyRepository, AppCopyRepository>();
+builder.Services.AddSingleton<IAppCopyProgressStore, PowerBase.Infrastructure.Services.AppCopyProgressStore>();
 builder.Services.AddScoped<IAppVariableRepository, AppVariableRepository>();
 builder.Services.AddScoped<IImportSourceRefRepository, ImportSourceRefRepository>();
 builder.Services.AddScoped<IAppImportJobRepository, AppImportJobRepository>();
@@ -520,6 +522,10 @@ builder.Services.AddScoped<SelectTenantCommandHandler>();
 builder.Services.AddScoped<RefreshTokenCommandHandler>();
 builder.Services.AddScoped<CreateTenantCommandHandler>();
 builder.Services.AddScoped<CreateAppCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Apps.Commands.CopyApp.CopyAppCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Apps.Queries.GetAppCopyProgress.GetAppCopyProgressQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Apps.Queries.ListMyAppCopies.ListMyAppCopiesQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Apps.Commands.DismissAppCopy.DismissAppCopyCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Import.Pbl.PblValidator>();
 builder.Services.AddScoped<PowerBase.Application.Import.FormulaTranslation.FormulaTranslator>();
 builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportPreview.ImportPreviewQueryHandler>();

@@ -1,3 +1,4 @@
+using Azure;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
 using Microsoft.Extensions.Configuration;
@@ -9,7 +10,7 @@ namespace PowerBase.Infrastructure.Services;
 /// Azure Blob Storage implementation of <see cref="IFileStorageService"/>.
 /// Automatically creates and manages the blob container and stores uploaded files securely in Azure Cloud.
 /// </summary>
-public sealed class AzureBlobStorageService : IFileStorageService, IFileStorageReadService
+public sealed class AzureBlobStorageService : IFileStorageService, IFileStorageReadService, IFileStorageCopyService
 {
     private readonly BlobContainerClient? _containerClient;
     private readonly bool _isEnabled;
@@ -123,4 +124,37 @@ public sealed class AzureBlobStorageService : IFileStorageService, IFileStorageR
             // Best effort delete
         }
     }
+
+    /// <summary>A server-side copy inside the storage account: the bytes do not pass through the API, and the content type
+    /// and download name (content disposition) come along with the blob's properties.</summary>
+    public async Task<string> CopyAsync(string sourcePath, string newName, CancellationToken ct = default)
+    {
+        if (!_isEnabled || _containerClient == null)
+            throw new InvalidOperationException("Azure Blob Storage is not configured.");
+
+        var source = _containerClient.GetBlobClient(BlobName(sourcePath));
+        var target = _containerClient.GetBlobClient(Path.GetFileName(newName));
+        try
+        {
+            var copy = await target.StartCopyFromUriAsync(source.Uri, cancellationToken: ct);
+            await copy.WaitForCompletionAsync(ct);
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            throw new FileNotFoundException("The file to copy was not found.", source.Name, ex);
+        }
+        return target.Uri.ToString();
+    }
+
+    public async Task DeleteByPrefixAsync(string prefix, CancellationToken ct = default)
+    {
+        StoragePrefix.EnsureValid(prefix);
+        if (!_isEnabled || _containerClient == null) return;
+        await foreach (var blob in _containerClient.GetBlobsAsync(prefix: prefix, cancellationToken: ct))
+            await _containerClient.DeleteBlobIfExistsAsync(blob.Name, cancellationToken: ct);
+    }
+
+    /// <summary>The blob name in a stored path: SaveAsync returns the blob's full URL.</summary>
+    private static string BlobName(string path)
+        => Path.GetFileName(Uri.TryCreate(path, UriKind.Absolute, out var uri) ? uri.LocalPath : path);
 }

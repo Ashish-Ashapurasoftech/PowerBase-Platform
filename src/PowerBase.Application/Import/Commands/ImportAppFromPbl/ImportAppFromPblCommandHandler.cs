@@ -385,7 +385,7 @@ public class ImportAppFromPblCommandHandler
                 if (description.Length > PLACEHOLDER_DESCRIPTION_MAX)
                     description = description[..(PLACEHOLDER_DESCRIPTION_MAX - 1)] + "…";
                 items.Add(new BulkCreateFieldItem("Text", label,
-                    Description: description,
+                    Description: description, IsEncrypted: true,
                     Name: w.Name, HelpText: w.Help, Fid: w.Fid));
             }
             if (items.Count == 0) continue;
@@ -584,7 +584,8 @@ public class ImportAppFromPblCommandHandler
             document.App.Description,
             document.App.Icon,
             document.App.Color,
-            tableSpecs);
+            tableSpecs,
+            IsEncrypted: true); // imported apps are encrypted by default, like the create-app wizard
 
         ImportProgress.Report("Creating tables and fields", 8);
         var createResult = await _createAppHandler.HandleAsync(createCommand, ct);
@@ -918,7 +919,7 @@ public class ImportAppFromPblCommandHandler
 
         return new BulkCreateFieldItem(
             field.TypeCode, label, field.Description, clean.IsRequired, field.IsAuditable == true, clean.Settings, clean.DefaultValue,
-            IsEncrypted: false, Name: field.Name, HelpText: field.HelpText, IsSearchable: field.IsSearchable, IsReportable: field.IsReportable);
+            IsEncrypted: true, Name: field.Name, HelpText: field.HelpText, IsSearchable: field.IsSearchable, IsReportable: field.IsReportable);
     }
 
     /// <summary>Final PowerBase type code and settings JSON for a formula: the source type can force Url/Email/Phone/RichText
