@@ -209,6 +209,12 @@ public sealed class PblTable
     public string? Icon { get; set; }
     public List<PblField> Fields { get; set; } = [];
 
+    /// <summary>powerflowextraRd: the source's own labels for its built-in fields, keyed by PowerBase's default system label
+    /// (e.g. "Last Modified By" → "LastModifiedBy" when the Quickbase app renamed it). Only labels that differ are kept.
+    /// The import gives the seeded system fields these labels, so a custom field that carries the default label in the source
+    /// (Quickbase's formula "Last Modified By", FID 112) keeps it instead of becoming "Last Modified By (2)".</summary>
+    public Dictionary<string, string>? SystemFieldLabels { get; set; }
+
     /// <summary>Report links of the source table that do not belong to a relationship (they match on a field other than the child's
     /// reference field, or are a second link to the same child). Created after the relationships, on the source field number.</summary>
     public List<PblStandaloneReportLink> ReportLinks { get; set; } = [];

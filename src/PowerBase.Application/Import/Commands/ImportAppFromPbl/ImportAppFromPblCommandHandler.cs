@@ -422,6 +422,40 @@ public class ImportAppFromPblCommandHandler
 
     /// <summary>Tells the Fid policy what the source fields are numbered: for every table the highest source id (so fields PowerBase
     /// creates by itself stay above it) and the numbers of the reference, lookup and summary fields the relationship handlers create.</summary>
+    /// <summary>powerflowextraRd: the labels a table's system fields will carry — PowerBase's defaults, each replaced by the
+    /// source's own label when it renamed the built-in field (Quickbase "Last Modified By" → "LastModifiedBy").</summary>
+    private static IEnumerable<string> SystemLabelsOf(PblTable table) =>
+        AppSeeder.SystemFieldLabels.Select(label => table.SystemFieldLabels?.GetValueOrDefault(label) ?? label);
+
+    /// <summary>powerflowextraRd: gives the seeded system fields (Record ID#, Date Created, …, Last Modified By) the labels
+    /// the source app uses for them. Runs before formula fields are created, so a formula that carries the default label
+    /// (Quickbase's FID 112 "Last Modified By") keeps it, and a PowerFlow reading that field shows the same label as in
+    /// Quickbase. Only the label changes; the field's Name, FID and settings stay as seeded.</summary>
+    private async Task ApplySystemFieldLabelsAsync(PblDocument document, Guid appPublicId, CancellationToken ct)
+    {
+        var renamed = (document.Tables ?? []).Where(t => t.SystemFieldLabels is { Count: > 0 }).ToList();
+        if (renamed.Count == 0) return;
+
+        var appId = await _appRepo.GetIdByPublicIdAsync(appPublicId, ct);
+        var tableByName = (await _tableRepo.ListByAppAsync(appId, ct)).ToDictionary(t => t.Name, StringComparer.OrdinalIgnoreCase);
+        foreach (var source in renamed)
+        {
+            if (!tableByName.TryGetValue(source.Name, out var table)) continue;
+            var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
+            foreach (var (defaultLabel, label) in source.SystemFieldLabels!)
+            {
+                var field = fields.FirstOrDefault(f => f.IsSystem && string.Equals((f.Label ?? "").Trim(), defaultLabel, StringComparison.OrdinalIgnoreCase));
+                // Never take a label another field of the table already holds.
+                if (field is null || fields.Any(f => f.Id != field.Id && string.Equals((f.Label ?? "").Trim(), label, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+                await _fieldRepo.UpdateAsync(field.PublicId, table.Id, label, field.Description, field.IsRequired, field.DefaultValue,
+                    field.IsSearchable, field.IsSortable, field.IsFilterable, field.IsReportable, field.IsAuditable, field.IsUnique,
+                    field.IsEncrypted, field.IsAutoFill, field.Settings, ct);
+                field.Label = label;
+            }
+        }
+    }
+
     private async Task RegisterSourceFidsAsync(PblDocument document, Guid appPublicId, CancellationToken ct)
     {
         var plan = ImportRuntime.Fids;
@@ -520,7 +554,9 @@ public class ImportAppFromPblCommandHandler
 
             // Labels must be unique per table, and PowerBase's own system fields (Record ID#, Date Created, …) already
             // hold theirs. A source field that reuses one of those labels, or repeats another field's, gets a numbered label.
-            var usedLabels = new HashSet<string>(AppSeeder.SystemFieldLabels, StringComparer.OrdinalIgnoreCase);
+            // powerflowextraRd: the system fields hold the source's labels for them (applied after the app is created, see
+            // ApplySystemFieldLabelsAsync), so those — not PowerBase's defaults — are the labels already taken.
+            var usedLabels = new HashSet<string>(SystemLabelsOf(table), StringComparer.OrdinalIgnoreCase);
 
             foreach (var field in table.Fields ?? [])
             {
@@ -603,6 +639,7 @@ public class ImportAppFromPblCommandHandler
         try
         {
             await RegisterSourceFidsAsync(document, createResult.PublicId, ct);
+            await ApplySystemFieldLabelsAsync(document, createResult.PublicId, ct); // powerflowextraRd
             await _settingsApplier.ApplyAppSettingsAsync(document.App, createResult.PublicId, skipped, ct);
             await _settingsApplier.ApplyTableKeysAsync(document, createResult.PublicId, skipped, ct);
             ImportProgress.Report("Creating roles, relationships and formulas", 30);

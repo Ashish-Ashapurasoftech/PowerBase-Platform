@@ -401,7 +401,7 @@ public static class QblPipelineConverter
         IReadOnlyDictionary<string, string> accountAliases)
     {
         private static readonly Regex TokenPattern = new(@"\{\{(.*?)\}\}|\{%.*?%\}", RegexOptions.Singleline | RegexOptions.Compiled);
-        private static readonly Regex PathToken = new(@"^\s*([A-Za-z][A-Za-z0-9_]*)((?:\.[A-Za-z0-9_]+)+)\s*$", RegexOptions.Compiled);
+        private static readonly Regex PathToken = new(@"^\s*([A-Za-z][A-Za-z0-9_]*)((?:\.\$?[A-Za-z0-9_]+)+)\s*$", RegexOptions.Compiled); // powerflowextraRd: "$" allowed ({{a.$prev.name}})
         private static readonly Regex ValidRefId = new(@"^[A-Za-z][A-Za-z0-9_]*$", RegexOptions.Compiled);
 
         private readonly PblPipeline _pipeline = new() { LogicalRef = pipelineRef };
@@ -994,6 +994,9 @@ public static class QblPipelineConverter
                 // {{metadata.x.…}}: a step's Metadata, which PowerFlows keeps as {{steps.x._metadata.…}}.
                 if (stepId == "metadata")
                     return MetadataTokenProblem(keys, out parts);
+                // powerflowextraRd: {{x.$prev.field}} is Quickbase's documented form of {{metadata.x.record.previous.field}}.
+                if (key == "$prev")
+                    return MetadataTokenProblem([stepId, "record", "previous", .. keys[1..]], out parts);
 
                 if (!reader._byId.TryGetValue(stepId, out var target))
                     return $"step '{stepId}' is not in the pipeline";
@@ -1111,6 +1114,18 @@ public static class QblPipelineConverter
                             return $"field '{fieldKey}' of step '{target.Name}' ({target.Label}) was not found";
                         parts = [prefix + "struct.", Value(field), $".{rest[2]}}}}}"];
                         return null;
+                    // powerflowextraRd: Record → Previous record, {{metadata.a.record.previous.name}} (Quickbase's docs write {{a.$prev.name}}):
+                    // the trigger's field before the change, kept by field number — {{steps.a._metadata.record.previous.fid_N}}; a user
+                    // field's person detail as {{…previous.fid_N.email}}.
+                    case "new-event" when rest is ["record", "previous", var fieldKey, ..] && rest.Length <= 4 && target.Table is not null:
+                    {
+                        if (FieldByKey(target.Table.Value, fieldKey, target, "export_fields") is not { } prevField)
+                            return $"field '{fieldKey}' of step '{target.Name}' ({target.Label}) was not found";
+                        if (rest.Length == 4 && !(UserFieldTypes.Contains(prevField.Type) && UserDetails.Contains(rest[3])))
+                            return $"'metadata.{string.Join('.', keys)}' of step '{target.Name}' ({target.Label}) has no PowerFlows equivalent";
+                        parts = [prefix + "record.previous.", Value(prevField), rest.Length == 4 ? $".{rest[3]}}}}}" : "}}"];
+                        return null;
+                    }
                 }
                 return $"'metadata.{string.Join('.', keys)}' of step '{target.Name}' ({target.Label}) has no PowerFlows equivalent";
             }
