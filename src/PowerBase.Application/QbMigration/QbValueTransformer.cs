@@ -41,6 +41,9 @@ public sealed class QbValueTransformer
     private readonly IQbValueLookups _lookups;
     private readonly QbTransformOptions _options;
     private readonly HashSet<int> _referenceByKey;
+    // A missing user is reported once per field and email for this transformer (one chunk), not once per record:
+    // on a big app every record names the same few users, which made millions of identical issues.
+    private readonly HashSet<(int Fid, string Email)> _reportedUsers = [];
 
     /// <param name="referenceByKeyFids">PowerBase Fids of Reference fields whose QuickBase value is a parent key, not a Record ID#.</param>
     public QbValueTransformer(IReadOnlyList<QbFieldMapping> mappings, IQbValueLookups lookups, QbTransformOptions options,
@@ -164,8 +167,9 @@ public sealed class QbValueTransformer
         var email = EmailOf(user);
         if (email is null) return null;
         var id = _lookups.UserId(email);
-        if (id is null)
-            issues.Add(new("warning", "QBM_USER_NOT_MAPPED", $"'{m.Qb.Label}': no PowerBase user for {email}; stored empty.", recordId, m.Qb.Id));
+        if (id is null && _reportedUsers.Add((m.Qb.Id, email.ToUpperInvariant())))
+            issues.Add(new("warning", "QBM_USER_NOT_MAPPED",
+                $"'{m.Qb.Label}': no PowerBase user for {email}; stored empty (first record in this chunk; others not listed).", recordId, m.Qb.Id));
         return id;
     }
 
@@ -174,9 +178,9 @@ public sealed class QbValueTransformer
         if (!row.Values.TryGetValue(fid, out var raw) || IsBlank(raw)) return null;
         var email = EmailOf(raw);
         var id = email is null ? null : _lookups.UserId(email);
-        if (id is null)
+        if (id is null && _reportedUsers.Add((fid, (email ?? Shorten(raw)).ToUpperInvariant())))
             issues.Add(new("info", "QBM_SYSTEM_USER_NOT_MAPPED",
-                $"System field {fid}: no PowerBase user for {email ?? Shorten(raw)}; the migration user is used.", recordId, fid));
+                $"System field {fid}: no PowerBase user for {email ?? Shorten(raw)}; the migration user is used (first record in this chunk; others not listed).", recordId, fid));
         return id;
     }
 

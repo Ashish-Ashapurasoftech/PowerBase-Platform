@@ -18,4 +18,16 @@ public static class QbValueCanonical
         TimeSpan ts => ts.ToString("c", CultureInfo.InvariantCulture),
         _ => System.Convert.ToString(value, CultureInfo.InvariantCulture),
     };
+
+    /// <summary>QuickBase keeps some numbers as binary floats (99.98999999999999 for 99.99, 7.000000000000001 for 7), while
+    /// PowerBase stores the decimal. Two numbers within one billionth of their size are the same value; a real difference
+    /// (1.234 stored as 1.23) is far larger and still counts.</summary>
+    public static bool SameNumber(string? expected, string? actual)
+    {
+        if (expected is null || actual is null
+            || !decimal.TryParse(expected, NumberStyles.Number, CultureInfo.InvariantCulture, out var e)
+            || !decimal.TryParse(actual, NumberStyles.Number, CultureInfo.InvariantCulture, out var a))
+            return false;
+        return Math.Abs(e - a) <= 0.000000001m * Math.Max(1m, Math.Abs(e));
+    }
 }

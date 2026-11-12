@@ -144,7 +144,7 @@ public sealed class QbmValidator(IQuickBaseClient client, ITenantConnectionFacto
     {
         var e = QbValueCanonical.Of(expected);
         var a = QbValueCanonical.Of(actual);
-        if (string.Equals(e, a, StringComparison.Ordinal)) return false;
+        if (string.Equals(e, a, StringComparison.Ordinal) || QbValueCanonical.SameNumber(e, a)) return false;
         // Encrypted values are never written into the issue log.
         var detail = hide ? "values differ (encrypted field, values not shown)" : $"QuickBase {Show(e)}, PowerBase {Show(a)}";
         Add(issues, new("error", "QBM_GATE3_MISMATCH", $"'{label}': {detail}.", id, qbFid));

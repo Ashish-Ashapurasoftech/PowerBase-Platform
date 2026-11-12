@@ -152,6 +152,33 @@ public class QbValueTransformerTests
     }
 
     [Fact]
+    public void An_unknown_user_is_reported_once_per_field_in_a_chunk_not_once_per_record()
+    {
+        var qb = new QbField(6, "Owner", "user", null, []);
+        var maps = QbFieldMapper.Map([.. QbSystemFields(), qb], [.. SystemFields(), Pb(6, "User", "Owner")]);
+        var t = new QbValueTransformer(maps, new TestData.Lookups(), new QbTransformOptions { FallbackUserId = 99 });
+        var issues = new List<QbIssue>();
+        foreach (var id in new long[] { 7, 8, 9 })
+            t.Transform(Row(id, (6, "{\"email\":\"ghost@x.com\"}"), (4, "{\"email\":\"ghost@x.com\"}")), issues).Values[6].Should().BeNull();
+        t.Transform(Row(10, (6, "{\"email\":\"other@x.com\"}")), issues);
+
+        issues.Where(i => i.Code == "QBM_USER_NOT_MAPPED").Select(i => (i.QbRecordId, i.Message.Contains("ghost@x.com")))
+            .Should().Equal((7L, true), (10L, false));
+        issues.Should().ContainSingle(i => i.Code == "QBM_SYSTEM_USER_NOT_MAPPED" && i.QbRecordId == 7);
+    }
+
+    [Theory]
+    [InlineData("99.98999999999999", "99.99", true)]
+    [InlineData("7.000000000000001", "7", true)]
+    [InlineData("1234567.89", "1234567.89", true)]
+    [InlineData("1.234", "1.23", false)]
+    [InlineData("100", "101", false)]
+    [InlineData("abc", "abc", false)]
+    [InlineData(null, "0", false)]
+    public void Numbers_that_differ_only_by_float_noise_are_the_same_value(string? expected, string? actual, bool same) =>
+        QbValueCanonical.SameNumber(expected, actual).Should().Be(same);
+
+    [Fact]
     public void An_unknown_user_is_stored_empty_and_reported()
     {
         var (row, issues) = Transform(new(6, "Owner", "user", null, []), Pb(6, "User", "Owner"), "{\"email\":\"ghost@x.com\"}");
