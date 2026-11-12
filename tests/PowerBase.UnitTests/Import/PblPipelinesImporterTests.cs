@@ -729,6 +729,43 @@ public class PblPipelinesImporterTests
         Saved("ref_ab").ConfigJson.Should().Contain("fid_20");
     }
 
+    private const string MetadataValue =
+        "{{metadata.aa.context.app_name}}|{{metadata.aa.record.action}}|{{metadata.aa.struct.name.qb_field_id}}";
+
+    [Fact]
+    public async Task NewApp_QuickbaseMetadata_IsSavedAsStepMetadataTokensWithTheImportedFieldNumber()
+    {
+        await ImportAsync(QblPipelineConverterTests.AllStepsWith("{{aa.name}}", 0, MetadataValue));
+
+        var create = Config(Saved("ref_ab")).GetProperty("fieldMappings")[0];
+        create.GetProperty("value").GetString().Should().Be(
+            "{{steps.ref_aa._metadata.context.app_name}}|{{steps.ref_aa._metadata.record.action}}|{{steps.ref_aa._metadata.struct.fid_20.qb_field_id}}");
+    }
+
+    [Fact]
+    public async Task ExistingApp_QuickbaseMetadata_SchemaEntryFollowsTheMatchedField()
+    {
+        // The app's "Name" is "Full Name" with field number 25 now; the diff matched it by source ref.
+        var renamed = Field(25, "Full Name");
+        _fieldRepo.ListByTableAsync(1, Arg.Any<CancellationToken>()).Returns(new List<AppField> { RecordId(), renamed, Field(30, "TAddress", "Address") });
+        var parsed = Parsed(QblPipelineConverterTests.AllStepsWith("{{aa.name}}", 0, MetadataValue + " {{metadata.ae.batch.size}}"));
+        var nameRef = parsed.Document.Tables!.Single(t => t.Name == "Employee").Fields!.Single(f => f.Name == "Name").LogicalRef;
+        var targets = new PblPipelinesImporter.ExistingAppTargets(new Dictionary<string, long>(), new Dictionary<string, long> { [nameRef] = renamed.Id });
+
+        var items = await Importer().ImportIntoExistingAppAsync(parsed, _appId, "Docs", [parsed.Pipelines!.Single().LogicalRef], new Dictionary<string, Guid>(), targets, default);
+
+        items.Single().Status.Should().Be(PipelineImportStatuses.Created);
+        // Search Records (ae) comes after this step, so its metadata cannot be read here: the value is cleared, the step a draft.
+        Config(Saved("ref_ab")).GetProperty("fieldMappings")[0].GetProperty("value").GetString().Should().BeEmpty();
+        items.Single().Issues.Should().Contain(i => i.Code == "PIPELINE_REFERENCE_CLEARED" && i.Message.Contains("{{metadata.ae.batch.size}}"));
+
+        var reachable = Parsed(QblPipelineConverterTests.AllStepsWith("{{aa.name}}", 0, MetadataValue));
+        _saves.Clear();
+        await Importer().ImportIntoExistingAppAsync(reachable, _appId, "Docs", [reachable.Pipelines!.Single().LogicalRef], new Dictionary<string, Guid>(), targets, default);
+        Config(Saved("ref_ab")).GetProperty("fieldMappings")[0].GetProperty("value").GetString().Should().Be(
+            "{{steps.ref_aa._metadata.context.app_name}}|{{steps.ref_aa._metadata.record.action}}|{{steps.ref_aa._metadata.struct.fid_25.qb_field_id}}");
+    }
+
     [Fact]
     public async Task ExistingApp_Overwrite_TurnsThePowerFlowOffAndReplacesStepsAndSchedule()
     {

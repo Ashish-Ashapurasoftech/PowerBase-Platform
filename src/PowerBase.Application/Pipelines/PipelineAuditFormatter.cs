@@ -23,6 +23,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
     private string _pipelineName = string.Empty;
     private string _appName = string.Empty;
     private Guid _pipelinePublicId = Guid.Empty;
+    private Guid _appPublicId = Guid.Empty;
     private string _triggeredByUserDisplayName = "System";
     private Dictionary<string, object?> _triggeredByUserMetadata = new();
     private readonly Dictionary<Guid, (AppTable Table, List<AppField> Fields)> _metadataCache = new();
@@ -71,6 +72,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 if (app != null)
                 {
                     _appName = app.Name;
+                    _appPublicId = app.PublicId;
                 }
             }
             catch {}
@@ -509,7 +511,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
 
                 var metadataContext = new Dictionary<string, object?>();
                 metadataContext["app_name"] = _appName;
-                metadataContext["app_id"] = _pipelinePublicId.ToString();
+                metadataContext["app_id"] = _appPublicId == Guid.Empty ? null : _appPublicId.ToString();
                 metadataContext["table_name"] = tableName;
                 metadataContext["table_id"] = tableGuidStr;
                 metadata["context"] = metadataContext;
@@ -679,7 +681,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 // Metadata Section
                 var metadataContext = new Dictionary<string, object?>();
                 metadataContext["app_name"] = _appName;
-                metadataContext["app_id"] = _pipelinePublicId.ToString();
+                metadataContext["app_id"] = _appPublicId == Guid.Empty ? null : _appPublicId.ToString();
                 metadataContext["table_name"] = tableName;
                 metadataContext["table_id"] = tableGuidStr;
                 metadata["context"] = metadataContext;
