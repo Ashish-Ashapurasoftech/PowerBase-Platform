@@ -1,0 +1,4720 @@
+Version: 0.12
+ParameterDefinitions:
+  App_Name_1:
+    Type: String
+    Description: Parameter for QB::Application-Name
+    Value: Visitor Management
+  App_AppIcon_1:
+    Type: AppIcon
+    Description: Parameter for QB::Application-AppIcon
+    Value: Building
+  App_AppColor_1:
+    Type: HexColor
+    Description: Parameter for QB::Application-AppColor
+    Value: '#72509a'
+Resources:
+  $App_Visitor_Management:
+    Type: QB::Application
+    Properties:
+      Name: !Var
+        Name: App_Name_1
+      Description: 
+      TableV3State: Default
+      TableV3UserToggleState: Default
+      CrossApplicationAccess: None
+      AppColor: !Var
+        Name: App_AppColor_1
+      Manager: YslDevTeam
+      TableOrder:
+        - !Ref
+          Table: $Table_Visitors
+        - !Ref
+          Table: $Table_Employees
+        - !Ref
+          Table: $Table_Files
+        - !Ref
+          Table: $Table_Downloads
+        - !Ref
+          Table: $Table_Test
+        - !Ref
+          Table: $Table_Users
+        - !Ref
+          Table: $Table_Address
+      AppIcon: !Var
+        Name: App_AppIcon_1
+      CurrencySymbol: $
+      FiscalYearDesignation: Last
+      FirstDayOfWeek: Sun
+      DateFormat: DD-MM-YY
+      FirstMonthOfFiscalYear: Jan
+      CurrencySymbolPosition: Between
+      NumberFormat:
+        SeparatorStyle: CommaGroupingPeriodDecimal
+        SeparatorPlaces: none
+      DefaultViewMode: Auto
+      HideNewUpdatedIcons: false
+      DisableAllUsersSelection: false
+      CanCopyApp: Admin
+      CanExportData: Everyone
+      Searchable: false
+      RequireAppToken: true
+      ShowPerformanceBar: false
+      ShowPerformanceAnalyzer: false
+      GlobalSearchExactMatch: false
+      Utf8DataEncoding: false
+      Timezone: Default
+      Branding:
+        DisplayChartShading: false
+        UseCustomHeaderAndFooter: false
+        AppHeader:
+          UseCustom: false
+          HideQuickbaseStandardMenu: false
+        AppFooter:
+          UseCustom: false
+      DisableNonAdminSyncConnections: false
+      RoleOrder:
+        - !Ref
+          Role: $Role_Viewer
+        - !Ref
+          Role: $Role_Participant
+        - !Ref
+          Role: $Role_Administrator
+    Tables:
+      $Table_Visitors:
+        Type: QB::Table
+        Properties:
+          DefaultReportSettings:
+            DefaultColorCoding:
+              ColorBy: None
+              Appearance: Pale
+            DefaultFilters:
+              DynamicFields: Default
+              AllowQuickSearch: false
+            DefaultSortOrder:
+              SortOrder: Descending
+              TargetField: !Ref
+                Field: $Field_Date_Modified
+            ActionOnNewFieldAdd: MakeDefault
+            DefaultRowHeight: Short
+            DefaultRowNumberVisibility: Visible
+            DefaultColumnHeaderText: Wrap
+            InlineEditing: true
+            DefaultGroupDisplay: Collapsed
+          KeyField: !Ref
+            Field: $Field_Record_ID
+          Name: Visitors
+          AliasHint: _DBID_VISITORS
+          Description: 
+          RecordNameSingular: Visitor
+          RecordNamePlural: Visitors
+          TableNameOverride: 
+          TableIconName: User
+          SaveOnExit: true
+          Searchable: true
+          IndexFileAttachments: false
+          IncludeInTableBar: true
+          UseCustomRecordTitleField: false
+          DefaultRecordPicker: Default
+          CustomDataRules:
+            TurnedOn: false
+            Formula: 
+          TableHomePageSettings:
+            HomepageView: SameForEveryone
+            RoleViews:
+              Everyone:
+                View: DefaultReport
+              $Role_Viewer:
+                View: None
+              $Role_Participant:
+                View: None
+              $Role_Administrator:
+                View: None
+          RolePermissions:
+            $Role_Viewer:
+              CanAddRecords: false
+              CanDeleteRecords: false
+              CanSaveCommonReports: false
+              CanEditFieldProperties: false
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Never
+            $Role_Participant:
+              CanAddRecords: true
+              CanDeleteRecords: true
+              CanSaveCommonReports: false
+              CanEditFieldProperties: false
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Always
+            $Role_Administrator:
+              CanAddRecords: true
+              CanDeleteRecords: true
+              CanSaveCommonReports: true
+              CanEditFieldProperties: true
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Always
+        Fields:
+          $Field_Visitor_Name:
+            Type: QB::Field::Text
+            Id: 7
+            Properties:
+              DefaultValue: 
+              MaxLength: 0
+              Width: 0
+              EditHistory:
+                Enable: false
+                ExpandedHistory: false
+                PrependHistory: false
+                UseFullName: true
+                IncludeTime: false
+                IncludeTimeZone: false
+              Label: Visitor Name
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: UserInput
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Company:
+            Type: QB::Field::Text
+            Id: 8
+            Properties:
+              DefaultValue: 
+              MaxLength: 0
+              Width: 0
+              EditHistory:
+                Enable: false
+                ExpandedHistory: false
+                PrependHistory: false
+                UseFullName: true
+                IncludeTime: false
+                IncludeTimeZone: false
+              Label: Company
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: UserInput
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Mobile_Number:
+            Type: QB::Field::PhoneNumber
+            Id: 9
+            Properties:
+              DefaultValue: 
+              HasExtension: false
+              IsInternational: false
+              DefaultCountry: US
+              Label: Mobile Number
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: true
+              IsRequired: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Email:
+            Type: QB::Field::Email
+            Id: 10
+            Properties:
+              DefaultValue: 
+              DefaultDomain: 
+              SortByDomain: false
+              EnableEmailAll: false
+              LinkText: 
+              DisplayAs: FullEmailAddress
+              Label: Email
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Visitor_Type:
+            Type: QB::Field::MultiselectText
+            Id: 11
+            Properties:
+              DefaultValue: 
+              Label: Visitor Type
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: FromList
+                ListChoices:
+                  - Customer
+                  - Vendor
+                  - Contractor
+                  - Interview
+                  - Guest
+                  - Delivery
+                  - Consultant
+                  - Other
+                AllowCreateChoices: false
+                ChoiceOrder: AsEntered
+              IsRequired: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Person_to_Meet:
+            Type: QB::Field::Text
+            Id: 12
+            Properties:
+              DefaultValue: 
+              MaxLength: 0
+              Width: 0
+              EditHistory:
+                Enable: false
+                ExpandedHistory: false
+                PrependHistory: false
+                UseFullName: true
+                IncludeTime: false
+                IncludeTimeZone: false
+              Label: Person to Meet
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: UserInput
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Department:
+            Type: QB::Field::MultiselectText
+            Id: 13
+            Properties:
+              DefaultValue: 
+              Label: Department
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: FromList
+                ListChoices:
+                  - IT
+                  - Human Resources
+                  - Finance
+                  - Sales
+                  - Marketing
+                  - Operations
+                  - Administration
+                  - Procurement
+                  - Legal
+                  - Customer Support
+                  - Facilities
+                  - Management
+                AllowCreateChoices: false
+                ChoiceOrder: AsEntered
+              IsRequired: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Purpose_of_Visit:
+            Type: QB::Field::MultiselectText
+            Id: 14
+            Properties:
+              DefaultValue: 
+              Label: Purpose of Visit
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: FromList
+                ListChoices:
+                  - Business Meeting
+                  - Client Meeting
+                  - Vendor Meeting
+                  - Interview
+                  - Delivery
+                  - Installation
+                  - Maintenance
+                  - Training
+                  - Consultation
+                  - Audit
+                  - Site Visit
+                  - Personal Visit
+                  - Other
+                AllowCreateChoices: false
+                ChoiceOrder: AsEntered
+              IsRequired: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Visit_Date:
+            Type: QB::Field::Date
+            Id: 15
+            Properties:
+              ShowMonthAsAlpha: false
+              HideCurrentYear: false
+              ShowDayOfWeek: false
+              DefaultIsToday: false
+              Label: Visit Date
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              DefaultSortOrder: Ascending
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Expected_Time:
+            Type: QB::Field::TimeOfDay
+            Id: 16
+            Properties:
+              DefaultValue: 
+              ShowTimeZone: false
+              DisplayAs: HH:MM
+              Use24HourClock: false
+              DecimalPlaces: FloatingPoint
+              Label: Expected Time
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Check_In:
+            Type: QB::Field::DateTime
+            Id: 17
+            Properties:
+              ShowTime: true
+              ShowMonthAsAlpha: false
+              HideCurrentYear: false
+              ShowDayOfWeek: false
+              ShowTimeZone: false
+              DefaultIsNow: false
+              Label: Check-In
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              DefaultSortOrder: Ascending
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Check_Out:
+            Type: QB::Field::DateTime
+            Id: 18
+            Properties:
+              ShowTime: true
+              ShowMonthAsAlpha: false
+              HideCurrentYear: false
+              ShowDayOfWeek: false
+              ShowTimeZone: false
+              DefaultIsNow: false
+              Label: Check-Out
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              DefaultSortOrder: Ascending
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Status:
+            Type: QB::Field::MultiselectText
+            Id: 19
+            Properties:
+              DefaultValue: 
+              Label: Status
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: FromList
+                ListChoices:
+                  - Expected
+                  - Checked In
+                  - Checked Out
+                  - Cancelled
+                  - No Show
+                AllowCreateChoices: false
+                ChoiceOrder: AsEntered
+              IsRequired: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_ID_Type:
+            Type: QB::Field::MultiselectText
+            Id: 20
+            Properties:
+              DefaultValue: 
+              Label: ID Type
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: FromList
+                ListChoices:
+                  - Aadhaar Card
+                  - PAN Card
+                  - Passport
+                  - Driving License
+                  - Voter ID
+                  - Employee ID
+                  - National ID
+                  - Other
+                AllowCreateChoices: false
+                ChoiceOrder: AsEntered
+              IsRequired: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_ID_Number:
+            Type: QB::Field::Text
+            Id: 21
+            Properties:
+              DefaultValue: 
+              MaxLength: 0
+              Width: 0
+              EditHistory:
+                Enable: false
+                ExpandedHistory: false
+                PrependHistory: false
+                UseFullName: true
+                IncludeTime: false
+                IncludeTimeZone: false
+              Label: ID Number
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: UserInput
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Remarks:
+            Type: QB::Field::TextMultiline
+            Id: 22
+            Properties:
+              Height: 6
+              DefaultValue: 
+              MaxLength: 0
+              Width: 60
+              EditHistory:
+                Enable: false
+                ExpandedHistory: false
+                PrependHistory: false
+                UseFullName: true
+                IncludeTime: false
+                IncludeTimeZone: false
+              Label: Remarks
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: UserInput
+              IsRequired: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Date_Created:
+            Type: QB::Field::DateCreated
+            Id: 1
+            Properties:
+              ShowTime: true
+              ShowMonthAsAlpha: false
+              HideCurrentYear: false
+              ShowDayOfWeek: false
+              ShowTimeZone: false
+              Label: Date Created
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              DefaultSortOrder: Ascending
+              IsAuditable: false
+          $Field_Date_Modified:
+            Type: QB::Field::DateModified
+            Id: 2
+            Properties:
+              ShowTime: true
+              ShowMonthAsAlpha: false
+              HideCurrentYear: false
+              ShowDayOfWeek: false
+              ShowTimeZone: false
+              Label: Date Modified
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              DefaultSortOrder: Ascending
+              IsAuditable: false
+          $Field_Record_ID:
+            Type: QB::Field::RecordID
+            Id: 3
+            Properties:
+              Units: 
+              NumberFormat:
+                SeparatorStyle: CommaGroupingPeriodDecimal
+                SeparatorPlaces: none
+              SeparatorStart: 4
+              Label: Record ID#
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+          $Field_Record_Owner:
+            Type: QB::Field::RecordOwner
+            Id: 4
+            Properties:
+              DisplayAs: LastNameFirstName
+              Label: Record Owner
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              IsAuditable: false
+          $Field_Last_Modified_By:
+            Type: QB::Field::LastModifiedBy
+            Id: 5
+            Properties:
+              DisplayAs: LastNameFirstName
+              Label: Last Modified By
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              IsAuditable: false
+        Reports:
+          $Report_List_All:
+            Type: QB::Report::Table
+            Id: 1
+            Properties:
+              DefaultRowHeight: Default
+              ColumnHeaderText: Default
+              GroupDisplay: Default
+              InlineEditing: Default
+              Format: Normal
+              DisableDeleteCheckbox: false
+              RowNumberVisibility: Default
+              DisplayOnlyNewOrChangedRecords: false
+              SortAndGroup: Default
+              ShowSummaryTable: false
+              HideMainTable: false
+              ColorCoding:
+                ColorBy: None
+                Appearance: Default
+              HideTotals: false
+              AllowEditingRecords: true
+              AllowViewingRecords: true
+              Columns: Default
+              ColumnsUI: Default
+              Name: List All
+              Description: 
+              ShowDescription: false
+              Filters:
+                Criteria: Default
+                DynamicFields: Default
+                AllowQuickSearch: false
+              RolePermissions:
+                $Role_Viewer: true
+                $Role_Participant: true
+                $Role_Administrator: true
+          $Report_List_Changes:
+            Type: QB::Report::Table
+            Id: 2
+            Properties:
+              DefaultRowHeight: Default
+              ColumnHeaderText: Default
+              GroupDisplay: Default
+              InlineEditing: Default
+              Format: Normal
+              DisableDeleteCheckbox: false
+              RowNumberVisibility: Default
+              DisplayOnlyNewOrChangedRecords: true
+              SortAndGroup:
+                - Field: !Ref
+                    Field: $Field_Date_Modified
+                  SortOrder: Descending
+                  GroupBy: Unknown
+              ShowSummaryTable: false
+              HideMainTable: false
+              ColorCoding:
+                ColorBy: None
+                Appearance: Default
+              HideTotals: false
+              AllowEditingRecords: true
+              AllowViewingRecords: true
+              Columns: Default
+              ColumnsUI: Default
+              Name: List Changes
+              Description: Sorted by Date Modified
+              ShowDescription: false
+              Filters:
+                Criteria: Default
+                DynamicFields: Default
+                AllowQuickSearch: false
+              RolePermissions:
+                $Role_Viewer: true
+                $Role_Participant: true
+                $Role_Administrator: true
+        ReportGroups:
+          $ReportGroup_Common:
+            Type: QB::ReportGroup
+            Properties:
+              Name: Common
+              Reports:
+                - !Ref
+                  Report: $Report_List_All
+                - !Ref
+                  Report: $Report_List_Changes
+        Forms:
+          Properties:
+            RoleDefaults:
+              Everyone:
+                ViewForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                EditForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                AddForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                GridEdit: None
+                Mobile: UseFullSiteForms
+              $Role_Viewer:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+              $Role_Participant:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+              $Role_Administrator:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+            ReportOverrides:
+              $Report_List_All:
+                ViewForm: UseRoleSettings
+                EditForm: UseRoleSettings
+                GridEdit: UseRoleSettings
+                Mobile: UseRoleSettings
+              $Report_List_Changes:
+                ViewForm: UseRoleSettings
+                EditForm: UseRoleSettings
+                GridEdit: UseRoleSettings
+                Mobile: UseRoleSettings
+          Resources:
+            $Form_Visitors_Main_Form:
+              Type: QB::Form
+              Id: 2
+              Properties:
+                Name: Visitors Main Form
+                HorizontalRuleBetweenSections: true
+                ShowBuiltInFields: true
+                WrapFieldLabels: true
+                ShowSaveAndCancelButtons: true
+                ShowSaveAndKeepWorking: false
+                WaitForEmbeddedReports: UseAppBehavior
+                NewFieldAction: Add
+              Elements:
+                $FormElement_1:
+                  Type: QB::Form::Element::Field
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !BadRef "Referenced resource does not exist."
+                $FormElement_2:
+                  Type: QB::Form::Element::TextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Visitor_Name
+                $FormElement_3:
+                  Type: QB::Form::Element::TextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Company
+                $FormElement_4:
+                  Type: QB::Form::Element::PhoneNumberField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Mobile_Number
+                $FormElement_5:
+                  Type: QB::Form::Element::EmailField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Email
+                $FormElement_6:
+                  Type: QB::Form::Element::MultiselectTextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Visitor_Type
+                $FormElement_7:
+                  Type: QB::Form::Element::TextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Person_to_Meet
+                $FormElement_8:
+                  Type: QB::Form::Element::MultiselectTextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Department
+                $FormElement_9:
+                  Type: QB::Form::Element::MultiselectTextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Purpose_of_Visit
+                $FormElement_10:
+                  Type: QB::Form::Element::DateField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Visit_Date
+                $FormElement_11:
+                  Type: QB::Form::Element::TimeOfDayField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Expected_Time
+                $FormElement_12:
+                  Type: QB::Form::Element::DateTimeField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Check_In
+                $FormElement_13:
+                  Type: QB::Form::Element::DateTimeField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Check_Out
+                $FormElement_14:
+                  Type: QB::Form::Element::MultiselectTextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Status
+                $FormElement_15:
+                  Type: QB::Form::Element::MultiselectTextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_ID_Type
+                $FormElement_16:
+                  Type: QB::Form::Element::TextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_ID_Number
+                $FormElement_17:
+                  Type: QB::Form::Element::TextMultilineField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Remarks
+            $FormV2_Main_Form:
+              Type: QB::FormV2
+              Id: 10
+              Properties:
+                Name: Main Form
+                DisplayPagesAs: Tabs
+                ShouldAutoAddFields: true
+                ShouldShowBuiltInFieldsFooter: false
+                AlwaysTabsForViewRecord: false
+                AllowedSaveActions:
+                  - SaveAndKeepWorking
+                  - SaveAndNew
+                  - SaveAndNext
+                  - SaveAndView
+                BotCheckModes: []
+              Pages:
+                $FormV2Page_Untitled_Page:
+                  Type: QB::FormV2::Page
+                  Id: 1
+                  Properties:
+                    Name: Untitled Page
+                    Color: 
+                  Sections:
+                    $FormV2Section_Visitor_Information:
+                      Type: QB::FormV2::Section
+                      Properties:
+                        Title: Visitor Information
+                        IsCollapsible: true
+                        IsCollapsedByDefault: false
+                        ShowColumnDividers: true
+                        ModesToShowIn:
+                          - View
+                          - Edit
+                          - Create
+                      Columns:
+                        $FormV2Column_1:
+                          Type: QB::FormV2::Column
+                          Properties:
+                            Title: 
+                            LayoutWidth: 6
+                            BackgroundColor: '#c8e6c9'
+                            ShowBackgroundColor: true
+                          Elements:
+                            $FormV2Element_1:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: true
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Visitor_Name
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                            $FormV2Element_2:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: true
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Email
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                                ShouldValidate: false
+                            $FormV2Element_3:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Visitor_Type
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                        $FormV2Column_2:
+                          Type: QB::FormV2::Column
+                          Properties:
+                            Title: 
+                            LayoutWidth: 6
+                            BackgroundColor: '#c8e6c9'
+                            ShowBackgroundColor: true
+                          Elements:
+                            $FormV2Element_4:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: true
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Mobile_Number
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                                ShouldValidate: false
+                            $FormV2Element_5:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Company
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                    $FormV2Section_Visit_Information:
+                      Type: QB::FormV2::Section
+                      Properties:
+                        Title: Visit Information
+                        IsCollapsible: true
+                        IsCollapsedByDefault: false
+                        ShowColumnDividers: true
+                        ModesToShowIn:
+                          - View
+                          - Edit
+                          - Create
+                      Columns:
+                        $FormV2Column_3:
+                          Type: QB::FormV2::Column
+                          Properties:
+                            Title: 
+                            LayoutWidth: 6
+                            BackgroundColor: '#b3e5fc'
+                            ShowBackgroundColor: true
+                          Elements:
+                            $FormV2Element_6:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: true
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Person_to_Meet
+                                Width: Default
+                                ModesToShowIn:
+                                  - Edit
+                                  - View
+                                  - Create
+                            $FormV2Element_7:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: true
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Purpose_of_Visit
+                                Width: Default
+                                ModesToShowIn:
+                                  - Edit
+                                  - View
+                                  - Create
+                            $FormV2Element_8:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Expected_Time
+                                Width: Default
+                                ModesToShowIn:
+                                  - Edit
+                                  - View
+                                  - Create
+                        $FormV2Column_4:
+                          Type: QB::FormV2::Column
+                          Properties:
+                            Title: 
+                            LayoutWidth: 6
+                            BackgroundColor: '#b3e5fc'
+                            ShowBackgroundColor: true
+                          Elements:
+                            $FormV2Element_9:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: true
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Department
+                                Width: Default
+                                ModesToShowIn:
+                                  - Edit
+                                  - View
+                                  - Create
+                            $FormV2Element_10:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: true
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Visit_Date
+                                Width: Default
+                                ModesToShowIn:
+                                  - Edit
+                                  - View
+                                  - Create
+                    $FormV2Section_CHECK_IN_IDENTIFICATION:
+                      Type: QB::FormV2::Section
+                      Properties:
+                        Title: CHECK-IN & IDENTIFICATION
+                        IsCollapsible: true
+                        IsCollapsedByDefault: false
+                        ShowColumnDividers: true
+                        ModesToShowIn:
+                          - View
+                          - Edit
+                          - Create
+                      Columns:
+                        $FormV2Column_5:
+                          Type: QB::FormV2::Column
+                          Properties:
+                            Title: 
+                            LayoutWidth: 6
+                            BackgroundColor: '#c8e6c9'
+                            ShowBackgroundColor: true
+                          Elements:
+                            $FormV2Element_11:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: true
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_ID_Type
+                                Width: Default
+                                ModesToShowIn:
+                                  - Edit
+                                  - View
+                                  - Create
+                            $FormV2Element_12:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_ID_Number
+                                Width: Default
+                                ModesToShowIn:
+                                  - Edit
+                                  - View
+                                  - Create
+                            $FormV2Element_13:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Status
+                                Width: Default
+                                ModesToShowIn:
+                                  - Edit
+                                  - View
+                                  - Create
+                        $FormV2Column_6:
+                          Type: QB::FormV2::Column
+                          Properties:
+                            Title: 
+                            LayoutWidth: 6
+                            BackgroundColor: '#c8e6c9'
+                            ShowBackgroundColor: true
+                          Elements:
+                            $FormV2Element_14:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Check_In
+                                Width: Default
+                                ModesToShowIn:
+                                  - Edit
+                                  - View
+                                  - Create
+                            $FormV2Element_15:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Check_Out
+                                Width: Default
+                                ModesToShowIn:
+                                  - Edit
+                                  - View
+                                  - Create
+                            $FormV2Element_16:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Remarks
+                                Width: Default
+                                ModesToShowIn:
+                                  - Edit
+                                  - View
+                                  - Create
+      $Table_Employees:
+        Type: QB::Table
+        Properties:
+          DefaultReportSettings:
+            DefaultColorCoding:
+              ColorBy: None
+              Appearance: Pale
+            DefaultFilters:
+              DynamicFields: Default
+              AllowQuickSearch: false
+            DefaultSortOrder:
+              SortOrder: Descending
+              TargetField: !Ref
+                Field: $Field_Date_Modified
+            ActionOnNewFieldAdd: MakeDefault
+            DefaultRowHeight: Short
+            DefaultRowNumberVisibility: Visible
+            DefaultColumnHeaderText: Wrap
+            InlineEditing: true
+            DefaultGroupDisplay: Collapsed
+          KeyField: !Ref
+            Field: $Field_Record_ID
+          Name: Employees
+          AliasHint: _DBID_EMPLOYEES
+          Description: 
+          RecordNameSingular: Host
+          RecordNamePlural: Hosts
+          TableNameOverride: 
+          TableIconName: Customers
+          SaveOnExit: true
+          Searchable: true
+          IndexFileAttachments: false
+          IncludeInTableBar: true
+          UseCustomRecordTitleField: false
+          DefaultRecordPicker: Default
+          CustomDataRules:
+            TurnedOn: false
+            Formula: 
+          TableHomePageSettings:
+            HomepageView: SameForEveryone
+            RoleViews:
+              Everyone:
+                View: DefaultReport
+              $Role_Viewer:
+                View: None
+              $Role_Participant:
+                View: None
+              $Role_Administrator:
+                View: None
+          RolePermissions:
+            $Role_Viewer:
+              CanAddRecords: false
+              CanDeleteRecords: false
+              CanSaveCommonReports: false
+              CanEditFieldProperties: false
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Never
+            $Role_Participant:
+              CanAddRecords: true
+              CanDeleteRecords: true
+              CanSaveCommonReports: false
+              CanEditFieldProperties: false
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Always
+            $Role_Administrator:
+              CanAddRecords: true
+              CanDeleteRecords: true
+              CanSaveCommonReports: true
+              CanEditFieldProperties: true
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Always
+        Fields:
+          $Field_Employee_Name:
+            Type: QB::Field::Text
+            Id: 7
+            Properties:
+              DefaultValue: 
+              MaxLength: 0
+              Width: 0
+              EditHistory:
+                Enable: false
+                ExpandedHistory: false
+                PrependHistory: false
+                UseFullName: true
+                IncludeTime: false
+                IncludeTimeZone: false
+              Label: Employee Name
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: UserInput
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Department:
+            Type: QB::Field::MultiselectText
+            Id: 8
+            Properties:
+              DefaultValue: 
+              Label: Department
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: FromList
+                ListChoices:
+                  - IT
+                  - HR
+                  - Finance
+                  - Sales
+                  - Operations
+                  - Admin
+                  - Management
+                AllowCreateChoices: false
+                ChoiceOrder: Alphabetical
+              IsRequired: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Designation:
+            Type: QB::Field::Text
+            Id: 9
+            Properties:
+              DefaultValue: 
+              MaxLength: 0
+              Width: 0
+              EditHistory:
+                Enable: false
+                ExpandedHistory: false
+                PrependHistory: false
+                UseFullName: true
+                IncludeTime: false
+                IncludeTimeZone: false
+              Label: Designation
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: UserInput
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Email:
+            Type: QB::Field::Email
+            Id: 10
+            Properties:
+              DefaultValue: 
+              DefaultDomain: 
+              SortByDomain: false
+              EnableEmailAll: false
+              LinkText: 
+              DisplayAs: FullEmailAddress
+              Label: Email
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Mobile_Number:
+            Type: QB::Field::PhoneNumber
+            Id: 11
+            Properties:
+              DefaultValue: 
+              HasExtension: false
+              IsInternational: false
+              DefaultCountry: US
+              Label: Mobile Number
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: true
+              IsRequired: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Active:
+            Type: QB::Field::Checkbox
+            Id: 12
+            Properties:
+              DefaultValue: Unchecked
+              ShowAsCheckmark: true
+              DoesTotal: false
+              Label: Active
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              IsRequired: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Date_Created:
+            Type: QB::Field::DateCreated
+            Id: 1
+            Properties:
+              ShowTime: true
+              ShowMonthAsAlpha: false
+              HideCurrentYear: false
+              ShowDayOfWeek: false
+              ShowTimeZone: false
+              Label: Date Created
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              DefaultSortOrder: Ascending
+              IsAuditable: false
+          $Field_Date_Modified:
+            Type: QB::Field::DateModified
+            Id: 2
+            Properties:
+              ShowTime: true
+              ShowMonthAsAlpha: false
+              HideCurrentYear: false
+              ShowDayOfWeek: false
+              ShowTimeZone: false
+              Label: Date Modified
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              DefaultSortOrder: Ascending
+              IsAuditable: false
+          $Field_Record_ID:
+            Type: QB::Field::RecordID
+            Id: 3
+            Properties:
+              Units: 
+              NumberFormat:
+                SeparatorStyle: CommaGroupingPeriodDecimal
+                SeparatorPlaces: none
+              SeparatorStart: 4
+              Label: Record ID#
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+          $Field_Record_Owner:
+            Type: QB::Field::RecordOwner
+            Id: 4
+            Properties:
+              DisplayAs: LastNameFirstName
+              Label: Record Owner
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              IsAuditable: false
+          $Field_Last_Modified_By:
+            Type: QB::Field::LastModifiedBy
+            Id: 5
+            Properties:
+              DisplayAs: LastNameFirstName
+              Label: Last Modified By
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              IsAuditable: false
+        Reports:
+          $Report_List_All:
+            Type: QB::Report::Table
+            Id: 1
+            Properties:
+              DefaultRowHeight: Default
+              ColumnHeaderText: Default
+              GroupDisplay: Default
+              InlineEditing: Default
+              Format: Normal
+              DisableDeleteCheckbox: false
+              RowNumberVisibility: Default
+              DisplayOnlyNewOrChangedRecords: false
+              SortAndGroup: Default
+              ShowSummaryTable: false
+              HideMainTable: false
+              ColorCoding:
+                ColorBy: None
+                Appearance: Default
+              HideTotals: false
+              AllowEditingRecords: true
+              AllowViewingRecords: true
+              Columns: Default
+              ColumnsUI: Default
+              Name: List All
+              Description: 
+              ShowDescription: false
+              Filters:
+                Criteria: Default
+                DynamicFields: Default
+                AllowQuickSearch: false
+              RolePermissions:
+                $Role_Viewer: true
+                $Role_Participant: true
+                $Role_Administrator: true
+          $Report_List_Changes:
+            Type: QB::Report::Table
+            Id: 2
+            Properties:
+              DefaultRowHeight: Default
+              ColumnHeaderText: Default
+              GroupDisplay: Default
+              InlineEditing: Default
+              Format: Normal
+              DisableDeleteCheckbox: false
+              RowNumberVisibility: Default
+              DisplayOnlyNewOrChangedRecords: true
+              SortAndGroup:
+                - Field: !Ref
+                    Field: $Field_Date_Modified
+                  SortOrder: Descending
+                  GroupBy: Unknown
+              ShowSummaryTable: false
+              HideMainTable: false
+              ColorCoding:
+                ColorBy: None
+                Appearance: Default
+              HideTotals: false
+              AllowEditingRecords: true
+              AllowViewingRecords: true
+              Columns: Default
+              ColumnsUI: Default
+              Name: List Changes
+              Description: Sorted by Date Modified
+              ShowDescription: false
+              Filters:
+                Criteria: Default
+                DynamicFields: Default
+                AllowQuickSearch: false
+              RolePermissions:
+                $Role_Viewer: true
+                $Role_Participant: true
+                $Role_Administrator: true
+        ReportGroups:
+          $ReportGroup_Common:
+            Type: QB::ReportGroup
+            Properties:
+              Name: Common
+              Reports:
+                - !Ref
+                  Report: $Report_List_All
+                - !Ref
+                  Report: $Report_List_Changes
+        Forms:
+          Properties:
+            RoleDefaults:
+              Everyone:
+                ViewForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                EditForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                AddForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                GridEdit: None
+                Mobile: UseFullSiteForms
+              $Role_Viewer:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+              $Role_Participant:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+              $Role_Administrator:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+            ReportOverrides:
+              $Report_List_All:
+                ViewForm: UseRoleSettings
+                EditForm: UseRoleSettings
+                GridEdit: UseRoleSettings
+                Mobile: UseRoleSettings
+              $Report_List_Changes:
+                ViewForm: UseRoleSettings
+                EditForm: UseRoleSettings
+                GridEdit: UseRoleSettings
+                Mobile: UseRoleSettings
+          Resources:
+            $Form_Employees_Main_Form:
+              Type: QB::Form
+              Id: 2
+              Properties:
+                Name: Employees Main Form
+                HorizontalRuleBetweenSections: true
+                ShowBuiltInFields: true
+                WrapFieldLabels: true
+                ShowSaveAndCancelButtons: true
+                ShowSaveAndKeepWorking: false
+                WaitForEmbeddedReports: UseAppBehavior
+                NewFieldAction: Add
+              Elements:
+                $FormElement_1:
+                  Type: QB::Form::Element::Field
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !BadRef "Referenced resource does not exist."
+                $FormElement_2:
+                  Type: QB::Form::Element::TextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Employee_Name
+                $FormElement_3:
+                  Type: QB::Form::Element::MultiselectTextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Department
+                $FormElement_4:
+                  Type: QB::Form::Element::TextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Designation
+                $FormElement_5:
+                  Type: QB::Form::Element::EmailField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Email
+                $FormElement_6:
+                  Type: QB::Form::Element::PhoneNumberField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Mobile_Number
+                $FormElement_7:
+                  Type: QB::Form::Element::CheckboxField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Active
+            $FormV2_Main_Form:
+              Type: QB::FormV2
+              Id: 10
+              Properties:
+                Name: Main Form
+                DisplayPagesAs: Tabs
+                ShouldAutoAddFields: true
+                ShouldShowBuiltInFieldsFooter: false
+                AlwaysTabsForViewRecord: false
+                AllowedSaveActions:
+                  - SaveAndKeepWorking
+                  - SaveAndNew
+                  - SaveAndNext
+                  - SaveAndView
+                BotCheckModes: []
+              Pages:
+                $FormV2Page_Untitled_Page:
+                  Type: QB::FormV2::Page
+                  Id: 1
+                  Properties:
+                    Name: Untitled Page
+                    Color: 
+                  Sections:
+                    $FormV2Section_Host_Information:
+                      Type: QB::FormV2::Section
+                      Properties:
+                        Title: Host Information
+                        IsCollapsible: true
+                        IsCollapsedByDefault: false
+                        ShowColumnDividers: false
+                        ModesToShowIn:
+                          - Edit
+                          - View
+                          - Create
+                      Columns:
+                        $FormV2Column_1:
+                          Type: QB::FormV2::Column
+                          Properties:
+                            Title: 
+                            LayoutWidth: 6
+                            BackgroundColor: '#ffcdd2'
+                            ShowBackgroundColor: true
+                          Elements:
+                            $FormV2Element_1:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: true
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Employee_Name
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                            $FormV2Element_2:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: true
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Department
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                            $FormV2Element_3:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Designation
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                            $FormV2Element_4:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Active
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                        $FormV2Column_2:
+                          Type: QB::FormV2::Column
+                          Properties:
+                            Title: 
+                            LayoutWidth: 6
+                            BackgroundColor: '#ffcdd2'
+                            ShowBackgroundColor: true
+                          Elements:
+                            $FormV2Element_5:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: true
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Email
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                                ShouldValidate: false
+                            $FormV2Element_6:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Mobile_Number
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                                ShouldValidate: false
+      $Table_Files:
+        Type: QB::Table
+        Properties:
+          DefaultReportSettings:
+            DefaultColorCoding:
+              ColorBy: None
+              Appearance: Pale
+            DefaultFilters:
+              DynamicFields: Default
+              AllowQuickSearch: false
+            DefaultSortOrder:
+              SortOrder: Descending
+              TargetField: !Ref
+                Field: $Field_Date_Modified
+            ActionOnNewFieldAdd: MakeDefault
+            DefaultRowHeight: Short
+            DefaultRowNumberVisibility: Visible
+            DefaultColumnHeaderText: Wrap
+            InlineEditing: true
+            DefaultGroupDisplay: Collapsed
+          KeyField: !Ref
+            Field: $Field_Record_ID
+          Name: Files
+          AliasHint: _DBID_FILES
+          Description: 
+          RecordNameSingular: File
+          RecordNamePlural: Files
+          TableNameOverride: 
+          TableIconName: Projects
+          SaveOnExit: true
+          Searchable: true
+          IndexFileAttachments: false
+          IncludeInTableBar: true
+          UseCustomRecordTitleField: false
+          DefaultRecordPicker: Default
+          CustomDataRules:
+            TurnedOn: false
+            Formula: 
+          TableHomePageSettings:
+            HomepageView: SameForEveryone
+            RoleViews:
+              Everyone:
+                View: DefaultReport
+              $Role_Viewer:
+                View: None
+              $Role_Participant:
+                View: None
+              $Role_Administrator:
+                View: None
+          RolePermissions:
+            $Role_Viewer:
+              CanAddRecords: false
+              CanDeleteRecords: false
+              CanSaveCommonReports: false
+              CanEditFieldProperties: false
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Never
+            $Role_Participant:
+              CanAddRecords: true
+              CanDeleteRecords: true
+              CanSaveCommonReports: false
+              CanEditFieldProperties: false
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Always
+            $Role_Administrator:
+              CanAddRecords: true
+              CanDeleteRecords: true
+              CanSaveCommonReports: true
+              CanEditFieldProperties: true
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Always
+        Fields:
+          $Field_File_Code:
+            Type: QB::Field::Text
+            Id: 6
+            Properties:
+              DefaultValue: 
+              MaxLength: 0
+              Width: 40
+              EditHistory:
+                Enable: false
+                ExpandedHistory: false
+                PrependHistory: false
+                UseFullName: true
+                IncludeTime: false
+                IncludeTimeZone: false
+              Label: File Code
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: UserInput
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_File_Name:
+            Type: QB::Field::Text
+            Id: 7
+            Properties:
+              DefaultValue: 
+              MaxLength: 0
+              Width: 0
+              EditHistory:
+                Enable: false
+                ExpandedHistory: false
+                PrependHistory: false
+                UseFullName: true
+                IncludeTime: false
+                IncludeTimeZone: false
+              Label: File Name
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: UserInput
+              IsRequired: false
+              IsUnique: true
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Download_records:
+            Type: QB::Field::ReportLink
+            Id: 8
+            Properties:
+              MatchValuesExactly: true
+              UseNewWindow: false
+              LinkText: Download records
+              FieldRelationship:
+                Source: !Ref
+                  Field: $Field_Record_ID
+                Target: !Ref
+                  Table: $Table_Downloads
+                  Field: $Field_Related_File
+              Label: Download records
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              HelpText: 
+          $Field_Add_Download:
+            Type: QB::Field::URL::Formula
+            Id: 9
+            Properties:
+              LinkText: Add  Download
+              Abbreviate: false
+              DisplayAsButton: true
+              ButtonColor: 
+              EmbedAsIframe: false
+              Target: SamePage
+              Label: Add Download
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              IsUnique: false
+              HelpText: 
+              OverrideSubFieldAccess: false
+              Formula: |-
+                URLRoot() & "db/" & [_DBID_DOWNLOADS] & "?a=API_GenAddRecordForm&_fid_7=" & URLEncode ([Record ID#])& "&z=" & Rurl()
+          $Field_Date_Created:
+            Type: QB::Field::DateCreated
+            Id: 1
+            Properties:
+              ShowTime: true
+              ShowMonthAsAlpha: false
+              HideCurrentYear: false
+              ShowDayOfWeek: false
+              ShowTimeZone: false
+              Label: Date Created
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              DefaultSortOrder: Ascending
+              IsAuditable: false
+          $Field_Date_Modified:
+            Type: QB::Field::DateModified
+            Id: 2
+            Properties:
+              ShowTime: true
+              ShowMonthAsAlpha: false
+              HideCurrentYear: false
+              ShowDayOfWeek: false
+              ShowTimeZone: false
+              Label: Date Modified
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              DefaultSortOrder: Ascending
+              IsAuditable: false
+          $Field_Record_ID:
+            Type: QB::Field::RecordID
+            Id: 3
+            Properties:
+              Units: 
+              NumberFormat:
+                SeparatorStyle: CommaGroupingPeriodDecimal
+                SeparatorPlaces: none
+              SeparatorStart: 4
+              Label: Record ID#
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+          $Field_Record_Owner:
+            Type: QB::Field::RecordOwner
+            Id: 4
+            Properties:
+              DisplayAs: LastNameFirstName
+              Label: Record Owner
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              IsAuditable: false
+          $Field_Last_Modified_By:
+            Type: QB::Field::LastModifiedBy
+            Id: 5
+            Properties:
+              DisplayAs: LastNameFirstName
+              Label: Last Modified By
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              IsAuditable: false
+        Reports:
+          $Report_List_All:
+            Type: QB::Report::Table
+            Id: 1
+            Properties:
+              DefaultRowHeight: Default
+              ColumnHeaderText: Default
+              GroupDisplay: Default
+              InlineEditing: Default
+              Format: Normal
+              DisableDeleteCheckbox: false
+              RowNumberVisibility: Default
+              DisplayOnlyNewOrChangedRecords: false
+              SortAndGroup: Default
+              ShowSummaryTable: false
+              HideMainTable: false
+              ColorCoding:
+                ColorBy: None
+                Appearance: Default
+              HideTotals: false
+              AllowEditingRecords: true
+              AllowViewingRecords: true
+              Columns: Default
+              ColumnsUI: Default
+              Name: List All
+              Description: 
+              ShowDescription: false
+              Filters:
+                Criteria: Default
+                DynamicFields: Default
+                AllowQuickSearch: false
+              RolePermissions:
+                $Role_Viewer: true
+                $Role_Participant: true
+                $Role_Administrator: true
+          $Report_List_Changes:
+            Type: QB::Report::Table
+            Id: 2
+            Properties:
+              DefaultRowHeight: Default
+              ColumnHeaderText: Default
+              GroupDisplay: Default
+              InlineEditing: Default
+              Format: Normal
+              DisableDeleteCheckbox: false
+              RowNumberVisibility: Default
+              DisplayOnlyNewOrChangedRecords: true
+              SortAndGroup:
+                - Field: !Ref
+                    Field: $Field_Date_Modified
+                  SortOrder: Descending
+                  GroupBy: Unknown
+              ShowSummaryTable: false
+              HideMainTable: false
+              ColorCoding:
+                ColorBy: None
+                Appearance: Default
+              HideTotals: false
+              AllowEditingRecords: true
+              AllowViewingRecords: true
+              Columns: Default
+              ColumnsUI: Default
+              Name: List Changes
+              Description: Sorted by Date Modified
+              ShowDescription: false
+              Filters:
+                Criteria: Default
+                DynamicFields: Default
+                AllowQuickSearch: false
+              RolePermissions:
+                $Role_Viewer: true
+                $Role_Participant: true
+                $Role_Administrator: true
+        ReportGroups:
+          $ReportGroup_Common:
+            Type: QB::ReportGroup
+            Properties:
+              Name: Common
+              Reports:
+                - !Ref
+                  Report: $Report_List_All
+                - !Ref
+                  Report: $Report_List_Changes
+        Forms:
+          Properties:
+            RoleDefaults:
+              Everyone:
+                ViewForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                EditForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                AddForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                GridEdit: None
+                Mobile: UseFullSiteForms
+              $Role_Viewer:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+              $Role_Participant:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+              $Role_Administrator:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+            ReportOverrides:
+              $Report_List_All:
+                ViewForm: UseRoleSettings
+                EditForm: UseRoleSettings
+                GridEdit: UseRoleSettings
+                Mobile: UseRoleSettings
+              $Report_List_Changes:
+                ViewForm: UseRoleSettings
+                EditForm: UseRoleSettings
+                GridEdit: UseRoleSettings
+                Mobile: UseRoleSettings
+          Resources:
+            $Form_Files_Main_Form:
+              Type: QB::Form
+              Id: 2
+              Properties:
+                Name: Files Main Form
+                HorizontalRuleBetweenSections: true
+                ShowBuiltInFields: true
+                WrapFieldLabels: true
+                ShowSaveAndCancelButtons: true
+                ShowSaveAndKeepWorking: false
+                WaitForEmbeddedReports: UseAppBehavior
+                NewFieldAction: Add
+              Elements:
+                $FormElement_1:
+                  Type: QB::Form::Element::TextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_File_Code
+                $FormElement_2:
+                  Type: QB::Form::Element::TextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_File_Name
+                $FormElement_3:
+                  Type: QB::Form::Element::Section
+                  Properties:
+                    Heading: Download Records
+                    Collapse: false
+                    LabelPosition: AboveField
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    NonFieldElementID: 0
+                  Elements:
+                    $FormElement_4:
+                      Type: QB::Form::Element::FormulaField
+                      Properties:
+                        Label: 
+                        DisplayOn:
+                          Add: true
+                          Edit: true
+                          View: true
+                        Field: !Ref
+                          Field: $Field_Add_Download
+                    $FormElement_5:
+                      Type: QB::Form::Element::ReportLinkField
+                      Properties:
+                        EmbeddedView:
+                          TargetReport: !Ref
+                            Table: $Table_Downloads
+                            Report: $Report_Embedded_for_Files
+                          Editable: false
+                          MaxHeightInPixels: 0
+                          RowsToDisplay: 50
+                        Label: 
+                        DisplayOn:
+                          Add: true
+                          Edit: true
+                          View: true
+                        Field: !Ref
+                          Field: $Field_Download_records
+            $FormV2_Main_Form:
+              Type: QB::FormV2
+              Id: 10
+              Properties:
+                Name: Main Form
+                DisplayPagesAs: Tabs
+                ShouldAutoAddFields: true
+                ShouldShowBuiltInFieldsFooter: false
+                AlwaysTabsForViewRecord: false
+                AllowedSaveActions:
+                  - SaveAndKeepWorking
+                  - SaveAndNew
+                  - SaveAndNext
+                  - SaveAndView
+                BotCheckModes: []
+              Pages:
+                $FormV2Page_Untitled_Page:
+                  Type: QB::FormV2::Page
+                  Id: 1
+                  Properties:
+                    Name: Untitled Page
+                    Color: 
+                  Sections:
+                    $FormV2Section_1:
+                      Type: QB::FormV2::Section
+                      Properties:
+                        Title: 
+                        IsCollapsible: true
+                        IsCollapsedByDefault: false
+                        ShowColumnDividers: false
+                        ModesToShowIn:
+                          - Edit
+                          - View
+                          - Create
+                      Columns:
+                        $FormV2Column_1:
+                          Type: QB::FormV2::Column
+                          Properties:
+                            Title: 
+                            LayoutWidth: 4
+                            BackgroundColor: 
+                            ShowBackgroundColor: false
+                          Elements:
+                            $FormV2Element_1:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_File_Code
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                            $FormV2Element_2:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_File_Name
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                    $FormV2Section_Download_details:
+                      Type: QB::FormV2::Section
+                      Properties:
+                        Title: Download details
+                        IsCollapsible: true
+                        IsCollapsedByDefault: false
+                        ShowColumnDividers: false
+                        ModesToShowIn:
+                          - Edit
+                          - View
+                          - Create
+                      Columns:
+                        $FormV2Column_2:
+                          Type: QB::FormV2::Column
+                          Properties:
+                            Title: 
+                            LayoutWidth: 6
+                            BackgroundColor: 
+                            ShowBackgroundColor: false
+                          Elements:
+                            $FormV2Element_3:
+                              Type: QB::FormV2::Element::Report
+                              Properties:
+                                DisableSpreadsheetEdit: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ShouldOpenInEmbedded: true
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                                HideToolbar: false
+                                AllowCreateRecords: true
+                                Report: !Ref
+                                  Table: $Table_Downloads
+                                  Report: $Report_Embedded_for_Files
+                                ReportLinkField: !Ref
+                                  Field: $Field_Download_records
+                            $FormV2Element_4:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Add_Download
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+        Relationships:
+          $Relationship_to_Downloads_1:
+            Type: QB::Relationship::Parent
+      $Table_Downloads:
+        Type: QB::Table
+        Properties:
+          DefaultReportSettings:
+            DefaultColorCoding:
+              ColorBy: None
+              Appearance: Pale
+            DefaultFilters:
+              DynamicFields: Default
+              AllowQuickSearch: false
+            DefaultSortOrder:
+              SortOrder: Descending
+              TargetField: !Ref
+                Field: $Field_Date_Modified
+            ActionOnNewFieldAdd: MakeDefault
+            DefaultRowHeight: Short
+            DefaultRowNumberVisibility: Visible
+            DefaultColumnHeaderText: Wrap
+            InlineEditing: true
+            DefaultGroupDisplay: Collapsed
+          KeyField: !Ref
+            Field: $Field_Record_ID
+          Name: Downloads
+          AliasHint: _DBID_DOWNLOADS
+          Description: 
+          RecordNameSingular: Download
+          RecordNamePlural: Downloads
+          TableNameOverride: 
+          TableIconName: Down Arrow
+          SaveOnExit: true
+          Searchable: true
+          IndexFileAttachments: false
+          IncludeInTableBar: true
+          UseCustomRecordTitleField: false
+          DefaultRecordPicker: Default
+          CustomDataRules:
+            TurnedOn: false
+            Formula: 
+          TableHomePageSettings:
+            HomepageView: SameForEveryone
+            RoleViews:
+              Everyone:
+                View: DefaultReport
+              $Role_Viewer:
+                View: None
+              $Role_Participant:
+                View: None
+              $Role_Administrator:
+                View: None
+          RolePermissions:
+            $Role_Viewer:
+              CanAddRecords: false
+              CanDeleteRecords: false
+              CanSaveCommonReports: false
+              CanEditFieldProperties: false
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Never
+            $Role_Participant:
+              CanAddRecords: true
+              CanDeleteRecords: true
+              CanSaveCommonReports: false
+              CanEditFieldProperties: false
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Always
+            $Role_Administrator:
+              CanAddRecords: true
+              CanDeleteRecords: true
+              CanSaveCommonReports: true
+              CanEditFieldProperties: true
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Always
+        Fields:
+          $Field_Download_By:
+            Type: QB::Field::Text
+            Id: 6
+            Properties:
+              DefaultValue: 
+              MaxLength: 0
+              Width: 0
+              EditHistory:
+                Enable: false
+                ExpandedHistory: false
+                PrependHistory: false
+                UseFullName: true
+                IncludeTime: false
+                IncludeTimeZone: false
+              Label: Download By
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: UserInput
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Related_File:
+            Type: QB::Field::Reference
+            Id: 7
+            Properties:
+              Units: 
+              NumberFormat:
+                SeparatorStyle: CommaGroupingPeriodDecimal
+                SeparatorPlaces: none
+              DefaultValue: 
+              SeparatorStart: 4
+              DecimalPlaces: FloatingPoint
+              DoesTotal: true
+              DoesAverage: false
+              TreatBlankAsZero: true
+              Width: 0
+              Label: Related File
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              DefaultSortOrder: Ascending
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              Reference:
+                Relationship: !Ref
+                  Relationship: $Relationship_to_Downloads
+                DisplayAsLinkToParent: false
+                UseRecordPickerForGridEdit: false
+                DisplayType: QB::Field::Number
+              IsAuditable: false
+          $Field_File_Name:
+            Type: QB::Field::Lookup
+            Id: 8
+            Properties:
+              Width: 0
+              Label: File Name
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              HelpText: 
+              Lookup:
+                Relationship: !Ref
+                  Relationship: $Relationship_to_Downloads
+                TargetField: !Ref
+                  Table: $Table_Files
+                  Field: $Field_File_Name
+                DisplayAsLinkToParent: false
+                OverrideSubFieldAccess: false
+                DisplayType: QB::Field::Text
+          $Field_Related_File_lookup:
+            Type: QB::Field::Lookup
+            Id: 9
+            Properties:
+              Width: 0
+              Label: |-
+                Related File (lookup)
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              HelpText: 
+              Lookup:
+                Relationship: !Ref
+                  Relationship: $Relationship_to_Downloads
+                TargetField: !Ref
+                  Table: $Table_Files
+                  Field: $Field_File_Code
+                DisplayAsLinkToParent: false
+                OverrideSubFieldAccess: false
+                DisplayType: QB::Field::Text
+          $Field_Date_Created:
+            Type: QB::Field::DateCreated
+            Id: 1
+            Properties:
+              ShowTime: true
+              ShowMonthAsAlpha: false
+              HideCurrentYear: false
+              ShowDayOfWeek: false
+              ShowTimeZone: false
+              Label: Date Created
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              DefaultSortOrder: Ascending
+              IsAuditable: false
+          $Field_Date_Modified:
+            Type: QB::Field::DateModified
+            Id: 2
+            Properties:
+              ShowTime: true
+              ShowMonthAsAlpha: false
+              HideCurrentYear: false
+              ShowDayOfWeek: false
+              ShowTimeZone: false
+              Label: Date Modified
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              DefaultSortOrder: Ascending
+              IsAuditable: false
+          $Field_Record_ID:
+            Type: QB::Field::RecordID
+            Id: 3
+            Properties:
+              Units: 
+              NumberFormat:
+                SeparatorStyle: CommaGroupingPeriodDecimal
+                SeparatorPlaces: none
+              SeparatorStart: 4
+              Label: Record ID#
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+          $Field_Record_Owner:
+            Type: QB::Field::RecordOwner
+            Id: 4
+            Properties:
+              DisplayAs: LastNameFirstName
+              Label: Record Owner
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              IsAuditable: false
+          $Field_Last_Modified_By:
+            Type: QB::Field::LastModifiedBy
+            Id: 5
+            Properties:
+              DisplayAs: LastNameFirstName
+              Label: Last Modified By
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              IsAuditable: false
+        Relationships:
+          $Relationship_to_Downloads:
+            Type: QB::Relationship::Child
+            Properties:
+              Parent: !Ref
+                Table: $Table_Files
+                Relationship: $Relationship_to_Downloads_1
+        Reports:
+          $Report_Embedded_for_Files:
+            Type: QB::Report::Table
+            Id: 5
+            Properties:
+              DefaultRowHeight: Default
+              ColumnHeaderText: Default
+              GroupDisplay: Default
+              InlineEditing: Default
+              Format: Normal
+              DisableDeleteCheckbox: false
+              RowNumberVisibility: Default
+              DisplayOnlyNewOrChangedRecords: false
+              SortAndGroup: Default
+              ShowSummaryTable: false
+              HideMainTable: false
+              ColorCoding:
+                ColorBy: None
+                Appearance: Default
+              HideTotals: false
+              AllowEditingRecords: true
+              AllowViewingRecords: true
+              Columns:
+                - !Ref
+                  Field: $Field_Download_By
+              ColumnsUI: Default
+              Name: Embedded for Files
+              Description: 
+              ShowDescription: false
+              Filters:
+                Criteria: Default
+                DynamicFields: Default
+                AllowQuickSearch: false
+              RolePermissions:
+                $Role_Viewer: false
+                $Role_Participant: false
+                $Role_Administrator: false
+          $Report_List_All:
+            Type: QB::Report::Table
+            Id: 1
+            Properties:
+              DefaultRowHeight: Default
+              ColumnHeaderText: Default
+              GroupDisplay: Default
+              InlineEditing: Default
+              Format: Normal
+              DisableDeleteCheckbox: false
+              RowNumberVisibility: Default
+              DisplayOnlyNewOrChangedRecords: false
+              SortAndGroup: Default
+              ShowSummaryTable: false
+              HideMainTable: false
+              ColorCoding:
+                ColorBy: None
+                Appearance: Default
+              HideTotals: false
+              AllowEditingRecords: true
+              AllowViewingRecords: true
+              Columns: Default
+              ColumnsUI: Default
+              Name: List All
+              Description: 
+              ShowDescription: false
+              Filters:
+                Criteria: Default
+                DynamicFields: Default
+                AllowQuickSearch: false
+              RolePermissions:
+                $Role_Viewer: true
+                $Role_Participant: true
+                $Role_Administrator: true
+          $Report_List_Changes:
+            Type: QB::Report::Table
+            Id: 2
+            Properties:
+              DefaultRowHeight: Default
+              ColumnHeaderText: Default
+              GroupDisplay: Default
+              InlineEditing: Default
+              Format: Normal
+              DisableDeleteCheckbox: false
+              RowNumberVisibility: Default
+              DisplayOnlyNewOrChangedRecords: true
+              SortAndGroup:
+                - Field: !Ref
+                    Field: $Field_Date_Modified
+                  SortOrder: Descending
+                  GroupBy: Unknown
+              ShowSummaryTable: false
+              HideMainTable: false
+              ColorCoding:
+                ColorBy: None
+                Appearance: Default
+              HideTotals: false
+              AllowEditingRecords: true
+              AllowViewingRecords: true
+              Columns: Default
+              ColumnsUI: Default
+              Name: List Changes
+              Description: Sorted by Date Modified
+              ShowDescription: false
+              Filters:
+                Criteria: Default
+                DynamicFields: Default
+                AllowQuickSearch: false
+              RolePermissions:
+                $Role_Viewer: true
+                $Role_Participant: true
+                $Role_Administrator: true
+        ReportGroups:
+          $ReportGroup_Common:
+            Type: QB::ReportGroup
+            Properties:
+              Name: Common
+              Reports:
+                - !Ref
+                  Report: $Report_List_All
+                - !Ref
+                  Report: $Report_List_Changes
+                - !Ref
+                  Report: $Report_Embedded_for_Files
+        Forms:
+          Properties:
+            RoleDefaults:
+              Everyone:
+                ViewForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                EditForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                AddForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                GridEdit: None
+                Mobile: UseFullSiteForms
+              $Role_Viewer:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+              $Role_Participant:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+              $Role_Administrator:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+            ReportOverrides:
+              $Report_Embedded_for_Files:
+                ViewForm: UseRoleSettings
+                EditForm: UseRoleSettings
+                GridEdit: UseRoleSettings
+                Mobile: UseRoleSettings
+              $Report_List_All:
+                ViewForm: UseRoleSettings
+                EditForm: UseRoleSettings
+                GridEdit: UseRoleSettings
+                Mobile: UseRoleSettings
+              $Report_List_Changes:
+                ViewForm: UseRoleSettings
+                EditForm: UseRoleSettings
+                GridEdit: UseRoleSettings
+                Mobile: UseRoleSettings
+          Resources:
+            $Form_Downloads_Main_Form:
+              Type: QB::Form
+              Id: 2
+              Properties:
+                Name: Downloads Main Form
+                HorizontalRuleBetweenSections: true
+                ShowBuiltInFields: true
+                WrapFieldLabels: true
+                ShowSaveAndCancelButtons: true
+                ShowSaveAndKeepWorking: false
+                WaitForEmbeddedReports: UseAppBehavior
+                NewFieldAction: Add
+              Elements:
+                $FormElement_1:
+                  Type: QB::Form::Element::TextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Download_By
+                $FormElement_2:
+                  Type: QB::Form::Element::ReferenceField
+                  Properties:
+                    BaseRecordPickerOn: Default
+                    EmbeddedView: Default
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Related_File
+            $FormV2_Main_Form:
+              Type: QB::FormV2
+              Id: 10
+              Properties:
+                Name: Main Form
+                DisplayPagesAs: Tabs
+                ShouldAutoAddFields: true
+                ShouldShowBuiltInFieldsFooter: false
+                AlwaysTabsForViewRecord: false
+                AllowedSaveActions:
+                  - SaveAndKeepWorking
+                  - SaveAndNew
+                  - SaveAndNext
+                  - SaveAndView
+                BotCheckModes: []
+              Pages:
+                $FormV2Page_Untitled_Page:
+                  Type: QB::FormV2::Page
+                  Id: 1
+                  Properties:
+                    Name: Untitled Page
+                    Color: 
+                  Sections:
+                    $FormV2Section_1:
+                      Type: QB::FormV2::Section
+                      Properties:
+                        Title: 
+                        IsCollapsible: true
+                        IsCollapsedByDefault: false
+                        ShowColumnDividers: false
+                        ModesToShowIn:
+                          - Edit
+                          - View
+                          - Create
+                      Columns:
+                        $FormV2Column_1:
+                          Type: QB::FormV2::Column
+                          Properties:
+                            Title: 
+                            LayoutWidth: 4
+                            BackgroundColor: 
+                            ShowBackgroundColor: false
+                          Elements:
+                            $FormV2Element_1:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Download_By
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                            $FormV2Element_2:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Related_File
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                                FilterChoicesBy: Default
+                            $FormV2Element_3:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_File_Name
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                                FilterChoicesBy: Default
+                            $FormV2Element_4:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                FilterChoicesBy: Default
+                                Field: !Ref
+                                  Field: $Field_Related_File_lookup
+                                Width: Default
+                                ModesToShowIn:
+                                  - Edit
+                                  - View
+                                  - Create
+      $Table_Test:
+        Type: QB::Table
+        Properties:
+          DefaultReportSettings:
+            DefaultColorCoding:
+              ColorBy: None
+              Appearance: Pale
+            DefaultFilters:
+              DynamicFields: Default
+              AllowQuickSearch: false
+            DefaultSortOrder:
+              SortOrder: Descending
+              TargetField: !Ref
+                Field: $Field_Date_Modified
+            ActionOnNewFieldAdd: MakeDefault
+            DefaultRowHeight: Short
+            DefaultRowNumberVisibility: Visible
+            DefaultColumnHeaderText: Wrap
+            InlineEditing: true
+            DefaultGroupDisplay: Collapsed
+          KeyField: !Ref
+            Field: $Field_Record_ID
+          Name: Test
+          AliasHint: _DBID_TEST
+          Description: 
+          RecordNameSingular: Test
+          RecordNamePlural: Tests
+          TableNameOverride: 
+          TableIconName: Folder
+          SaveOnExit: true
+          Searchable: true
+          IndexFileAttachments: false
+          IncludeInTableBar: true
+          UseCustomRecordTitleField: false
+          DefaultRecordPicker: Default
+          CustomDataRules:
+            TurnedOn: false
+            Formula: 
+          TableHomePageSettings:
+            HomepageView: SameForEveryone
+            RoleViews:
+              Everyone:
+                View: DefaultReport
+              $Role_Viewer:
+                View: None
+              $Role_Participant:
+                View: None
+              $Role_Administrator:
+                View: None
+          RolePermissions:
+            $Role_Viewer:
+              CanAddRecords: false
+              CanDeleteRecords: false
+              CanSaveCommonReports: false
+              CanEditFieldProperties: false
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Never
+            $Role_Participant:
+              CanAddRecords: true
+              CanDeleteRecords: true
+              CanSaveCommonReports: false
+              CanEditFieldProperties: false
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Always
+            $Role_Administrator:
+              CanAddRecords: true
+              CanDeleteRecords: true
+              CanSaveCommonReports: true
+              CanEditFieldProperties: true
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Always
+        Fields:
+          $Field_Date:
+            Type: QB::Field::Date
+            Id: 6
+            Properties:
+              ShowMonthAsAlpha: false
+              HideCurrentYear: false
+              ShowDayOfWeek: false
+              DefaultIsToday: false
+              Label: Date
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: true
+              DefaultSortOrder: Ascending
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Date_Created:
+            Type: QB::Field::DateCreated
+            Id: 1
+            Properties:
+              ShowTime: true
+              ShowMonthAsAlpha: false
+              HideCurrentYear: false
+              ShowDayOfWeek: false
+              ShowTimeZone: false
+              Label: Date Created
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              DefaultSortOrder: Ascending
+              IsAuditable: false
+          $Field_Date_Modified:
+            Type: QB::Field::DateModified
+            Id: 2
+            Properties:
+              ShowTime: true
+              ShowMonthAsAlpha: false
+              HideCurrentYear: false
+              ShowDayOfWeek: false
+              ShowTimeZone: false
+              Label: Date Modified
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              DefaultSortOrder: Ascending
+              IsAuditable: false
+          $Field_Record_ID:
+            Type: QB::Field::RecordID
+            Id: 3
+            Properties:
+              Units: 
+              NumberFormat:
+                SeparatorStyle: CommaGroupingPeriodDecimal
+                SeparatorPlaces: none
+              SeparatorStart: 4
+              Label: Record ID#
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+          $Field_Record_Owner:
+            Type: QB::Field::RecordOwner
+            Id: 4
+            Properties:
+              DisplayAs: LastNameFirstName
+              Label: Record Owner
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              IsAuditable: false
+          $Field_Last_Modified_By:
+            Type: QB::Field::LastModifiedBy
+            Id: 5
+            Properties:
+              DisplayAs: LastNameFirstName
+              Label: Last Modified By
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              IsAuditable: false
+        Reports:
+          $Report_List_All:
+            Type: QB::Report::Table
+            Id: 1
+            Properties:
+              DefaultRowHeight: Default
+              ColumnHeaderText: Default
+              GroupDisplay: Default
+              InlineEditing: Default
+              Format: Normal
+              DisableDeleteCheckbox: false
+              RowNumberVisibility: Default
+              DisplayOnlyNewOrChangedRecords: false
+              SortAndGroup: Default
+              ShowSummaryTable: false
+              HideMainTable: false
+              ColorCoding:
+                ColorBy: None
+                Appearance: Default
+              HideTotals: false
+              AllowEditingRecords: true
+              AllowViewingRecords: true
+              Columns: Default
+              ColumnsUI: Default
+              Name: List All
+              Description: 
+              ShowDescription: false
+              Filters:
+                Criteria: Default
+                DynamicFields:
+                  - !Ref
+                    Field: $Field_Date
+                AllowQuickSearch: false
+              RolePermissions:
+                $Role_Viewer: true
+                $Role_Participant: true
+                $Role_Administrator: true
+          $Report_List_Changes:
+            Type: QB::Report::Table
+            Id: 2
+            Properties:
+              DefaultRowHeight: Default
+              ColumnHeaderText: Default
+              GroupDisplay: Default
+              InlineEditing: Default
+              Format: Normal
+              DisableDeleteCheckbox: false
+              RowNumberVisibility: Default
+              DisplayOnlyNewOrChangedRecords: true
+              SortAndGroup:
+                - Field: !Ref
+                    Field: $Field_Date_Modified
+                  SortOrder: Descending
+                  GroupBy: Unknown
+              ShowSummaryTable: false
+              HideMainTable: false
+              ColorCoding:
+                ColorBy: None
+                Appearance: Default
+              HideTotals: false
+              AllowEditingRecords: true
+              AllowViewingRecords: true
+              Columns: Default
+              ColumnsUI: Default
+              Name: List Changes
+              Description: Sorted by Date Modified
+              ShowDescription: false
+              Filters:
+                Criteria: Default
+                DynamicFields: Default
+                AllowQuickSearch: false
+              RolePermissions:
+                $Role_Viewer: true
+                $Role_Participant: true
+                $Role_Administrator: true
+        ReportGroups:
+          $ReportGroup_Common:
+            Type: QB::ReportGroup
+            Properties:
+              Name: Common
+              Reports:
+                - !Ref
+                  Report: $Report_List_All
+                - !Ref
+                  Report: $Report_List_Changes
+        Forms:
+          Properties:
+            RoleDefaults:
+              Everyone:
+                ViewForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                EditForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                AddForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                GridEdit: None
+                Mobile: UseFullSiteForms
+              $Role_Viewer:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+              $Role_Participant:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+              $Role_Administrator:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+            ReportOverrides:
+              $Report_List_All:
+                ViewForm: UseRoleSettings
+                EditForm: UseRoleSettings
+                GridEdit: UseRoleSettings
+                Mobile: UseRoleSettings
+              $Report_List_Changes:
+                ViewForm: UseRoleSettings
+                EditForm: UseRoleSettings
+                GridEdit: UseRoleSettings
+                Mobile: UseRoleSettings
+          Resources:
+            $Form_Test_Main_Form:
+              Type: QB::Form
+              Id: 2
+              Properties:
+                Name: Test Main Form
+                HorizontalRuleBetweenSections: true
+                ShowBuiltInFields: true
+                WrapFieldLabels: true
+                ShowSaveAndCancelButtons: true
+                ShowSaveAndKeepWorking: false
+                WaitForEmbeddedReports: UseAppBehavior
+                NewFieldAction: Add
+              Elements:
+                $FormElement_1:
+                  Type: QB::Form::Element::DateField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Date
+            $FormV2_Main_Form:
+              Type: QB::FormV2
+              Id: 10
+              Properties:
+                Name: Main Form
+                DisplayPagesAs: Tabs
+                ShouldAutoAddFields: true
+                ShouldShowBuiltInFieldsFooter: false
+                AlwaysTabsForViewRecord: false
+                AllowedSaveActions:
+                  - SaveAndKeepWorking
+                  - SaveAndNew
+                  - SaveAndNext
+                  - SaveAndView
+                BotCheckModes: []
+              Pages:
+                $FormV2Page_Untitled_Page:
+                  Type: QB::FormV2::Page
+                  Id: 1
+                  Properties:
+                    Name: Untitled Page
+                    Color: 
+                  Sections:
+                    $FormV2Section_1:
+                      Type: QB::FormV2::Section
+                      Properties:
+                        Title: 
+                        IsCollapsible: true
+                        IsCollapsedByDefault: false
+                        ShowColumnDividers: false
+                        ModesToShowIn:
+                          - Edit
+                          - View
+                          - Create
+                      Columns:
+                        $FormV2Column_1:
+                          Type: QB::FormV2::Column
+                          Properties:
+                            Title: 
+                            LayoutWidth: 4
+                            BackgroundColor: 
+                            ShowBackgroundColor: false
+                          Elements:
+                            $FormV2Element_1:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Date
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+      $Table_Users:
+        Type: QB::Table
+        Properties:
+          DefaultReportSettings:
+            DefaultColorCoding:
+              ColorBy: None
+              Appearance: Pale
+            DefaultFilters:
+              DynamicFields: Default
+              AllowQuickSearch: false
+            DefaultSortOrder:
+              SortOrder: Descending
+              TargetField: !Ref
+                Field: $Field_Date_Modified
+            ActionOnNewFieldAdd: MakeDefault
+            DefaultRowHeight: Short
+            DefaultRowNumberVisibility: Visible
+            DefaultColumnHeaderText: Wrap
+            InlineEditing: true
+            DefaultGroupDisplay: Collapsed
+          KeyField: !Ref
+            Field: $Field_Record_ID
+          Name: Users
+          AliasHint: _DBID_USERS
+          Description: 
+          RecordNameSingular: User
+          RecordNamePlural: Users
+          TableNameOverride: 
+          TableIconName: Folder
+          SaveOnExit: true
+          Searchable: true
+          IndexFileAttachments: false
+          IncludeInTableBar: true
+          UseCustomRecordTitleField: false
+          DefaultRecordPicker: Default
+          CustomDataRules:
+            TurnedOn: false
+            Formula: 
+          TableHomePageSettings:
+            HomepageView: SameForEveryone
+            RoleViews:
+              Everyone:
+                View: DefaultReport
+              $Role_Viewer:
+                View: None
+              $Role_Participant:
+                View: None
+              $Role_Administrator:
+                View: None
+          RolePermissions:
+            $Role_Viewer:
+              CanAddRecords: false
+              CanDeleteRecords: false
+              CanSaveCommonReports: false
+              CanEditFieldProperties: false
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Never
+            $Role_Participant:
+              CanAddRecords: true
+              CanDeleteRecords: true
+              CanSaveCommonReports: false
+              CanEditFieldProperties: false
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Always
+            $Role_Administrator:
+              CanAddRecords: true
+              CanDeleteRecords: true
+              CanSaveCommonReports: true
+              CanEditFieldProperties: true
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Always
+        Fields:
+          $Field_Name:
+            Type: QB::Field::Text
+            Id: 6
+            Properties:
+              DefaultValue: 
+              MaxLength: 0
+              Width: 0
+              EditHistory:
+                Enable: false
+                ExpandedHistory: false
+                PrependHistory: false
+                UseFullName: true
+                IncludeTime: false
+                IncludeTimeZone: false
+              Label: Name
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: UserInput
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Date_Created:
+            Type: QB::Field::DateCreated
+            Id: 1
+            Properties:
+              ShowTime: true
+              ShowMonthAsAlpha: false
+              HideCurrentYear: false
+              ShowDayOfWeek: false
+              ShowTimeZone: false
+              Label: Date Created
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              DefaultSortOrder: Ascending
+              IsAuditable: false
+          $Field_Date_Modified:
+            Type: QB::Field::DateModified
+            Id: 2
+            Properties:
+              ShowTime: true
+              ShowMonthAsAlpha: false
+              HideCurrentYear: false
+              ShowDayOfWeek: false
+              ShowTimeZone: false
+              Label: Date Modified
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              DefaultSortOrder: Ascending
+              IsAuditable: false
+          $Field_Record_ID:
+            Type: QB::Field::RecordID
+            Id: 3
+            Properties:
+              Units: 
+              NumberFormat:
+                SeparatorStyle: CommaGroupingPeriodDecimal
+                SeparatorPlaces: none
+              SeparatorStart: 4
+              Label: Record ID#
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+          $Field_Record_Owner:
+            Type: QB::Field::RecordOwner
+            Id: 4
+            Properties:
+              DisplayAs: LastNameFirstName
+              Label: Record Owner
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              IsAuditable: false
+          $Field_Last_Modified_By:
+            Type: QB::Field::LastModifiedBy
+            Id: 5
+            Properties:
+              DisplayAs: LastNameFirstName
+              Label: Last Modified By
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              IsAuditable: false
+        Reports:
+          $Report_List_All:
+            Type: QB::Report::Table
+            Id: 1
+            Properties:
+              DefaultRowHeight: Default
+              ColumnHeaderText: Default
+              GroupDisplay: Default
+              InlineEditing: Default
+              Format: Normal
+              DisableDeleteCheckbox: false
+              RowNumberVisibility: Default
+              DisplayOnlyNewOrChangedRecords: false
+              SortAndGroup: Default
+              ShowSummaryTable: false
+              HideMainTable: false
+              ColorCoding:
+                ColorBy: None
+                Appearance: Default
+              HideTotals: false
+              AllowEditingRecords: true
+              AllowViewingRecords: true
+              Columns: Default
+              ColumnsUI: Default
+              Name: List All
+              Description: 
+              ShowDescription: false
+              Filters:
+                Criteria: Default
+                DynamicFields: Default
+                AllowQuickSearch: false
+              RolePermissions:
+                $Role_Viewer: true
+                $Role_Participant: true
+                $Role_Administrator: true
+          $Report_List_Changes:
+            Type: QB::Report::Table
+            Id: 2
+            Properties:
+              DefaultRowHeight: Default
+              ColumnHeaderText: Default
+              GroupDisplay: Default
+              InlineEditing: Default
+              Format: Normal
+              DisableDeleteCheckbox: false
+              RowNumberVisibility: Default
+              DisplayOnlyNewOrChangedRecords: true
+              SortAndGroup:
+                - Field: !Ref
+                    Field: $Field_Date_Modified
+                  SortOrder: Descending
+                  GroupBy: Unknown
+              ShowSummaryTable: false
+              HideMainTable: false
+              ColorCoding:
+                ColorBy: None
+                Appearance: Default
+              HideTotals: false
+              AllowEditingRecords: true
+              AllowViewingRecords: true
+              Columns: Default
+              ColumnsUI: Default
+              Name: List Changes
+              Description: Sorted by Date Modified
+              ShowDescription: false
+              Filters:
+                Criteria: Default
+                DynamicFields: Default
+                AllowQuickSearch: false
+              RolePermissions:
+                $Role_Viewer: true
+                $Role_Participant: true
+                $Role_Administrator: true
+        ReportGroups:
+          $ReportGroup_Common:
+            Type: QB::ReportGroup
+            Properties:
+              Name: Common
+              Reports:
+                - !Ref
+                  Report: $Report_List_All
+                - !Ref
+                  Report: $Report_List_Changes
+        Forms:
+          Properties:
+            RoleDefaults:
+              Everyone:
+                ViewForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                EditForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                AddForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                GridEdit: None
+                Mobile: UseFullSiteForms
+              $Role_Viewer:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+              $Role_Participant:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+              $Role_Administrator:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+            ReportOverrides:
+              $Report_List_All:
+                ViewForm: UseRoleSettings
+                EditForm: UseRoleSettings
+                GridEdit: UseRoleSettings
+                Mobile: UseRoleSettings
+              $Report_List_Changes:
+                ViewForm: UseRoleSettings
+                EditForm: UseRoleSettings
+                GridEdit: UseRoleSettings
+                Mobile: UseRoleSettings
+          Resources:
+            $Form_Users_Main_Form:
+              Type: QB::Form
+              Id: 2
+              Properties:
+                Name: Users Main Form
+                HorizontalRuleBetweenSections: true
+                ShowBuiltInFields: true
+                WrapFieldLabels: true
+                ShowSaveAndCancelButtons: true
+                ShowSaveAndKeepWorking: false
+                WaitForEmbeddedReports: UseAppBehavior
+                NewFieldAction: Add
+              Elements:
+                $FormElement_1:
+                  Type: QB::Form::Element::TextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Name
+            $FormV2_Main_Form:
+              Type: QB::FormV2
+              Id: 10
+              Properties:
+                Name: Main Form
+                DisplayPagesAs: Tabs
+                ShouldAutoAddFields: true
+                ShouldShowBuiltInFieldsFooter: false
+                AlwaysTabsForViewRecord: false
+                AllowedSaveActions:
+                  - SaveAndKeepWorking
+                  - SaveAndNew
+                  - SaveAndNext
+                  - SaveAndView
+                BotCheckModes: []
+              Pages:
+                $FormV2Page_Untitled_Page:
+                  Type: QB::FormV2::Page
+                  Id: 1
+                  Properties:
+                    Name: Untitled Page
+                    Color: 
+                  Sections:
+                    $FormV2Section_1:
+                      Type: QB::FormV2::Section
+                      Properties:
+                        Title: 
+                        IsCollapsible: true
+                        IsCollapsedByDefault: false
+                        ShowColumnDividers: false
+                        ModesToShowIn:
+                          - Edit
+                          - View
+                          - Create
+                      Columns:
+                        $FormV2Column_1:
+                          Type: QB::FormV2::Column
+                          Properties:
+                            Title: 
+                            LayoutWidth: 4
+                            BackgroundColor: 
+                            ShowBackgroundColor: false
+                          Elements:
+                            $FormV2Element_1:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Name
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+      $Table_Address:
+        Type: QB::Table
+        Properties:
+          DefaultReportSettings:
+            DefaultColorCoding:
+              ColorBy: None
+              Appearance: Pale
+            DefaultFilters:
+              DynamicFields: Default
+              AllowQuickSearch: false
+            DefaultSortOrder:
+              SortOrder: Descending
+              TargetField: !Ref
+                Field: $Field_Date_Modified
+            ActionOnNewFieldAdd: MakeDefault
+            DefaultRowHeight: Short
+            DefaultRowNumberVisibility: Visible
+            DefaultColumnHeaderText: Wrap
+            InlineEditing: true
+            DefaultGroupDisplay: Collapsed
+          KeyField: !Ref
+            Field: $Field_Record_ID
+          Name: Address
+          AliasHint: _DBID_ADDRESS
+          Description: 
+          RecordNameSingular: address
+          RecordNamePlural: addresses
+          TableNameOverride: 
+          TableIconName: Envelope
+          SaveOnExit: true
+          Searchable: true
+          IndexFileAttachments: false
+          IncludeInTableBar: true
+          UseCustomRecordTitleField: false
+          DefaultRecordPicker: Default
+          CustomDataRules:
+            TurnedOn: false
+            Formula: 
+          TableHomePageSettings:
+            HomepageView: SameForEveryone
+            RoleViews:
+              Everyone:
+                View: DefaultReport
+              $Role_Viewer:
+                View: None
+              $Role_Participant:
+                View: None
+              $Role_Administrator:
+                View: None
+          RolePermissions:
+            $Role_Viewer:
+              CanAddRecords: false
+              CanDeleteRecords: false
+              CanSaveCommonReports: false
+              CanEditFieldProperties: false
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Never
+            $Role_Participant:
+              CanAddRecords: true
+              CanDeleteRecords: true
+              CanSaveCommonReports: false
+              CanEditFieldProperties: false
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Always
+            $Role_Administrator:
+              CanAddRecords: true
+              CanDeleteRecords: true
+              CanSaveCommonReports: true
+              CanEditFieldProperties: true
+              CanViewRecords:
+                When: Always
+              CanModifyRecords:
+                When: Always
+        Fields:
+          $Field_Address1:
+            Type: QB::Field::TextMultiline
+            Id: 6
+            Properties:
+              Height: 6
+              DefaultValue: 
+              MaxLength: 0
+              Width: 60
+              EditHistory:
+                Enable: false
+                ExpandedHistory: false
+                PrependHistory: false
+                UseFullName: true
+                IncludeTime: false
+                IncludeTimeZone: false
+              Label: Address1
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: UserInput
+              IsRequired: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Address2:
+            Type: QB::Field::TextMultiline
+            Id: 7
+            Properties:
+              Height: 6
+              DefaultValue: 
+              MaxLength: 0
+              Width: 60
+              EditHistory:
+                Enable: false
+                ExpandedHistory: false
+                PrependHistory: false
+                UseFullName: true
+                IncludeTime: false
+                IncludeTimeZone: false
+              Label: Address2
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: UserInput
+              IsRequired: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_City:
+            Type: QB::Field::Text
+            Id: 8
+            Properties:
+              DefaultValue: 
+              MaxLength: 0
+              Width: 0
+              EditHistory:
+                Enable: false
+                ExpandedHistory: false
+                PrependHistory: false
+                UseFullName: true
+                IncludeTime: false
+                IncludeTimeZone: false
+              Label: City
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: UserInput
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_District:
+            Type: QB::Field::Text
+            Id: 9
+            Properties:
+              DefaultValue: 
+              MaxLength: 0
+              Width: 0
+              EditHistory:
+                Enable: false
+                ExpandedHistory: false
+                PrependHistory: false
+                UseFullName: true
+                IncludeTime: false
+                IncludeTimeZone: false
+              Label: District
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: UserInput
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_State:
+            Type: QB::Field::Text
+            Id: 10
+            Properties:
+              DefaultValue: 
+              MaxLength: 0
+              Width: 0
+              EditHistory:
+                Enable: false
+                ExpandedHistory: false
+                PrependHistory: false
+                UseFullName: true
+                IncludeTime: false
+                IncludeTimeZone: false
+              Label: State
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: false
+              AddToAllNewReports: true
+              InputOptions:
+                InputType: UserInput
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_PinCode:
+            Type: QB::Field::Number
+            Id: 11
+            Properties:
+              Units: 
+              NumberFormat:
+                SeparatorStyle: CommaGroupingPeriodDecimal
+                SeparatorPlaces: none
+              DefaultValue: 
+              SeparatorStart: 4
+              DecimalPlaces: FloatingPoint
+              DoesTotal: true
+              DoesAverage: false
+              TreatBlankAsZero: true
+              Width: 0
+              Label: PinCode
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: true
+              DefaultSortOrder: Ascending
+              InputOptions:
+                InputType: UserInput
+              IsRequired: false
+              IsUnique: false
+              HelpText: 
+              AllowDataCopy: true
+              IsAuditable: false
+          $Field_Date_Created:
+            Type: QB::Field::DateCreated
+            Id: 1
+            Properties:
+              ShowTime: true
+              ShowMonthAsAlpha: false
+              HideCurrentYear: false
+              ShowDayOfWeek: false
+              ShowTimeZone: false
+              Label: Date Created
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              DefaultSortOrder: Ascending
+              IsAuditable: false
+          $Field_Date_Modified:
+            Type: QB::Field::DateModified
+            Id: 2
+            Properties:
+              ShowTime: true
+              ShowMonthAsAlpha: false
+              HideCurrentYear: false
+              ShowDayOfWeek: false
+              ShowTimeZone: false
+              Label: Date Modified
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              DefaultSortOrder: Ascending
+              IsAuditable: false
+          $Field_Record_ID:
+            Type: QB::Field::RecordID
+            Id: 3
+            Properties:
+              Units: 
+              NumberFormat:
+                SeparatorStyle: CommaGroupingPeriodDecimal
+                SeparatorPlaces: none
+              SeparatorStart: 4
+              Label: Record ID#
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: false
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+          $Field_Record_Owner:
+            Type: QB::Field::RecordOwner
+            Id: 4
+            Properties:
+              DisplayAs: LastNameFirstName
+              Label: Record Owner
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              IsAuditable: false
+          $Field_Last_Modified_By:
+            Type: QB::Field::LastModifiedBy
+            Id: 5
+            Properties:
+              DisplayAs: LastNameFirstName
+              Label: Last Modified By
+              Comments: 
+              AllowedInReports: true
+              IsSearchable: true
+              IsBold: false
+              DisplayWithoutWrapping: true
+              AddToAllNewReports: false
+              IsAuditable: false
+        Reports:
+          $Report_List_All:
+            Type: QB::Report::Table
+            Id: 1
+            Properties:
+              DefaultRowHeight: Default
+              ColumnHeaderText: Default
+              GroupDisplay: Default
+              InlineEditing: Default
+              Format: Normal
+              DisableDeleteCheckbox: false
+              RowNumberVisibility: Default
+              DisplayOnlyNewOrChangedRecords: false
+              SortAndGroup: Default
+              ShowSummaryTable: false
+              HideMainTable: false
+              ColorCoding:
+                ColorBy: None
+                Appearance: Default
+              HideTotals: false
+              AllowEditingRecords: true
+              AllowViewingRecords: true
+              Columns: Default
+              ColumnsUI: Default
+              Name: List All
+              Description: 
+              ShowDescription: false
+              Filters:
+                Criteria: |-
+                  {0.CT.''}
+                DynamicFields: Default
+                AllowQuickSearch: false
+              RolePermissions:
+                $Role_Viewer: true
+                $Role_Participant: true
+                $Role_Administrator: true
+          $Report_List_Changes:
+            Type: QB::Report::Table
+            Id: 2
+            Properties:
+              DefaultRowHeight: Default
+              ColumnHeaderText: Default
+              GroupDisplay: Default
+              InlineEditing: Default
+              Format: Normal
+              DisableDeleteCheckbox: false
+              RowNumberVisibility: Default
+              DisplayOnlyNewOrChangedRecords: true
+              SortAndGroup:
+                - Field: !Ref
+                    Field: $Field_Date_Modified
+                  SortOrder: Descending
+                  GroupBy: Unknown
+              ShowSummaryTable: false
+              HideMainTable: false
+              ColorCoding:
+                ColorBy: None
+                Appearance: Default
+              HideTotals: false
+              AllowEditingRecords: true
+              AllowViewingRecords: true
+              Columns: Default
+              ColumnsUI: Default
+              Name: List Changes
+              Description: Sorted by Date Modified
+              ShowDescription: false
+              Filters:
+                Criteria: |-
+                  {0.CT.''}
+                DynamicFields: Default
+                AllowQuickSearch: false
+              RolePermissions:
+                $Role_Viewer: true
+                $Role_Participant: true
+                $Role_Administrator: true
+        ReportGroups:
+          $ReportGroup_Common:
+            Type: QB::ReportGroup
+            Properties:
+              Name: Common
+              Reports:
+                - !Ref
+                  Report: $Report_List_All
+                - !Ref
+                  Report: $Report_List_Changes
+        Forms:
+          Properties:
+            RoleDefaults:
+              Everyone:
+                ViewForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                EditForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                AddForm: !Ref
+                  FormV2: $FormV2_Main_Form
+                GridEdit: None
+                Mobile: UseFullSiteForms
+              $Role_Viewer:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+              $Role_Participant:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+              $Role_Administrator:
+                ViewForm: Default
+                EditForm: Default
+                AddForm: Default
+                GridEdit: None
+                Mobile: Default
+            ReportOverrides:
+              $Report_List_All:
+                ViewForm: UseRoleSettings
+                EditForm: UseRoleSettings
+                GridEdit: UseRoleSettings
+                Mobile: UseRoleSettings
+              $Report_List_Changes:
+                ViewForm: UseRoleSettings
+                EditForm: UseRoleSettings
+                GridEdit: UseRoleSettings
+                Mobile: UseRoleSettings
+          Resources:
+            $Form_Address_Main_Form:
+              Type: QB::Form
+              Id: 2
+              Properties:
+                Name: Address Main Form
+                HorizontalRuleBetweenSections: true
+                ShowBuiltInFields: true
+                WrapFieldLabels: true
+                ShowSaveAndCancelButtons: true
+                ShowSaveAndKeepWorking: false
+                WaitForEmbeddedReports: UseAppBehavior
+                NewFieldAction: Add
+              Elements:
+                $FormElement_1:
+                  Type: QB::Form::Element::TextMultilineField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Address1
+                $FormElement_2:
+                  Type: QB::Form::Element::TextMultilineField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_Address2
+                $FormElement_3:
+                  Type: QB::Form::Element::TextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_City
+                $FormElement_4:
+                  Type: QB::Form::Element::TextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_District
+                $FormElement_5:
+                  Type: QB::Form::Element::TextField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_State
+                $FormElement_6:
+                  Type: QB::Form::Element::NumberField
+                  Properties:
+                    Required: false
+                    ReadOnly: false
+                    DisplayOn:
+                      Add: true
+                      Edit: true
+                      View: true
+                    Field: !Ref
+                      Field: $Field_PinCode
+            $FormV2_Main_Form:
+              Type: QB::FormV2
+              Id: 10
+              Properties:
+                Name: Main Form
+                DisplayPagesAs: Tabs
+                ShouldAutoAddFields: true
+                ShouldShowBuiltInFieldsFooter: false
+                AlwaysTabsForViewRecord: false
+                AllowedSaveActions:
+                  - SaveAndKeepWorking
+                  - SaveAndNew
+                  - SaveAndNext
+                  - SaveAndView
+                BotCheckModes: []
+              Pages:
+                $FormV2Page_Untitled_Page:
+                  Type: QB::FormV2::Page
+                  Id: 1
+                  Properties:
+                    Name: Untitled Page
+                    Color: 
+                  Sections:
+                    $FormV2Section_1:
+                      Type: QB::FormV2::Section
+                      Properties:
+                        Title: 
+                        IsCollapsible: true
+                        IsCollapsedByDefault: false
+                        ShowColumnDividers: false
+                        ModesToShowIn:
+                          - Edit
+                          - View
+                          - Create
+                      Columns:
+                        $FormV2Column_1:
+                          Type: QB::FormV2::Column
+                          Properties:
+                            Title: 
+                            LayoutWidth: 4
+                            BackgroundColor: 
+                            ShowBackgroundColor: false
+                          Elements:
+                            $FormV2Element_1:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Address1
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                            $FormV2Element_2:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_Address2
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                            $FormV2Element_3:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_City
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                            $FormV2Element_4:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_District
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                            $FormV2Element_5:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_State
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+                            $FormV2Element_6:
+                              Type: QB::FormV2::Element::Field
+                              Properties:
+                                ForceRequireOnForm: false
+                                LabelMode: Default
+                                LabelOverride: 
+                                ForceReadOnlyOnForm: false
+                                HelpText: 
+                                Field: !Ref
+                                  Field: $Field_PinCode
+                                Width: Default
+                                ModesToShowIn:
+                                  - Create
+                                  - Edit
+                                  - View
+    Roles:
+      $Role_Viewer:
+        Type: QB::Application::Role
+        Properties:
+          Name: Viewer
+          Description: 
+          RestrictAccessToNewTablesForThisRole: false
+          Default: false
+          ManageUsers: false
+          EditApp: false
+          DisableAccess: false
+          AppUI:
+            HideSettings: false
+            HideUsers: false
+            HideFavorites: false
+            HideSearch: false
+            HideHelp: false
+            HideTestAs: false
+          TableUI:
+            Global:
+              HideInBar: false
+              HideNewRecord: false
+              HideGridEdit: false
+              HideEmail: false
+              HidePrint: false
+              HideImportExport: false
+              HideSaveSpreadsheet: false
+              HideCreateCustomizeReport: false
+              HidePersonalSettings: false
+      $Role_Participant:
+        Type: QB::Application::Role
+        Properties:
+          Name: Participant
+          Description: 
+          RestrictAccessToNewTablesForThisRole: false
+          Default: true
+          ManageUsers: true
+          EditApp: false
+          DisableAccess: false
+          AppUI:
+            HideSettings: false
+            HideUsers: false
+            HideFavorites: false
+            HideSearch: false
+            HideHelp: false
+            HideTestAs: false
+          TableUI:
+            Global:
+              HideInBar: false
+              HideNewRecord: false
+              HideGridEdit: false
+              HideEmail: false
+              HidePrint: false
+              HideImportExport: false
+              HideSaveSpreadsheet: false
+              HideCreateCustomizeReport: false
+              HidePersonalSettings: false
+      $Role_Administrator:
+        Type: QB::Application::Role
+        Properties:
+          Name: Administrator
+          Description: 
+          RestrictAccessToNewTablesForThisRole: false
+          Default: false
+          ManageUsers: true
+          EditApp: true
+          DisableAccess: false
+          AppUI:
+            HideSettings: false
+            HideUsers: false
+            HideFavorites: false
+            HideSearch: false
+            HideHelp: false
+            HideTestAs: false
+          TableUI:
+            Global:
+              HideInBar: false
+              HideNewRecord: false
+              HideGridEdit: false
+              HideEmail: false
+              HidePrint: false
+              HideImportExport: false
+              HideSaveSpreadsheet: false
+              HideCreateCustomizeReport: false
+              HidePersonalSettings: false
+    Pages:
+      Properties:
+        RoleDefaults:
+          Everyone: !Ref
+            Dashboard: $Dashboard_Default_dashboard
+          $Role_Viewer:
+            Desktop: !Ref
+              Dashboard: $Dashboard_Default_dashboard
+            Mobile: UseDesktop
+          $Role_Participant:
+            Desktop: !Ref
+              Dashboard: $Dashboard_Default_dashboard
+            Mobile: UseDesktop
+          $Role_Administrator:
+            Desktop: !Ref
+              Dashboard: $Dashboard_Default_dashboard
+            Mobile: UseDesktop
+      Resources:
+        $Page_Untitled_Page_html:
+          Type: QB::CodePage
+          Id: 2
+          Properties:
+            RawCode: 
+            Name: Untitled Page.html
+        $Page_Default_Dashboard:
+          Type: QB::HomePage
+          Id: 101
+          Properties:
+            Name: Default Dashboard
+        $Dashboard_Default_dashboard:
+          Type: QB::Dashboard
+          Properties:
+            Name: Default dashboard
+          Tabs:
+            $DashboardTab_Untitled_Tab_1:
+              Type: QB::Dashboard::Tab
+              Properties:
+                Name: Untitled Tab 1
+                CanvasVersion: 2
+            $DashboardTab_Untitled_Tab_3:
+              Type: QB::Dashboard::Tab
+              Properties:
+                Name: Untitled Tab 3
+                CanvasVersion: 2

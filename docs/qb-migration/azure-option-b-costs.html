@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QB Migration Azure Costs</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --surface: #ffffff; --text: #1d1d1b; --muted: #5f5f5a; --line: #e2e1dc;
+    --accent: #2f5d8a; --accent-soft: #e8eff6; --warn: #8a5a12; --warn-soft: #fbf2e2; --ok: #2d6a3e; --ok-soft: #e7f2ea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #171716; --surface: #20201e; --text: #ecebe6; --muted: #a3a29b; --line: #34332f;
+      --accent: #8db6dd; --accent-soft: #1f2c39; --warn: #e2b46a; --warn-soft: #34291a; --ok: #8cc79c; --ok-soft: #1c2d21;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #171716; --surface: #20201e; --text: #ecebe6; --muted: #a3a29b; --line: #34332f;
+    --accent: #8db6dd; --accent-soft: #1f2c39; --warn: #e2b46a; --warn-soft: #34291a; --ok: #8cc79c; --ok-soft: #1c2d21;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 920px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: -0.01em; }
+  h2 { font-size: 18px; margin: 36px 0 10px; }
+  p { margin: 8px 0; }
+  .sub { color: var(--muted); margin-bottom: 20px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 20px 0 8px; }
+  .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .tile .k { color: var(--muted); font-size: 13px; }
+  .tile .v { font-size: 24px; font-weight: 650; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .tile .n { color: var(--muted); font-size: 12.5px; }
+  .wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+  table { border-collapse: collapse; width: 100%; min-width: 640px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: 0; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tr.total td { font-weight: 650; background: var(--accent-soft); }
+  .note { border-radius: 10px; padding: 12px 16px; margin: 14px 0; border: 1px solid var(--line); }
+  .note.warn { background: var(--warn-soft); border-color: transparent; }
+  .note.warn strong { color: var(--warn); }
+  .note.ok { background: var(--ok-soft); border-color: transparent; }
+  .note.ok strong { color: var(--ok); }
+  ul, ol { padding-left: 22px; margin: 8px 0; }
+  li { margin: 4px 0; }
+  .muted { color: var(--muted); }
+  code { font: 13px ui-monospace, SFMono-Regular, Consolas, monospace; background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>QuickBase → PowerBase migration: Azure services and costs (Option B)</h1>
+  <p class="sub">Prepared 5 Nov 2026. Azure retail pay-as-you-go prices, US West 2, USD, excluding tax. Nothing has been created yet.</p>
+
+  <div class="note ok"><strong>Isolation:</strong> every service below goes in a <strong>new resource group</strong> (<code>rg-pb-qbmigration</code>). Nothing is added to or changed in the existing PowerBase resource group, App Service, Service Bus, SQL or UAT. The group is deleted after the migration, because the migration is a one-time move.</div>
+
+  <div class="tiles">
+    <div class="tile"><div class="k">Core services, running 24/7</div><div class="v">≈ $165/mo</div><div class="n">about $5.40 per day</div></div>
+    <div class="tile"><div class="k">One 15-day migration run</div><div class="v">≈ $80</div><div class="n">core services only</div></div>
+    <div class="tile"><div class="k">Pilot this week (Wed–Fri)</div><div class="v">≈ $15</div><div class="n">small apps, ~10k records</div></div>
+    <div class="tile"><div class="k">Parked (VM stopped)</div><div class="v">≈ $0.55/day</div><div class="n">$0 once the group is deleted</div></div>
+  </div>
+
+  <h2>1. Core services (required for Option B)</h2>
+  <div class="wrap"><table>
+    <thead><tr><th>Service</th><th>Size / tier</th><th>What it is for</th><th class="num">Unit price</th><th class="num">Per month (24/7)</th><th class="num">15-day run</th></tr></thead>
+    <tbody>
+      <tr><td>Virtual machine (Linux, Ubuntu 22.04)</td><td>D4s v5: 4 vCPU, 16 GB RAM</td><td>Runs the migration worker next to the database. Not a burstable size, so speed stays steady over a 15-day run.</td><td class="num">$0.192 / hour</td><td class="num">$140.16</td><td class="num">$69.12</td></tr>
+      <tr><td>VM disk</td><td>Standard SSD E4, 32 GB</td><td>Operating system disk</td><td class="num">$2.40 / month</td><td class="num">$2.40</td><td class="num">$1.20</td></tr>
+      <tr><td>Static public IP</td><td>Standard IPv4</td><td>Fixed address, so the SQL firewall allows only this machine</td><td class="num">$0.005 / hour</td><td class="num">$3.65</td><td class="num">$1.80</td></tr>
+      <tr><td>Service Bus namespace + queue</td><td>Standard</td><td>Queue of work items (record ranges). Failed items go to a dead-letter list for review.</td><td class="num">$10 / month base<br><span class="muted">13M operations included</span></td><td class="num">$10.00</td><td class="num">$5.00</td></tr>
+      <tr><td>Key Vault</td><td>Standard</td><td>Holds the QuickBase token and database connections. No secrets on disk.</td><td class="num">$0.03 / 10k operations</td><td class="num">&lt; $1</td><td class="num">&lt; $1</td></tr>
+      <tr><td>Log Analytics workspace</td><td>Pay per GB</td><td>Worker logs and alerts</td><td class="num">$2.30 / GB<br><span class="muted">first 5 GB/month free</span></td><td class="num">$0 – $5</td><td class="num">$0 – $3</td></tr>
+      <tr><td>Storage account</td><td>Standard LRS</td><td>Run reports and validation exports</td><td class="num">≈ $0.02 / GB</td><td class="num">&lt; $2</td><td class="num">&lt; $1</td></tr>
+      <tr><td>Virtual network, network security group, network card</td><td>—</td><td>Private network; SSH allowed only from the office IP</td><td class="num">Free</td><td class="num">$0</td><td class="num">$0</td></tr>
+      <tr class="total"><td colspan="4">Total, core services</td><td class="num">≈ $160 – $165</td><td class="num">≈ $80</td></tr>
+    </tbody>
+  </table></div>
+  <p class="muted">Service Bus usage is tiny: 20 million records split into ranges of about 12,000 records each is roughly 2,000 queue messages, well inside the included 13 million operations.</p>
+
+  <h2>2. Recommended for client performance: dedicated database capacity</h2>
+  <p>The worker <strong>writes</strong> into the live PowerBase SQL. The new resource group keeps the migration's own services apart from live, but those writes still land on the live database. For large apps (20–40 million records over about 15 days), a separate SQL elastic pool for the migrating tenants means clients' databases never share CPU, memory or disk activity with the load.</p>
+  <div class="wrap"><table>
+    <thead><tr><th>Option</th><th>Size</th><th class="num">Unit price</th><th class="num">Per month</th><th class="num">15 days</th></tr></thead>
+    <tbody>
+      <tr><td>SQL elastic pool, General Purpose Gen5</td><td>4 vCores</td><td class="num">$0.609 / hour</td><td class="num">$444.47</td><td class="num">$219.19</td></tr>
+      <tr><td>SQL elastic pool, General Purpose Gen5</td><td>8 vCores</td><td class="num">$1.218 / hour</td><td class="num">$888.95</td><td class="num">$438.38</td></tr>
+      <tr><td>Pool storage</td><td>e.g. 500 GB</td><td class="num">$0.115 / GB / month</td><td class="num">$57.50</td><td class="num">$28.75</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note warn"><strong>Decision needed:</strong> a pool can't be paused; it bills until it is deleted or scaled down. The migrated tenants' data has to live somewhere permanently. Either it stays in this pool, which then becomes permanent production cost, or it moves into the main production pool after cutover. The pool size will be set from the pilot's measured load. For the small pilot apps (~10k records) the load is negligible, so this pool isn't needed this week.</div>
+
+  <h2>3. Considered and not needed</h2>
+  <ul>
+    <li><strong>Service Bus Premium</strong> (≈ $677/month): built for very high message rates; ours is about 2,000 messages.</li>
+    <li><strong>Second worker VM:</strong> QuickBase's API limit (about 10 requests per second per token) is the bottleneck, not the VM. One D4s v5 runs 8–10 parallel workers. A second VM helps only when several apps run in parallel with separate tokens.</li>
+    <li><strong>Azure Bastion</strong> (≈ $140/month): SSH is limited to the office IP instead.</li>
+  </ul>
+
+  <h2>4. How live clients are protected during the run</h2>
+  <ul>
+    <li>The worker runs on its own VM. The live API, App Service and live Service Bus carry none of the migration's work.</li>
+    <li>Parallelism is capped and raised step by step (2 → 4 → 8 workers) while database CPU is watched. Big apps can run off-peak.</li>
+    <li>The worker can be stopped at any moment and resumed later without duplicates. This is tested: a hard kill mid-run, then a resume, gave the exact same data.</li>
+    <li>Each app is loaded into a new, empty PowerBase app; existing apps and records are never written to.</li>
+    <li>Every app is checked before go-live: record counts, record IDs, field-by-field comparison and links between tables.</li>
+  </ul>
+
+  <h2>5. Stopping before the Diwali break (Friday EOD)</h2>
+  <div class="wrap"><table>
+    <thead><tr><th>Choice</th><th>What keeps billing</th><th class="num">Cost while away</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Park:</strong> stop (deallocate) the VM</td><td>Service Bus base, disk and static IP (and the SQL pool, if created)</td><td class="num">≈ $0.55/day<br><span class="muted">≈ $16/month</span></td></tr>
+      <tr><td><strong>Delete:</strong> remove the whole resource group</td><td>Nothing</td><td class="num">$0</td></tr>
+    </tbody>
+  </table></div>
+  <p class="muted">The template recreates everything in about 10 minutes, so deleting is low-risk. The migration's progress records live in the PowerBase database, not in this resource group, so nothing is lost either way.</p>
+
+  <h2>6. Needed before deployment</h2>
+  <ol>
+    <li><strong>Where the live PowerBase SQL is:</strong> server name and subscription. The <code>dev@yslworkflow.com</code> account currently sees only the UAT server. The new resources go in the same region as live SQL.</li>
+    <li><strong>Firewall rule</strong> on the live SQL server for the worker VM's fixed IP, added by the server's owner.</li>
+    <li><strong>Search capacity check:</strong> 20–40 million records will be added to the Azure AI Search index. Confirm the current tier can hold them before the large apps.</li>
+    <li><strong>Decision on section 2</strong> (dedicated pool or throttled writes) before the first large app. Not needed for the small-app pilot.</li>
+  </ol>
+  <p class="muted">Prices from the Azure Retail Prices API on 5 Nov 2026, pay-as-you-go, without reservations or Azure Hybrid Benefit. "Per month" = 730 hours. Actual charges depend on hours running and data volume.</p>
+</main>
+</body>
+</html>
