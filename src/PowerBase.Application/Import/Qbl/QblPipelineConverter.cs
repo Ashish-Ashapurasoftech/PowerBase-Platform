@@ -991,6 +991,10 @@ public static class QblPipelineConverter
                     return null;
                 }
 
+                // {{metadata.x.…}}: a step's Metadata, which PowerFlows keeps as {{steps.x._metadata.…}}.
+                if (stepId == "metadata")
+                    return MetadataTokenProblem(keys, out parts);
+
                 if (!reader._byId.TryGetValue(stepId, out var target))
                     return $"step '{stepId}' is not in the pipeline";
                 if (target.Removed)
@@ -1016,6 +1020,14 @@ public static class QblPipelineConverter
                     if (mapped is null)
                         return $"'{string.Join('.', keys)}' of Make Request '{target.Name}' ({target.Label}) has no PowerFlows equivalent";
                     parts = [$"{{{{steps.{target.RefId}.{mapped}}}}}"];
+                    return null;
+                }
+                if (target.Subtype == "copy-records")
+                {
+                    // Copy Records' outputs keep their Quickbase names ({{steps.x.records_processed}}).
+                    if (keys.Length != 1 || !CopyRecordsOutputs.Contains(key))
+                        return $"'{string.Join('.', keys)}' of Copy Records '{target.Name}' ({target.Label}) has no PowerFlows equivalent";
+                    parts = [$"{{{{steps.{target.RefId}.{key}}}}}"];
                     return null;
                 }
                 if (target.Subtype == "webhook")
@@ -1061,6 +1073,46 @@ public static class QblPipelineConverter
                     return null;
                 }
                 return $"'{string.Join('.', keys)}' of step '{target.Name}' ({target.Label}) has no PowerFlows equivalent";
+            }
+
+            private static readonly HashSet<string> TriggerContextKeys = new(StringComparer.Ordinal)
+                { "app_name", "app_id", "table_name", "table_id", "realm_host", "realm_id", "occurred_at", "user" };
+            private static readonly HashSet<string> CopyRecordsOutputs = new(StringComparer.Ordinal)
+                { "records_processed", "records_added", "records_updated", "records_unchanged", "error_message", "error_code", "records_skipped", "warnings" };
+            private static readonly HashSet<string> CopyCacheKeys = new(StringComparer.Ordinal)
+                { "qb_table_cache_hit", "qb_table_cache_expires_at", "qb_table_cache_last_modified_at" };
+
+            /// <summary>Quickbase's per-step Metadata: a record trigger's context / record action / table schema, Search Records'
+            /// batch size and loop index, Copy Records' table cache details.</summary>
+            private string? MetadataTokenProblem(string[] keys, out List<object>? parts)
+            {
+                parts = null;
+                if (keys.Length < 2)
+                    return $"'metadata.{string.Join('.', keys)}' has no PowerFlows equivalent";
+                if (!reader._byId.TryGetValue(keys[0], out var target))
+                    return $"step '{keys[0]}' is not in the pipeline";
+                if (target.Removed)
+                    return $"step '{target.Name}' ({target.Label}) was not imported";
+                if (!IsReachable(target, source))
+                    return $"step '{target.Name}' ({target.Label}) is not reachable from here in PowerFlows";
+
+                var prefix = $"{{{{steps.{target.RefId}._metadata.";
+                var rest = keys[1..];
+                switch (target.Subtype)
+                {
+                    case "new-event" when rest is ["context", var detail] && TriggerContextKeys.Contains(detail):
+                    case "new-event" when rest is ["record", "action"]:
+                    case "search-records" when rest is ["batch", "size"] or ["loop", "index"]:
+                    case "copy-records" when rest is [var cache] && CopyCacheKeys.Contains(cache):
+                        parts = [prefix + string.Join('.', rest) + "}}"];
+                        return null;
+                    case "new-event" when rest is ["struct", var fieldKey, "qb_field_id" or "qb_field_type"] && target.Table is not null:
+                        if (FieldByKey(target.Table.Value, fieldKey, target, "export_fields") is not { } field)
+                            return $"field '{fieldKey}' of step '{target.Name}' ({target.Label}) was not found";
+                        parts = [prefix + "struct.", Value(field), $".{rest[2]}}}}}"];
+                        return null;
+                }
+                return $"'metadata.{string.Join('.', keys)}' of step '{target.Name}' ({target.Label}) has no PowerFlows equivalent";
             }
 
             /// <summary>A PowerFlow Called trigger's output: its call arguments and <c>calling_pipeline</c>.</summary>

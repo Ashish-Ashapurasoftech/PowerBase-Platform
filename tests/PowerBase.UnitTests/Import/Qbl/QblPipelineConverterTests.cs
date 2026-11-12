@@ -701,6 +701,96 @@ public class QblPipelineConverterTests
         pipeline.ChangesExecution.Should().BeTrue();
     }
 
+    /// <summary>The All Step export with the n-th (0-based) occurrence of <paramref name="find"/> replaced.</summary>
+    internal static string AllStepsWith(string find, int occurrence, string replacement)
+    {
+        var index = -1;
+        for (var i = 0; i <= occurrence; i++)
+        {
+            index = AllSteps.IndexOf(find, index + 1, StringComparison.Ordinal);
+            index.Should().BeGreaterThanOrEqualTo(0, $"occurrence {i} of '{find}' must exist");
+        }
+        return AllSteps[..index] + replacement + AllSteps[(index + find.Length)..];
+    }
+
+    [Fact]
+    public void Metadata_RecordTriggerContextRecordAndSchema_BecomeStepMetadataTokens()
+    {
+        var pipeline = ConvertOne(AllStepsWith("{{aa.name}}", 0,
+            "{{metadata.aa.context.app_name}}/{{metadata.aa.context.realm_host}}/{{metadata.aa.context.occurred_at}}/{{metadata.aa.record.action}}/{{metadata.aa.struct.name.qb_field_id}}/{{metadata.aa.struct.name.qb_field_type}}"));
+        var create = Root(pipeline, "ref_ab");
+
+        var mapping = ((List<object?>)create.Config["fieldMappings"]!).Cast<Dictionary<string, object?>>().Single();
+        Text(mapping["value"]).Should().Be(
+            "{{steps.ref_aa._metadata.context.app_name}}/{{steps.ref_aa._metadata.context.realm_host}}/{{steps.ref_aa._metadata.context.occurred_at}}/" +
+            "{{steps.ref_aa._metadata.record.action}}/{{steps.ref_aa._metadata.struct.[Name].qb_field_id}}/{{steps.ref_aa._metadata.struct.[Name].qb_field_type}}");
+        // The schema entry names the field itself, so it follows the field's id into the imported app.
+        ((PblPipelineTextValue)mapping["value"]!).Parts.OfType<PblPipelineFieldValue>().Should().OnlyContain(f => f.Label == "Name" && f.SourceId == 20);
+        create.IsComplete.Should().BeTrue();
+        pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_REFERENCE_CLEARED" && i.StepId == "ab");
+    }
+
+    [Fact]
+    public void Metadata_SearchBatchAndLoopIndex_InsideTheLoop_BecomeStepMetadataTokens()
+    {
+        var pipeline = ConvertOne(AllStepsWith("{{aa.name}}", 2, "{{metadata.ae.batch.size}}-{{metadata.ae.loop.index}}"));
+        var inLoop = pipeline.Steps[5].Children.Single(s => s.RefId == "ref_af");
+
+        var mapping = ((List<object?>)inLoop.Config["fieldMappings"]!).Cast<Dictionary<string, object?>>().Single();
+        Text(mapping["value"]).Should().Be("{{steps.ref_ae._metadata.batch.size}}-{{steps.ref_ae._metadata.loop.index}}");
+        inLoop.IsComplete.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Metadata_CopyRecordsTableCache_BecomesStepMetadataToken()
+    {
+        var pipeline = ConvertOne(AllStepsWith("{{al.$namespace}}", 0, "{{metadata.aj.qb_table_cache_hit}}"));
+        var row = Root(pipeline, "ref_am");
+
+        var entry = ((PblPipelineFieldMapValue)row.Config["rowValues"]!).Entries.Single();
+        Text(entry.Value).Should().Be("{{steps.ref_aj._metadata.qb_table_cache_hit}}");
+        row.IsComplete.Should().BeTrue();
+    }
+
+    [Fact]
+    public void CopyRecordsOutputs_KeepTheirQuickbaseNames()
+    {
+        var pipeline = ConvertOne(AllStepsWith("{{al.$namespace}}", 0,
+            "{{aj.records_processed}}/{{aj.records_added}}/{{aj.records_updated}}/{{aj.records_unchanged}}/{{aj.records_skipped}}/{{aj.error_message}}/{{aj.error_code}}/{{aj.warnings}}"));
+        var row = Root(pipeline, "ref_am");
+
+        Text(((PblPipelineFieldMapValue)row.Config["rowValues"]!).Entries.Single().Value).Should().Be(
+            "{{steps.ref_aj.records_processed}}/{{steps.ref_aj.records_added}}/{{steps.ref_aj.records_updated}}/{{steps.ref_aj.records_unchanged}}/" +
+            "{{steps.ref_aj.records_skipped}}/{{steps.ref_aj.error_message}}/{{steps.ref_aj.error_code}}/{{steps.ref_aj.warnings}}");
+        row.IsComplete.Should().BeTrue();
+    }
+
+    [Fact]
+    public void CopyRecordsUnknownOutput_IsClearedAndTheStepIsADraft()
+    {
+        var pipeline = ConvertOne(AllStepsWith("{{al.$namespace}}", 0, "{{aj.records_total}}"));
+
+        Root(pipeline, "ref_am").IsComplete.Should().BeFalse();
+        pipeline.Issues.Should().Contain(i => i.Code == "PIPELINE_REFERENCE_CLEARED" && i.StepId == "am" && i.Message.Contains("{{aj.records_total}}"));
+    }
+
+    [Theory]
+    [InlineData("{{metadata.aa.context.unknown_key}}")]
+    [InlineData("{{metadata.aa.struct.no_such_field.qb_field_id}}")]
+    [InlineData("{{metadata.ab.context.app_name}}")]   // Create Record has no Metadata in Quickbase
+    [InlineData("{{metadata.zz.context.app_name}}")]   // no such step
+    [InlineData("{{metadata.aa}}")]
+    public void Metadata_WithoutAPowerFlowsEquivalent_IsClearedAndTheStepIsADraft(string token)
+    {
+        var pipeline = ConvertOne(AllStepsWith("{{aa.name}}", 1, token));
+        var update = Root(pipeline, "ref_ac");
+
+        var mapping = ((List<object?>)update.Config["fieldMappings"]!).Cast<Dictionary<string, object?>>().Single();
+        Text(mapping["value"]).Should().Be("");
+        update.IsComplete.Should().BeFalse();
+        pipeline.Issues.Should().Contain(i => i.Code == "PIPELINE_REFERENCE_CLEARED" && i.StepId == "ac" && i.Message.Contains(token));
+    }
+
     internal const string Unsupported = """
           $Pipeline_P:
             Type: QB::Pipeline

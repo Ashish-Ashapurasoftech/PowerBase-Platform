@@ -673,6 +673,9 @@ public partial class PipelineEngine : IPipelineEngine
                                                 selectedDict["id"] = recIdObj.ToString();
                                                 selectedDict["publicId"] = recIdObj.ToString();
                                             }
+                                            // Quickbase's record trigger Metadata ({{steps.a._metadata.context.app_name}} …).
+                                            if (await BuildRecordTriggerMetadataAsync(triggerData, ct) is { } triggerMetadata)
+                                                selectedDict["_metadata"] = triggerMetadata;
                                             stepsDict[refId] = selectedDict;
                                         }
                                     }
@@ -2222,7 +2225,9 @@ public partial class PipelineEngine : IPipelineEngine
                     Metadata = BuildAuditFieldMetadata(table, fields)
                 });
                 return JsonSerializer.Serialize(new {
-                    mode = "chunked-search", worksetId, count = workset.DiscoveredCount
+                    mode = "chunked-search", worksetId, count = workset.DiscoveredCount,
+                    // Quickbase's Search Records Metadata: {{metadata.x.batch.size}} / {{metadata.x.loop.index}}.
+                    _metadata = SearchMetadata(workset.DiscoveredCount)
                 });
             }
 
@@ -2319,7 +2324,7 @@ public partial class PipelineEngine : IPipelineEngine
             }
 
             // count matches the chunked output's, so "did the search find records" reads {{steps.x.count}} either way.
-            var stepOutput = JsonSerializer.Serialize(new { records = normalizedResults, count = normalizedResults.Count });
+            var stepOutput = JsonSerializer.Serialize(new { records = normalizedResults, count = normalizedResults.Count, _metadata = SearchMetadata(normalizedResults.Count) });
             // No size cap unless one is configured (MaxStepOutputBytes > 0).
             if (_options.MaxStepOutputBytes > 0 && System.Text.Encoding.UTF8.GetByteCount(stepOutput) > _options.MaxStepOutputBytes)
                 throw new PipelineNonRetryableException($"Search Records output exceeds the configured maximum of {_options.MaxStepOutputBytes} bytes. Reduce MaxResults or use a bulk-event pipeline.");
@@ -5225,7 +5230,10 @@ public partial class PipelineEngine : IPipelineEngine
                                 var targetStep = allSteps.FirstOrDefault(s => string.Equals(s.Id.ToString(), loopOverStepId, StringComparison.OrdinalIgnoreCase) || string.Equals(s.RefId, loopOverStepId, StringComparison.OrdinalIgnoreCase));
                                 if (targetStep != null)
                                 {
-                                    var targetPattern = $@"(?:\bsteps\.)?(?:{Regex.Escape(targetStep.RefId)}|{Regex.Escape(targetStep.Id.ToString())})(?=\.(?!(?:records|count)\b)[a-zA-Z0-9_]+)";
+                                    // Quickbase's {{metadata.x.loop.index}} is the position of the current item in the loop over x.
+                                    var targetRef = $@"(?:\bsteps\.)?(?:{Regex.Escape(targetStep.RefId)}|{Regex.Escape(targetStep.Id.ToString())})";
+                                    input = Regex.Replace(input, targetRef + @"\._metadata\.loop\.index\b", $"steps.{loopStep.RefId}.index", RegexOptions.IgnoreCase);
+                                    var targetPattern = targetRef + @"(?=\.(?!(?:records|count|_metadata)\b)[a-zA-Z0-9_]+)";
                                     input = Regex.Replace(input, targetPattern, $"steps.{loopStep.RefId}.item", RegexOptions.IgnoreCase);
                                 }
                             }

@@ -2992,6 +2992,45 @@ public class PipelineEngineTests
     }
 
     [Fact]
+    public void EvaluateTokens_QuickbaseMetadata_ReadsTriggerSearchAndLoopMetadata()
+    {
+        var allSteps = new List<PipelineStep>
+        {
+            new() { Id = 1, RefId = "ref_aa", Type = "trigger", Subtype = "new-event" },
+            new() { Id = 100, RefId = "ref_search", Type = "query", Subtype = "search-records" },
+            new() { Id = 200, RefId = "ref_loop", Type = "loop", Subtype = "for-each", ConfigJson = JsonSerializer.Serialize(new { loopOverStepId = "ref_search" }) }
+        };
+        var payload = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["steps"] = new Dictionary<string, object>
+            {
+                ["ref_aa"] = new Dictionary<string, object?>
+                {
+                    ["fid_6"] = "Ronak",
+                    ["_metadata"] = new Dictionary<string, object?>
+                    {
+                        ["context"] = new Dictionary<string, object?> { ["app_name"] = "HCBS QA", ["realm_host"] = "localhost" },
+                        ["record"] = new Dictionary<string, object?> { ["action"] = PipelineEngine.QuickbaseRecordAction("Added") },
+                        ["struct"] = new Dictionary<string, object?> { ["fid_7"] = new Dictionary<string, object?> { ["qb_field_id"] = 7, ["qb_field_type"] = "EMAIL" } }
+                    }
+                },
+                ["ref_search"] = new Dictionary<string, object?> { ["count"] = 3, ["_metadata"] = PipelineEngine.SearchMetadata(3) },
+                ["ref_loop"] = new Dictionary<string, object?> { ["index"] = 2, ["item"] = new Dictionary<string, object?> { ["fid_7"] = "x" } }
+            }
+        });
+        var method = typeof(PipelineEngine).GetMethod("EvaluateTokens", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        string Eval(string input, string? path = null) => (string)method.Invoke(_engine, new object?[] { input, payload, path, allSteps })!;
+
+        Eval("{{steps.ref_aa._metadata.context.app_name}}").Should().Be("HCBS QA");
+        Eval("{{steps.ref_aa._metadata.record.action}}").Should().Be("Add");
+        Eval("{{steps.ref_aa._metadata.struct.fid_7.qb_field_id}}|{{steps.ref_aa._metadata.struct.fid_7.qb_field_type}}").Should().Be("7|EMAIL");
+        Eval("{{steps.ref_search._metadata.batch.size}}").Should().Be("3");
+        Eval("{{steps.ref_search._metadata.loop.index}}|{{steps.ref_search._metadata.batch.size}}", "main/ref_search/ref_loop/loop_index_2").Should().Be("2|3");
+        PipelineEngine.QuickbaseRecordAction("Modified").Should().Be("Replace");
+        PipelineEngine.QuickbaseRecordAction("Deleted").Should().Be("Delete");
+    }
+
+    [Fact]
     public void EvaluateTokens_LegacyMakeRequestFieldPath_UsesActualResponseProperty()
     {
         var request = new PipelineStep { RefId = "ref_request", Type = "action", Subtype = "make-request" };

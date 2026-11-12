@@ -412,6 +412,14 @@ public class CopyRecordsTests
         var second = await harness.Run();
         Assert.Equal(first, second);
         Assert.Equal(1, JsonDocument.Parse(first).RootElement.GetProperty("InsertedCount").GetInt32());
+        var quickbase = JsonDocument.Parse(first).RootElement;
+        Assert.Equal(1, quickbase.GetProperty("records_processed").GetInt32());
+        Assert.Equal(1, quickbase.GetProperty("records_added").GetInt32());
+        Assert.Equal(0, quickbase.GetProperty("records_skipped").GetInt32());
+        Assert.Equal(JsonValueKind.Null, quickbase.GetProperty("error_message").ValueKind);
+        Assert.Equal(JsonValueKind.Null, quickbase.GetProperty("error_code").ValueKind);
+        Assert.Equal(0, quickbase.GetProperty("warnings").GetArrayLength());
+        Assert.False(quickbase.GetProperty("_metadata").GetProperty("qb_table_cache_hit").GetBoolean());
         await harness.Records.Received(1).CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>());
         Assert.Single(harness.Search.ReceivedCalls());
     }
@@ -1340,6 +1348,13 @@ public class CopyRecordsTests
         Assert.Equal(2, result.GetProperty("InsertedCount").GetInt32());   // a1 and b1
         Assert.Equal(1, result.GetProperty("ErrorCount").GetInt32());      // a2 repeats a1's value
         Assert.Equal("a2", result.GetProperty("FailedRecords")[0].GetProperty("MergeValue").GetString());
+        // Quickbase's outputs: three read, two added, the rejected one skipped with its reason.
+        Assert.Equal(3, result.GetProperty("records_processed").GetInt32());
+        Assert.Equal(2, result.GetProperty("records_added").GetInt32());
+        Assert.Equal(0, result.GetProperty("records_updated").GetInt32());
+        Assert.Equal(0, result.GetProperty("records_unchanged").GetInt32());
+        Assert.Equal(1, result.GetProperty("records_skipped").GetInt32());
+        Assert.Equal(result.GetProperty("Errors")[0].GetString(), result.GetProperty("error_message").GetString());
         Assert.True(Calls(harness, "CreateManyAsync") > 0);
         Assert.Equal(0, Calls(harness, "CreateAsync"));
     }
