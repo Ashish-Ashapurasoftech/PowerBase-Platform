@@ -96,7 +96,8 @@ public sealed class QbmValidator(IQuickBaseClient client, ITenantConnectionFacto
                         }
                         stored = plain;
                     }
-                    differs |= Check(issues, id, m.Qb.Id, m.Qb.Label, exp.Values.GetValueOrDefault(fid), stored, hide: ciphered);
+                    differs |= Check(issues, id, m.Qb.Id, m.Qb.Label, exp.Values.GetValueOrDefault(fid), stored, hide: ciphered,
+                        quantity: m.PbTypeCode is { } type && QbValueCanonical.QuantityTypes.Contains(type));
                 }
                 if (differs) mismatches++;
             }
@@ -140,11 +141,13 @@ public sealed class QbmValidator(IQuickBaseClient client, ITenantConnectionFacto
         }
     }
 
-    private static bool Check(List<QbIssue> issues, long id, int? qbFid, string label, object? expected, object? actual, bool hide)
+    /// <summary>Exact comparison, except that a quantity field (Number, Currency, ...) allows QuickBase's float noise.
+    /// System fields, ids, links, users and text never get that allowance.</summary>
+    private static bool Check(List<QbIssue> issues, long id, int? qbFid, string label, object? expected, object? actual, bool hide, bool quantity = false)
     {
         var e = QbValueCanonical.Of(expected);
         var a = QbValueCanonical.Of(actual);
-        if (string.Equals(e, a, StringComparison.Ordinal) || QbValueCanonical.SameNumber(e, a)) return false;
+        if (string.Equals(e, a, StringComparison.Ordinal) || quantity && QbValueCanonical.SameNumber(e, a)) return false;
         // Encrypted values are never written into the issue log.
         var detail = hide ? "values differ (encrypted field, values not shown)" : $"QuickBase {Show(e)}, PowerBase {Show(a)}";
         Add(issues, new("error", "QBM_GATE3_MISMATCH", $"'{label}': {detail}.", id, qbFid));

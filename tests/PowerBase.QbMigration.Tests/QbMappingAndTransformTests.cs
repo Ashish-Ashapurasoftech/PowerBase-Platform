@@ -175,8 +175,22 @@ public class QbValueTransformerTests
     [InlineData("100", "101", false)]
     [InlineData("abc", "abc", false)]
     [InlineData(null, "0", false)]
+    // The allowance never grows past 0.000001: a large id-sized number off by one is a real difference.
+    [InlineData("13475851116", "13475851117", false)]
+    [InlineData("13475851116.0000001", "13475851116", true)]
     public void Numbers_that_differ_only_by_float_noise_are_the_same_value(string? expected, string? actual, bool same) =>
         QbValueCanonical.SameNumber(expected, actual).Should().Be(same);
+
+    [Theory]
+    [InlineData("Number", true)]
+    [InlineData("Currency", true)]
+    [InlineData("Percent", true)]
+    [InlineData("Reference", false)]
+    [InlineData("User", false)]
+    [InlineData("Text", false)]
+    [InlineData("Phone", false)]
+    public void Only_quantity_fields_get_the_float_noise_allowance(string pbType, bool allowed) =>
+        QbValueCanonical.QuantityTypes.Contains(pbType).Should().Be(allowed);
 
     [Fact]
     public void An_unknown_user_is_stored_empty_and_reported()

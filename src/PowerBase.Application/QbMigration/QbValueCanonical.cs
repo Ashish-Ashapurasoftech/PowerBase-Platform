@@ -19,15 +19,22 @@ public static class QbValueCanonical
         _ => System.Convert.ToString(value, CultureInfo.InvariantCulture),
     };
 
-    /// <summary>QuickBase keeps some numbers as binary floats (99.98999999999999 for 99.99, 7.000000000000001 for 7), while
-    /// PowerBase stores the decimal. Two numbers within one billionth of their size are the same value; a real difference
-    /// (1.234 stored as 1.23) is far larger and still counts.</summary>
+    /// <summary>PowerBase types whose values are plain quantities. Only these may differ by float noise; ids, links,
+    /// users and text are always compared exactly.</summary>
+    public static readonly IReadOnlySet<string> QuantityTypes =
+        new HashSet<string>(["Number", "Currency", "Percent", "Rating", "Duration"], StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>For a quantity field only: QuickBase keeps some numbers as binary floats (99.98999999999999 for 99.99,
+    /// 7.000000000000001 for 7), while PowerBase stores the decimal. They count as the same value when they differ by at
+    /// most one billionth of their size, and never by more than 0.000001 however large the number. A real difference
+    /// (1.234 stored as 1.23) still counts.</summary>
     public static bool SameNumber(string? expected, string? actual)
     {
         if (expected is null || actual is null
             || !decimal.TryParse(expected, NumberStyles.Number, CultureInfo.InvariantCulture, out var e)
             || !decimal.TryParse(actual, NumberStyles.Number, CultureInfo.InvariantCulture, out var a))
             return false;
-        return Math.Abs(e - a) <= 0.000000001m * Math.Max(1m, Math.Abs(e));
+        var tolerance = Math.Min(0.000000001m * Math.Max(1m, Math.Abs(e)), 0.000001m);
+        return Math.Abs(e - a) <= tolerance;
     }
 }
