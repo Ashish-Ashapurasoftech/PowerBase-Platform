@@ -32,6 +32,9 @@ public sealed class CachedDekEncryptionService : IEncryptionService
     public Task<string> GenerateAndWrapDekAsync(long tenantId, long appId, CancellationToken ct = default)
         => _inner.GenerateAndWrapDekAsync(tenantId, appId, ct);
 
+    public Task<string> RewrapDekAsync(string wrappedDek, long tenantId, long fromAppId, long toAppId, CancellationToken ct = default)
+        => _inner.RewrapDekAsync(wrappedDek, tenantId, fromAppId, toAppId, ct);
+
     public async Task<string> EncryptDataAsync(string plaintext, string wrappedDek, long tenantId, long appId, CancellationToken ct = default)
     {
         if (string.IsNullOrEmpty(plaintext)) return plaintext;

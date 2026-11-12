@@ -5,7 +5,7 @@ namespace PowerBase.Infrastructure.Services;
 
 /// <summary>Local-disk implementation of <see cref="IFileStorageService"/>, serving files
 /// back via the app's static file middleware at <c>/files</c> (see Program.cs).</summary>
-public sealed class LocalFileStorageService : IFileStorageService, IFileStorageReadService
+public sealed class LocalFileStorageService : IFileStorageService, IFileStorageReadService, IFileStorageCopyService
 {
     private readonly string _localPath;
 
@@ -115,5 +115,41 @@ public sealed class LocalFileStorageService : IFileStorageService, IFileStorageR
         if (File.Exists(physicalPath))
             File.Delete(physicalPath);
         return Task.CompletedTask;
+    }
+
+    public Task<string> CopyAsync(string sourcePath, string newName, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        var source = Path.Combine(_localPath, Path.GetFileName(sourcePath));
+        if (!File.Exists(source))
+            throw new FileNotFoundException("The file to copy was not found.", source);
+        var fileName = Path.GetFileName(newName);
+        File.Copy(source, Path.Combine(_localPath, fileName), overwrite: false);
+        return Task.FromResult($"/files/{fileName}");
+    }
+
+    public Task DeleteByPrefixAsync(string prefix, CancellationToken ct = default)
+    {
+        StoragePrefix.EnsureValid(prefix);
+        if (!Directory.Exists(_localPath)) return Task.CompletedTask;
+        foreach (var file in Directory.EnumerateFiles(_localPath, prefix + "*"))
+        {
+            ct.ThrowIfCancellationRequested();
+            File.Delete(file);
+        }
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>A prefix for <see cref="IFileStorageCopyService.DeleteByPrefixAsync"/>: letters, digits and dashes only, and
+/// long enough that it can only match the files it was made for (no wildcard, no path, never "everything").</summary>
+internal static class StoragePrefix
+{
+    private const int MIN_LENGTH = 16;
+
+    public static void EnsureValid(string prefix)
+    {
+        if (string.IsNullOrEmpty(prefix) || prefix.Length < MIN_LENGTH || !prefix.All(c => char.IsAsciiLetterOrDigit(c) || c == '-'))
+            throw new ArgumentException("A file prefix must be at least 16 letters, digits or dashes.", nameof(prefix));
     }
 }

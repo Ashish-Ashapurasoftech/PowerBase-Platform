@@ -24,6 +24,7 @@ public class ExemptFieldEncryptionCleanupService : IExemptFieldEncryptionCleanup
     private const int BatchSize = 5000;
 
     private readonly IQueryContext _queryContext;
+    private readonly IMetadataCache _metadataCache;
     private readonly IAppRepository _appRepo;
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
@@ -58,8 +59,10 @@ public class ExemptFieldEncryptionCleanupService : IExemptFieldEncryptionCleanup
         ITenantConnectionFactory connectionFactory,
         IControlConnectionFactory controlFactory,
         IEncryptionService encryptionService,
-        ILogger<ExemptFieldEncryptionCleanupService> logger)
+        ILogger<ExemptFieldEncryptionCleanupService> logger,
+        IMetadataCache metadataCache)
     {
+        _metadataCache = metadataCache;
         _queryContext = queryContext;
         _appRepo = appRepo;
         _tableRepo = tableRepo;
@@ -386,6 +389,8 @@ public class ExemptFieldEncryptionCleanupService : IExemptFieldEncryptionCleanup
                 }
 
                 // 3g. Clear IsEncrypted in metadata
+                _metadataCache.Invalidate(_queryContext.TenantId, MetadataCacheGroups.Fields, inTransaction: true); // the field lists are cached (AppFieldRepository)
+        _metadataCache.Invalidate(_queryContext.TenantId, MetadataCacheGroups.Access, inTransaction: true); // field-access maps join the field table
                 await conn.ExecuteAsync("""
                     UPDATE meta.AppField
                     SET IsEncrypted = 0, ModifiedOn = SYSUTCDATETIME()
