@@ -35,6 +35,9 @@ param diskControllerType string = 'SCSI'
 @description('Daily auto-shutdown time (UTC, HHmm) so an idle VM does not run up cost. Empty = no auto-shutdown.')
 param autoShutdownTimeUtc string = '1830'
 
+@description('Create the private storage account where the worker saves its Excel reports (downloadable from the Portal).')
+param deployReportStorage bool = true
+
 @description('Object id of the person or group that will put the secrets into the vault (gets a vault access policy: get, list, set, delete secrets).')
 param vaultOfficerPrincipalId string
 
@@ -274,6 +277,16 @@ module powerBaseVaultRead 'modules/vault-reader.bicep' = if (deployWorkerVm && !
   }
 }
 
+// ---------- Report storage: private container for the worker's Excel reports ----------
+module reportStorage 'modules/report-storage.bicep' = if (deployReportStorage) {
+  name: 'qbmig-report-storage'
+  params: {
+    location: location
+    prefix: prefix
+    vaultName: vault.name
+  }
+}
+
 output vaultUri string = vault.properties.vaultUri
 output vaultName string = vault.name
 output serviceBusNamespace string = serviceBus.name
@@ -281,3 +294,4 @@ output queueName string = queue.name
 output workerVmName string = deployWorkerVm ? vmName : ''
 output workerPublicIp string = deployWorkerVm ? publicIp!.properties.ipAddress : ''
 output workerPrincipalId string = deployWorkerVm ? vm!.identity.principalId : ''
+output reportStorageAccount string = deployReportStorage ? reportStorage!.outputs.storageAccountName : ''

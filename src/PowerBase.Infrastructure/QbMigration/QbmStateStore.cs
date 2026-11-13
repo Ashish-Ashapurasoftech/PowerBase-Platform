@@ -285,4 +285,107 @@ public sealed class QbmStateStore(ITenantConnectionFactory connections)
 
     private static async Task<long> IdentityAsync(SqlConnection conn, string table, CancellationToken ct) =>
         await conn.ExecuteScalarAsync<long?>(new CommandDefinition($"SELECT CAST(IDENT_CURRENT('{table}') AS BIGINT)", cancellationToken: ct)) ?? 0;
+
+    // ---------- Operator controls (database/qb-migration/002_qbm_control.sql) ----------
+
+    /// <summary>Sets what an operator asks of the run: "pause", "stop", or null to let it run.</summary>
+    public async Task SetControlAsync(long runId, string? control, CancellationToken ct = default)
+    {
+        await using var conn = await connections.CreateAsync(ct);
+        var rows = await conn.ExecuteAsync(new CommandDefinition(
+            "UPDATE qbm.Run SET Control = @control, ControlOn = SYSUTCDATETIME() WHERE Id = @runId", new { runId, control }, cancellationToken: ct));
+        if (rows == 0) throw new InvalidOperationException($"Run {runId} does not exist.");
+    }
+
+    public async Task<string?> ControlAsync(long runId, CancellationToken ct = default)
+    {
+        await using var conn = await connections.CreateAsync(ct);
+        return await conn.ExecuteScalarAsync<string?>(new CommandDefinition("SELECT Control FROM qbm.Run WHERE Id = @runId", new { runId }, cancellationToken: ct));
+    }
+
+    /// <summary>Holds a lock on the run for as long as the returned connection stays open, so a second worker started on the
+    /// same run (Start clicked twice) refuses instead of loading the same chunks. Returns null when another worker has it.</summary>
+    public async Task<SqlConnection?> TryLockRunAsync(long runId, CancellationToken ct = default)
+    {
+        var conn = await connections.CreateAsync(ct);
+        await conn.OpenAsync(ct);
+        var result = await conn.ExecuteScalarAsync<int>(new CommandDefinition("""
+            DECLARE @r INT;
+            EXEC @r = sp_getapplock @Resource = @resource, @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = 0;
+            SELECT @r;
+            """, new { resource = $"qbm-run-{runId}" }, cancellationToken: ct));
+        if (result >= 0) return conn;
+        await conn.DisposeAsync();
+        return null;
+    }
+
+    /// <summary>Records the latest validation of a table (gates 3 and 7).</summary>
+    public async Task SaveValidationAsync(long tableMapId, DateTime startedOn, long compared, int differences, int notEncrypted, CancellationToken ct = default)
+    {
+        await using var conn = await connections.CreateAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition("""
+            UPDATE qbm.TableMap SET ValidatedOn = @startedOn, ComparedRecords = @compared, Gate3Differences = @differences, Gate7NotEncrypted = @notEncrypted
+            WHERE Id = @tableMapId
+            """, new { tableMapId, startedOn, compared, differences, notEncrypted }, cancellationToken: ct));
+    }
+
+    public sealed record ChunkDetail(long Id, long RunId, long TableMapId, string QbTableName, long FromRecordId, long ToRecordId,
+        string Status, int Attempts, string? LastError);
+
+    /// <summary>Chunks by id, or every chunk of the run that is not done when no ids are given.</summary>
+    public async Task<IReadOnlyList<ChunkDetail>> ChunkDetailsAsync(long runId, IReadOnlyCollection<long>? ids = null, CancellationToken ct = default)
+    {
+        await using var conn = await connections.CreateAsync(ct);
+        return (await conn.QueryAsync<ChunkDetail>(new CommandDefinition($"""
+            SELECT c.Id, c.RunId, c.TableMapId, t.QbTableName, c.FromRecordId, c.ToRecordId, c.Status, c.Attempts, c.LastError
+            FROM qbm.Chunk c JOIN qbm.TableMap t ON t.Id = c.TableMapId
+            WHERE c.RunId = @runId AND {(ids is null ? "c.Status <> 'done'" : "c.Id IN @ids")}
+            ORDER BY t.Tier, c.TableMapId, c.FromRecordId
+            """, new { runId, ids = ids?.ToArray() ?? [] }, cancellationToken: ct))).ToList();
+    }
+
+    /// <summary>Puts chunks that are not done back to pending, for a retry. The last error is kept for reference.</summary>
+    public async Task<int> ResetChunksAsync(IReadOnlyCollection<long> chunkIds, CancellationToken ct = default)
+    {
+        if (chunkIds.Count == 0) return 0;
+        await using var conn = await connections.CreateAsync(ct);
+        return await conn.ExecuteAsync(new CommandDefinition(
+            "UPDATE qbm.Chunk SET Status = 'pending' WHERE Id IN @ids AND Status <> 'done'", new { ids = chunkIds.ToArray() }, cancellationToken: ct));
+    }
+
+    /// <summary>The latest run that migrates this QuickBase app into this PowerBase app, if any.</summary>
+    public async Task<long?> LatestRunAsync(string qbAppId, long pbAppId, CancellationToken ct = default)
+    {
+        await using var conn = await connections.CreateAsync(ct);
+        return await conn.ExecuteScalarAsync<long?>(new CommandDefinition(
+            "SELECT MAX(Id) FROM qbm.Run WHERE QbAppId = @qbAppId AND PbAppId = @pbAppId", new { qbAppId, pbAppId }, cancellationToken: ct));
+    }
+
+    public sealed record RunProgress(string Status, string? Control, int Tables, int TablesLoaded, int TablesBlocked, long QbRecords,
+        long RecordsWritten, int Chunks, int ChunksDone, int ChunksRunning, int ChunksFailed, int ChunksPending,
+        DateTime? FirstStarted, DateTime? LastFinished, long RecordsLast10Minutes);
+
+    /// <summary>Progress of a run, for the status command. Records written count only done chunks.</summary>
+    public async Task<RunProgress> ProgressAsync(long runId, CancellationToken ct = default)
+    {
+        await using var conn = await connections.CreateAsync(ct);
+        return await conn.QuerySingleAsync<RunProgress>(new CommandDefinition("""
+            SELECT r.Status, r.Control,
+                   (SELECT COUNT(*) FROM qbm.TableMap WHERE RunId = r.Id AND Status NOT IN ('skipped')) AS Tables,
+                   (SELECT COUNT(*) FROM qbm.TableMap WHERE RunId = r.Id AND Status IN ('loaded', 'validated')) AS TablesLoaded,
+                   (SELECT COUNT(*) FROM qbm.TableMap WHERE RunId = r.Id AND Status = 'blocked') AS TablesBlocked,
+                   (SELECT ISNULL(SUM(QbRecordCount), 0) FROM qbm.TableMap WHERE RunId = r.Id AND Status NOT IN ('skipped', 'blocked')) AS QbRecords,
+                   ISNULL(SUM(CASE WHEN c.Status = 'done' THEN CAST(c.RowsWritten AS BIGINT) END), 0) AS RecordsWritten,
+                   COUNT(c.Id) AS Chunks,
+                   ISNULL(SUM(CASE WHEN c.Status = 'done' THEN 1 ELSE 0 END), 0) AS ChunksDone,
+                   ISNULL(SUM(CASE WHEN c.Status = 'running' THEN 1 ELSE 0 END), 0) AS ChunksRunning,
+                   ISNULL(SUM(CASE WHEN c.Status = 'failed' THEN 1 ELSE 0 END), 0) AS ChunksFailed,
+                   ISNULL(SUM(CASE WHEN c.Status = 'pending' THEN 1 ELSE 0 END), 0) AS ChunksPending,
+                   MIN(c.StartedOn) AS FirstStarted, MAX(c.FinishedOn) AS LastFinished,
+                   ISNULL(SUM(CASE WHEN c.Status = 'done' AND c.FinishedOn >= DATEADD(MINUTE, -10, SYSUTCDATETIME()) THEN CAST(c.RowsWritten AS BIGINT) END), 0) AS RecordsLast10Minutes
+            FROM qbm.Run r LEFT JOIN qbm.Chunk c ON c.RunId = r.Id
+            WHERE r.Id = @runId
+            GROUP BY r.Id, r.Status, r.Control
+            """, new { runId }, cancellationToken: ct));
+    }
 }

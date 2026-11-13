@@ -1,6 +1,8 @@
 using System.Text.Json;
 using System.Threading.Channels;
 using Azure.Messaging.ServiceBus;
+using Azure.Storage.Blobs;
+using Azure.Storage.Blobs.Models;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using PowerBase.Application.QbMigration;
@@ -20,8 +22,8 @@ public sealed class Commands(Composition c)
     /// <summary>Creates the qbm schema in this tenant only.</summary>
     public async Task InitAsync(CancellationToken ct)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "sql", "001_qbm_state.sql");
-        await c.State().InitAsync(await File.ReadAllTextAsync(path, ct), ct);
+        foreach (var path in Directory.GetFiles(Path.Combine(AppContext.BaseDirectory, "sql"), "*.sql").Order(StringComparer.Ordinal))
+            await c.State().InitAsync(await File.ReadAllTextAsync(path, ct), ct);
         _log.LogInformation("qbm schema ready in tenant {Tenant}", c.TenantId);
     }
 
@@ -111,9 +113,21 @@ public sealed class Commands(Composition c)
         var state = c.State();
         var rowsPerChunk = c.Config.GetValue("Migration:RowsPerChunk", 12000);
         if (extend) { await ExtendAsync(runId, rowsPerChunk, ct); return; }
-        foreach (var t in await state.TableMapsAsync(runId, ct))
+        var maps = await state.TableMapsAsync(runId, ct);
+        var settled = maps.Where(t => t.Status != "mapped").ToList();
+        if (settled.Count > 0)
+            _log.LogInformation("{Count} table(s) not planned again: {Statuses}", settled.Count,
+                string.Join(", ", settled.GroupBy(t => t.Status).Select(g => $"{g.Count()} {g.Key}")));
+        foreach (var t in settled.Where(t => t.Status == "blocked"))
         {
-            if (t.Status != "mapped") { _log.LogInformation("{Table}: {Status}, not planned", t.QbTableName, t.Status); continue; }
+            if (await state.OtherRunForTableAsync(runId, t.PbTableId, ct) is { } owner)
+                _log.LogInformation("{Table}: blocked in this run, loaded by run {Owner}", t.QbTableName, owner);
+            else
+                _log.LogWarning("{Table}: blocked; see qbm.Issue for this table", t.QbTableName);
+        }
+        foreach (var t in maps)
+        {
+            if (t.Status != "mapped") continue;
             if (await state.OtherRunForTableAsync(runId, t.PbTableId, ct) is { } owner)
             {
                 await state.AddIssuesAsync(runId, t.Id, null, [new("info", "QBM_TABLE_IN_OTHER_RUN", $"Already in run {owner}; use plan --run {owner} --extend for records created since.")], ct);
@@ -173,7 +187,15 @@ public sealed class Commands(Composition c)
 
     /// <summary>Loads every chunk that isn't done, with N workers. "local" uses an in-process queue (POC without Azure);
     /// "servicebus" sends the chunks through the dedicated Service Bus queue and consumes them.</summary>
-    public async Task RunAsync(long runId, string queue, bool reload, CancellationToken ct)
+    public async Task<bool> RunAsync(long runId, string queue, bool reload, CancellationToken ct)
+    {
+        await using var runLock = await LockAsync(runId, ct);
+        await ClearStopAsync(runId, ct);
+        return await LoadAsync(runId, queue, reload, Control(runId), ct);
+    }
+
+    /// <summary>The load itself. Returns true when no chunk is left. Honours pause/stop between chunks.</summary>
+    private async Task<bool> LoadAsync(long runId, string queue, bool reload, QbRunControl control, CancellationToken ct)
     {
         var state = c.State();
         var run = await state.RunAsync(runId, ct);
@@ -186,13 +208,53 @@ public sealed class Commands(Composition c)
 
         var processor = new QbmChunkProcessor(c.QuickBase(), c.Loader(), state, c.PowerBase(), c.Logs.CreateLogger<QbmChunkProcessor>());
         if (queue == "servicebus")
+        {
+            var connection = c.Config["ServiceBus:ConnectionString"];
+            if (string.IsNullOrWhiteSpace(connection)) throw new InvalidOperationException("ServiceBus:ConnectionString is required for --queue servicebus.");
+            await using var client = new ServiceBusClient(connection);
+            // Messages left by a stopped or crashed load of this run would load their chunk a second time next to the new ones.
+            await SweepAsync(client, runId, ct);
             // Tier by tier, like the local queue: a child matched to parents by key starts only after its parents are in.
             foreach (var tier in pending.GroupBy(p => TierOf(contexts[p.TableMapId])).OrderBy(g => g.Key))
-                await RunServiceBusAsync(runId, tier.ToList(), contexts, processor, workers, ct);
-        else await RunLocalAsync(pending, contexts, processor, workers, ct);
+            {
+                if (control.Stopped) break;
+                await RunServiceBusAsync(client, runId, tier.ToList(), contexts, processor, workers, control, ct);
+            }
+        }
+        else await RunLocalAsync(pending, contexts, processor, workers, control, ct);
 
         var left = await state.PendingChunksAsync(runId, ct);
-        _log.LogInformation("Run {Run}: {Left} chunks not done", runId, left.Count);
+        if (control.Stopped)
+            _log.LogWarning("Run {Run}: stopped by an operator; {Left} chunks not done. Start again to continue.", runId, left.Count);
+        else
+            _log.LogInformation("Run {Run}: {Left} chunks not done", runId, left.Count);
+        return left.Count == 0;
+    }
+
+    private QbRunControl Control(long runId) => new(
+        token => c.State().ControlAsync(runId, token),
+        TimeSpan.FromSeconds(c.Config.GetValue("Migration:ControlPollSeconds", 10)),
+        command => _log.LogWarning("Run {Run}: operator asked to {Command}", runId, command.ToString().ToLowerInvariant()));
+
+    /// <summary>One worker per run: a second start of the same run (Start clicked twice) stops here.</summary>
+    private async Task<IAsyncDisposable> LockAsync(long runId, CancellationToken ct) =>
+        await c.State().TryLockRunAsync(runId, ct)
+        ?? throw new InvalidOperationException($"Run {runId} is already being worked on by another worker. Check 'status --run {runId}'.");
+
+    /// <summary>Starting a run again is the operator's answer to an earlier stop. A pause stays: resume lifts it.</summary>
+    private async Task ClearStopAsync(long runId, CancellationToken ct)
+    {
+        var state = c.State();
+        switch (QbRunControl.Parse(await state.ControlAsync(runId, ct)))
+        {
+            case QbRunCommand.Stop:
+                await state.SetControlAsync(runId, null, ct);
+                _log.LogInformation("Run {Run}: the earlier stop is cleared; continuing where it ended", runId);
+                break;
+            case QbRunCommand.Pause:
+                _log.LogWarning("Run {Run} is paused; nothing is loaded until 'resume --run {Run}'", runId, runId);
+                break;
+        }
     }
 
     private async Task<Dictionary<long, QbmTableContext>> ContextsAsync(QbmStateStore.RunRow run, CancellationToken ct, string[]? statuses = null)
@@ -234,11 +296,12 @@ public sealed class Commands(Composition c)
     }
 
     private async Task RunLocalAsync(IReadOnlyList<QbmStateStore.ChunkRow> pending, Dictionary<long, QbmTableContext> contexts,
-        QbmChunkProcessor processor, int workers, CancellationToken ct)
+        QbmChunkProcessor processor, int workers, QbRunControl control, CancellationToken ct)
     {
         // Tier by tier: a child that matches parents by key must not start before its parents are in.
         foreach (var tier in pending.GroupBy(p => contexts[p.TableMapId]).GroupBy(g => TierOf(g.Key)).OrderBy(g => g.Key))
         {
+            if (control.Stopped) return;
             var channel = Channel.CreateUnbounded<QbmStateStore.ChunkRow>();
             foreach (var chunk in tier.SelectMany(g => g)) channel.Writer.TryWrite(chunk);
             channel.Writer.Complete();
@@ -246,6 +309,8 @@ public sealed class Commands(Composition c)
             {
                 await foreach (var chunk in channel.Reader.ReadAllAsync(ct))
                 {
+                    // Pause waits here; stop leaves the rest of the chunks pending for the next start.
+                    if (!await control.WaitUntilAllowedAsync(ct)) return;
                     try
                     {
                         var outcome = await processor.ProcessAsync(contexts[chunk.TableMapId], chunk.Id, new QbRange(chunk.FromRecordId, chunk.ToRecordId), ct);
@@ -262,13 +327,47 @@ public sealed class Commands(Composition c)
 
     private static int TierOf(QbmTableContext ctx) => ctx.Tier;
 
-    private async Task RunServiceBusAsync(long runId, IReadOnlyList<QbmStateStore.ChunkRow> pending, Dictionary<long, QbmTableContext> contexts,
-        QbmChunkProcessor processor, int workers, CancellationToken ct)
+    private string QueueName => c.Config["ServiceBus:QueueName"] ?? "qb-migration-chunks";
+
+    private static long RunIdOf(ServiceBusReceivedMessage message)
     {
-        var connection = c.Config["ServiceBus:ConnectionString"];
-        if (string.IsNullOrWhiteSpace(connection)) throw new InvalidOperationException("ServiceBus:ConnectionString is required for --queue servicebus.");
-        var queueName = c.Config["ServiceBus:QueueName"] ?? "qb-migration-chunks";
-        await using var client = new ServiceBusClient(connection);
+        try { return JsonDocument.Parse(message.Body.ToString()).RootElement.GetProperty("runId").GetInt64(); }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException or FormatException) { return -1; }
+    }
+
+    private static long ChunkIdOf(ServiceBusReceivedMessage message)
+    {
+        try { return JsonDocument.Parse(message.Body.ToString()).RootElement.GetProperty("chunkId").GetInt64(); }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException or FormatException) { return -1; }
+    }
+
+    /// <summary>Removes this run's messages still in the queue (from a stopped or crashed load). Pending chunks are sent again
+    /// right after, so nothing is lost; other runs' messages are put back.</summary>
+    private async Task SweepAsync(ServiceBusClient client, long runId, CancellationToken ct)
+    {
+        await using var receiver = client.CreateReceiver(QueueName);
+        var removed = 0;
+        while (true)
+        {
+            var batch = await receiver.ReceiveMessagesAsync(100, TimeSpan.FromSeconds(3), ct);
+            if (batch.Count == 0) break;
+            var ours = 0;
+            foreach (var m in batch)
+            {
+                if (RunIdOf(m) == runId) { await receiver.CompleteMessageAsync(m, ct); ours++; }
+                else await receiver.AbandonMessageAsync(m, cancellationToken: ct);
+            }
+            removed += ours;
+            if (ours == 0) break;
+        }
+        if (removed > 0) _log.LogInformation("Run {Run}: {Count} leftover queue messages from an earlier load removed", runId, removed);
+    }
+
+    private async Task RunServiceBusAsync(ServiceBusClient client, long runId, IReadOnlyList<QbmStateStore.ChunkRow> pending,
+        Dictionary<long, QbmTableContext> contexts, QbmChunkProcessor processor, int workers, QbRunControl control, CancellationToken ct)
+    {
+        var queueName = QueueName;
+        if (!await control.WaitUntilAllowedAsync(ct)) return;
 
         // Producer: one message per chunk. A duplicate message is harmless: a done chunk is skipped.
         await using (var sender = client.CreateSender(queueName))
@@ -287,11 +386,16 @@ public sealed class Commands(Composition c)
         });
         consumer.ProcessMessageAsync += async args =>
         {
-            var body = JsonDocument.Parse(args.Message.Body.ToString()).RootElement;
-            var chunkId = body.GetProperty("chunkId").GetInt64();
-            if (body.GetProperty("runId").GetInt64() != runId || !byId.TryGetValue(chunkId, out var chunk))
+            var chunkId = ChunkIdOf(args.Message);
+            if (RunIdOf(args.Message) != runId)
             {
                 await args.AbandonMessageAsync(args.Message, cancellationToken: args.CancellationToken); // another run's message
+                return;
+            }
+            if (!byId.TryGetValue(chunkId, out var chunk))
+            {
+                // This run, but not a chunk of this tier's load (already done, or left from an earlier load): drop it.
+                await args.CompleteMessageAsync(args.Message, args.CancellationToken);
                 return;
             }
             try
@@ -327,8 +431,40 @@ public sealed class Commands(Composition c)
             return Task.CompletedTask;
         };
         await consumer.StartProcessingAsync(ct);
-        if (pending.Count > 0) await finished.Task.WaitAsync(ct);
-        await consumer.StopProcessingAsync(CancellationToken.None);
+
+        // Operator controls: pause stops taking messages (the chunks in progress finish first), resume takes them again,
+        // stop ends the load with the remaining messages left in the queue for the next start.
+        var stopped = new TaskCompletionSource();
+        using var monitorCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var poll = TimeSpan.FromSeconds(c.Config.GetValue("Migration:ControlPollSeconds", 10));
+        var monitor = Task.Run(async () =>
+        {
+            try
+            {
+                while (true)
+                {
+                    var command = await control.CurrentAsync(monitorCts.Token);
+                    if (command != QbRunCommand.Run && consumer.IsProcessing)
+                    {
+                        await consumer.StopProcessingAsync(CancellationToken.None);
+                        _log.LogWarning("Run {Run}: {State}; chunks in progress finished, nothing new is taken", runId, command == QbRunCommand.Stop ? "stopping" : "paused");
+                    }
+                    if (command == QbRunCommand.Stop) { stopped.TrySetResult(); return; }
+                    if (command == QbRunCommand.Run && !consumer.IsProcessing)
+                    {
+                        await consumer.StartProcessingAsync(monitorCts.Token);
+                        _log.LogInformation("Run {Run}: resumed", runId);
+                    }
+                    await Task.Delay(poll, monitorCts.Token);
+                }
+            }
+            catch (OperationCanceledException) { }
+        }, CancellationToken.None);
+
+        if (pending.Count > 0) await Task.WhenAny(finished.Task, stopped.Task).WaitAsync(ct);
+        monitorCts.Cancel();
+        await monitor;
+        if (consumer.IsProcessing) await consumer.StopProcessingAsync(CancellationToken.None);
     }
 
     /// <summary>Creates (inactive, no email) or links the PowerBase users the loaded data named but couldn't find.</summary>
@@ -345,6 +481,12 @@ public sealed class Commands(Composition c)
 
     /// <summary>After loading: per table, RecordCount and identity seed, then the count and id-range gates.</summary>
     public async Task<bool> FinalizeAsync(long runId, CancellationToken ct)
+    {
+        await using var runLock = await LockAsync(runId, ct);
+        return await FinalizeCoreAsync(runId, ct);
+    }
+
+    private async Task<bool> FinalizeCoreAsync(long runId, CancellationToken ct)
     {
         var state = c.State();
         var allPassed = true;
@@ -378,6 +520,12 @@ public sealed class Commands(Composition c)
     /// references resolve, encrypted columns hold ciphertext. A table that passes is marked validated.</summary>
     public async Task<bool> ValidateAsync(long runId, double sample, CancellationToken ct)
     {
+        await using var runLock = await LockAsync(runId, ct);
+        return await ValidateCoreAsync(runId, sample, ct);
+    }
+
+    private async Task<bool> ValidateCoreAsync(long runId, double sample, CancellationToken ct)
+    {
         var state = c.State();
         var run = await state.RunAsync(runId, ct);
         var contexts = await ContextsAsync(run, ct, ["loaded", "validated"]);
@@ -387,7 +535,10 @@ public sealed class Commands(Composition c)
         foreach (var (tableMapId, ctx) in contexts)
         {
             var ranges = done.Where(d => d.TableMapId == tableMapId).Select(d => new QbRange(d.FromRecordId, d.ToRecordId)).ToList();
+            // Issues logged before this moment belong to earlier validations; the report shows them as superseded.
+            var startedOn = DateTime.UtcNow.AddSeconds(-1);
             var result = await validator.CompareTableAsync(ctx, ranges, sample, ct);
+            await state.SaveValidationAsync(tableMapId, startedOn, result.Compared, result.Mismatches + result.Missing + result.Extra, result.NotEncrypted, ct);
             var orphans = await validator.OrphanReferencesAsync(run.PbAppId, ctx.PbTable.Id, ct);
             await state.AddIssuesAsync(runId, tableMapId, null, [.. result.Issues, .. orphans], ct);
             var passed = result.Gate3Passed && result.Gate7Passed && orphans.Count == 0;
@@ -420,15 +571,287 @@ public sealed class Commands(Composition c)
         }
     }
 
-    public async Task ReportAsync(long runId, CancellationToken ct)
+    // ---------- Operator commands: migrate, pause / resume / stop, status, retry-dlq, report ----------
+
+    public const int ExitOk = 0, ExitGatesFailed = 2, ExitStopped = 4;
+
+    /// <summary>The whole migration of one app in one command: map (first time only) → plan → load → finalize → validate →
+    /// report. Running it again continues the same run where it ended (done chunks are skipped). Pause waits between chunks
+    /// and between steps; stop ends after the chunks in progress, and the report is still written.</summary>
+    public async Task<int> MigrateAsync(long? runId, string? qbAppId, long? pbAppId, long? runAsUserId, bool newRun, string queue, double sample,
+        string? reportOut, CancellationToken ct)
+    {
+        var state = c.State();
+        if (runId is null)
+        {
+            if (qbAppId is null || pbAppId is null) throw new ArgumentException("Give --run <id>, or --qb-app <dbid> --pb-app <id> (and --run-as <userId> for a new run).");
+            runId = newRun ? null : await state.LatestRunAsync(qbAppId, pbAppId.Value, ct);
+            if (runId is null)
+            {
+                if (runAsUserId is null) throw new ArgumentException("--run-as <userId> is required to start a new run.");
+                _log.LogInformation("Step: map (new run)");
+                runId = await MapAsync(qbAppId, pbAppId.Value, runAsUserId.Value, ct);
+            }
+            else _log.LogInformation("Continuing run {Run} (add --new to start a fresh run)", runId);
+        }
+        var id = runId.Value;
+        await using var runLock = await LockAsync(id, ct);
+        await ClearStopAsync(id, ct);
+        var control = Control(id);
+
+        var result = await StepsAsync();
+        await TryReportAsync(id, reportOut, ct);
+        _log.LogInformation("Run {Run}: {Outcome}. Status: 'status --run {Run}'.", id,
+            result switch { ExitOk => "finished, all gates passed", ExitStopped => "stopped by an operator", _ => "finished with problems (see the report)" }, id);
+        return result;
+
+        async Task<int> StepsAsync()
+        {
+            if (!await NextAsync("plan")) return ExitStopped;
+            await PlanAsync(id, extend: false, ct);
+            if (!await NextAsync("load")) return ExitStopped;
+            var complete = await LoadAsync(id, queue, reload: false, control, ct);
+            if (control.Stopped) return ExitStopped;
+            if (!complete)
+            {
+                _log.LogError("Run {Run}: some chunks failed; see 'status --run {Run}' and 'retry-dlq --run {Run}'", id, id, id);
+                return ExitGatesFailed;
+            }
+            if (!await NextAsync("finalize")) return ExitStopped;
+            var ok = await FinalizeCoreAsync(id, ct);
+            if (!await NextAsync("validate")) return ExitStopped;
+            ok &= await ValidateCoreAsync(id, sample, ct);
+            return ok ? ExitOk : ExitGatesFailed;
+        }
+
+        async Task<bool> NextAsync(string step)
+        {
+            if (!await control.WaitUntilAllowedAsync(ct))
+            {
+                _log.LogWarning("Run {Run}: stopped before step {Step}", id, step);
+                return false;
+            }
+            _log.LogInformation("Step: {Step}", step);
+            return true;
+        }
+    }
+
+    /// <summary>pause | resume | stop: sets the operator flag the running worker reads between chunks.</summary>
+    public async Task SetControlAsync(long runId, string command, CancellationToken ct)
+    {
+        var state = c.State();
+        await state.RunAsync(runId, ct);
+        await state.SetControlAsync(runId, command == "resume" ? null : command, ct);
+        _log.LogInformation(command switch
+        {
+            "pause" => "Run {Run}: pause requested. The worker finishes the chunks in progress (within a minute or two), then waits. 'resume' continues.",
+            "stop" => "Run {Run}: stop requested. The worker finishes the chunks in progress, then exits. Start again with 'migrate --run {Run}'.",
+            _ => "Run {Run}: resumed.",
+        }, runId, runId);
+    }
+
+    /// <summary>Progress of a run: tables, records, chunks, speed, dead letters, and the chunks to look at first.</summary>
+    public async Task StatusAsync(long runId, CancellationToken ct)
     {
         var state = c.State();
         var run = await state.RunAsync(runId, ct);
-        _log.LogInformation("Run {Run}: QB app {Qb} -> PB app {Pb}, status {Status}", run.Id, run.QbAppId, run.PbAppId, run.Status);
-        foreach (var t in await state.TableMapsAsync(runId, ct))
-            _log.LogInformation("  tier {Tier} {Table} -> t_{Pb}: {Status}, QB {Count} records", t.Tier, t.QbTableName, t.PbTableId, t.Status, t.QbRecordCount);
-        _log.LogInformation("  chunks not done: {Left}", (await state.PendingChunksAsync(runId, ct)).Count);
-        foreach (var i in await state.IssueSummaryAsync(runId, ct))
-            _log.LogInformation("  {Severity} {Code}: {Count}", i.Severity, i.Code, i.Count);
+        var p = await state.ProgressAsync(runId, ct);
+        var busy = await state.TryLockRunAsync(runId, ct) is { } probe ? await ReleaseAsync(probe) : true;
+        _log.LogInformation("Run {Run}: QuickBase app {Qb} -> PowerBase app {Pb}; status {Status}{Control}; worker {Worker}",
+            runId, run.QbAppId, run.PbAppId, p.Status, p.Control is { } ctl ? $", {ctl} requested" : "", busy ? "running" : "not running");
+        _log.LogInformation("Tables: {Loaded} of {Tables} loaded, {Blocked} blocked", p.TablesLoaded, p.Tables, p.TablesBlocked);
+        _log.LogInformation("Records: {Written:N0} of {Total:N0} ({Pct:P1})", p.RecordsWritten, p.QbRecords, p.QbRecords == 0 ? 1 : (double)p.RecordsWritten / p.QbRecords);
+        _log.LogInformation("Chunks: {Done} done, {Running} running, {Pending} pending, {Failed} failed (of {All})", p.ChunksDone, p.ChunksRunning, p.ChunksPending, p.ChunksFailed, p.Chunks);
+        if (p.RecordsLast10Minutes > 0 && p.ChunksPending + p.ChunksRunning > 0)
+        {
+            var perSecond = p.RecordsLast10Minutes / 600.0;
+            var left = Math.Max(0, p.QbRecords - p.RecordsWritten);
+            _log.LogInformation("Speed (last 10 min): {Rate:N0} records/s; about {Minutes:N0} min left", perSecond, left / perSecond / 60);
+        }
+        var dead = await PeekDeadLettersAsync(ct);
+        var ours = dead.Where(d => d.RunId == runId).ToList();
+        _log.LogInformation("Dead-letter queue: {Ours} message(s) for this run{Others}", ours.Count, dead.Count > ours.Count ? $", {dead.Count - ours.Count} for other runs" : "");
+        await FixFirstAsync(runId, ours, ct);
     }
+
+    private static async Task<bool> ReleaseAsync(IAsyncDisposable probe)
+    {
+        await probe.DisposeAsync();
+        return false;
+    }
+
+    /// <summary>The chunks a person should look at first: failed, or given up on by the queue, with their last error.</summary>
+    private async Task FixFirstAsync(long runId, IReadOnlyList<QbmReport.DeadLetter> deadLetters, CancellationToken ct)
+    {
+        var state = c.State();
+        var notDone = (await state.ChunkDetailsAsync(runId, null, ct)).Where(ch => ch.Status == "failed").ToList();
+        var deadIds = deadLetters.Select(d => d.ChunkId).Except(notDone.Select(n => n.Id)).ToList();
+        var all = notDone.Concat(deadIds.Count > 0 ? await state.ChunkDetailsAsync(runId, deadIds, ct) : []).ToList();
+        if (all.Count == 0) { _log.LogInformation("Fix first: nothing; no failed chunks."); return; }
+        _log.LogWarning("Fix first ({Count} chunk(s)):", all.Count);
+        foreach (var ch in all)
+        {
+            var dl = deadLetters.FirstOrDefault(d => d.ChunkId == ch.Id);
+            if (ch.Status == "done")
+            {
+                _log.LogInformation("  chunk {Chunk} {Table} Record IDs {From}..{To}: loaded since; its dead-letter message is a leftover ('retry-dlq --run {Run} --no-continue' removes it)",
+                    ch.Id, ch.QbTableName, ch.FromRecordId, ch.ToRecordId - 1, runId);
+                continue;
+            }
+            _log.LogWarning("  chunk {Chunk} {Table} Record IDs {From}..{To}: {Status}, {Attempts} attempt(s){Dead}. {Error}",
+                ch.Id, ch.QbTableName, ch.FromRecordId, ch.ToRecordId - 1, ch.Status, ch.Attempts,
+                dl is null ? "" : ", in the dead-letter queue", ch.LastError ?? dl?.Description ?? "");
+        }
+    }
+
+    private async Task<List<QbmReport.DeadLetter>> PeekDeadLettersAsync(CancellationToken ct)
+    {
+        var connection = c.Config["ServiceBus:ConnectionString"];
+        if (string.IsNullOrWhiteSpace(connection)) return [];
+        await using var client = new ServiceBusClient(connection);
+        await using var receiver = client.CreateReceiver(QueueName, new ServiceBusReceiverOptions { SubQueue = SubQueue.DeadLetter });
+        var result = new List<QbmReport.DeadLetter>();
+        long? from = null;
+        while (true)
+        {
+            var batch = await receiver.PeekMessagesAsync(250, from, ct);
+            if (batch.Count == 0) break;
+            result.AddRange(batch.Select(m => new QbmReport.DeadLetter(RunIdOf(m), ChunkIdOf(m), null, m.DeadLetterReason, m.DeadLetterErrorDescription, m.EnqueuedTime.UtcDateTime)));
+            from = batch[^1].SequenceNumber + 1;
+        }
+        return result;
+    }
+
+    /// <summary>Retries the chunks the queue gave up on: lists them (and every failed chunk) with the error, puts them back to
+    /// pending, removes their dead-letter messages, then continues the migration (load → finalize → validate → report).
+    /// --list only shows them. Fix the cause first: a chunk that fails for the same reason ends up dead-lettered again.</summary>
+    public async Task<int> RetryDeadLettersAsync(long runId, bool listOnly, IReadOnlyCollection<long>? onlyChunks, bool continueRun, string queue, double sample,
+        string? reportOut, CancellationToken ct)
+    {
+        var state = c.State();
+        var dead = (await PeekDeadLettersAsync(ct)).Where(d => d.RunId == runId && (onlyChunks is null || onlyChunks.Contains(d.ChunkId))).ToList();
+        await FixFirstAsync(runId, dead, ct);
+        if (listOnly) return ExitOk;
+
+        var failed = (await state.ChunkDetailsAsync(runId, null, ct))
+            .Where(ch => ch.Status == "failed" && (onlyChunks is null || onlyChunks.Contains(ch.Id))).Select(ch => ch.Id);
+        var retry = dead.Select(d => d.ChunkId).Concat(failed).Distinct().ToList();
+        await using (var runLock = await LockAsync(runId, ct))
+        {
+            var reset = await state.ResetChunksAsync(retry, ct);
+            var removed = await RemoveDeadLettersAsync(runId, dead.Select(d => d.ChunkId).ToHashSet(), ct);
+            _log.LogInformation("Run {Run}: {Reset} chunk(s) set back to pending, {Removed} dead-letter message(s) removed", runId, reset, removed);
+        }
+        if (!continueRun)
+        {
+            _log.LogInformation("Load them with 'migrate --run {Run}'.", runId);
+            return ExitOk;
+        }
+        return await MigrateAsync(runId, null, null, null, false, queue, sample, reportOut, ct);
+    }
+
+    private async Task<int> RemoveDeadLettersAsync(long runId, IReadOnlySet<long> chunkIds, CancellationToken ct)
+    {
+        var connection = c.Config["ServiceBus:ConnectionString"];
+        if (string.IsNullOrWhiteSpace(connection) || chunkIds.Count == 0) return 0;
+        await using var client = new ServiceBusClient(connection);
+        await using var receiver = client.CreateReceiver(QueueName, new ServiceBusReceiverOptions { SubQueue = SubQueue.DeadLetter });
+        var removed = 0;
+        var seen = new HashSet<long>();
+        while (true)
+        {
+            var batch = await receiver.ReceiveMessagesAsync(100, TimeSpan.FromSeconds(3), ct);
+            if (batch.Count == 0) break;
+            var progress = false;
+            foreach (var m in batch)
+            {
+                if (RunIdOf(m) == runId && chunkIds.Contains(ChunkIdOf(m))) { await receiver.CompleteMessageAsync(m, ct); removed++; progress = true; }
+                else
+                {
+                    await receiver.AbandonMessageAsync(m, cancellationToken: ct);
+                    progress |= seen.Add(m.SequenceNumber);
+                }
+            }
+            if (!progress) break; // only messages we leave alone are coming back
+        }
+        return removed;
+    }
+
+    /// <summary>Writes the Excel report (all runs of this app) and a short summary to the log. Returns the file path.</summary>
+    public async Task<string> ReportAsync(long runId, string? output, CancellationToken ct)
+    {
+        var state = c.State();
+        var run = await state.RunAsync(runId, ct);
+        var dead = (await PeekDeadLettersAsync(ct)).ToList();
+        var collector = new QbmReportCollector(c.Tenant, c.Control, c.QuickBase());
+        var report = await collector.CollectAsync(runId, c.TenantId, [], c.Config.GetValue("Migration:ReportRowCap", 200_000), ct);
+        var tableByChunk = report.Chunks.ToDictionary(ch => ch.Id, ch => ch.Table);
+        var runIds = report.Runs.Select(r => r.Id).ToHashSet();
+        report = report with
+        {
+            DeadLetters = dead.Where(d => runIds.Contains(d.RunId)).Select(d => d with { Table = tableByChunk.GetValueOrDefault(d.ChunkId) }).ToList(),
+        };
+
+        var path = ReportPath(output, report, runId);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await using (var file = File.Create(path))
+            QbmReportWriter.Write(report, file);
+
+        var qb = report.Tables.Where(t => t.Status != "skipped").Sum(t => t.QbRecords ?? 0);
+        var pb = report.Tables.Where(t => t.Status != "skipped").Sum(t => t.PbRecords);
+        _log.LogInformation("Report for {App} (runs {Runs}): {Pb:N0} of {Qb:N0} records ({Pct:P2}), {Tables} tables, {Broken:N0} broken links, {Dead} dead letters",
+            report.AppName, string.Join(", ", runIds), pb, qb, qb == 0 ? 1 : (double)pb / qb, report.Tables.Count, report.BrokenLinkTotal, report.DeadLetters.Count);
+        _log.LogInformation("Report written: {Path}", path);
+        await UploadReportAsync(path, ct);
+        return path;
+    }
+
+    /// <summary>Copies the report to the private "reports" container of the migration's storage account, where an operator
+    /// downloads it from the Azure Portal. Optional: without Migration:ReportStorage:ConnectionString (vault secret
+    /// Migration--ReportStorage--ConnectionString) the report stays on this machine only. A failed upload never fails the run.</summary>
+    private async Task UploadReportAsync(string path, CancellationToken ct)
+    {
+        var connection = c.Config["Migration:ReportStorage:ConnectionString"];
+        if (string.IsNullOrWhiteSpace(connection))
+        {
+            _log.LogInformation("Report not uploaded: no report storage configured (Migration:ReportStorage:ConnectionString); it is on this machine only");
+            return;
+        }
+        try
+        {
+            var container = new BlobContainerClient(connection, c.Config["Migration:ReportStorage:Container"] ?? "reports");
+            var blob = container.GetBlobClient(Path.GetFileName(path));
+            await using var file = File.OpenRead(path);
+            await blob.UploadAsync(file, new BlobUploadOptions
+            {
+                HttpHeaders = new BlobHttpHeaders { ContentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+            }, ct);
+            _log.LogInformation("Report uploaded: Azure Portal > storage account {Account} > Containers > {Container} > {Name}", container.AccountName, container.Name, blob.Name);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _log.LogWarning("Report upload failed ({Error}); the report is still at {Path}", ex.Message, path);
+        }
+    }
+
+    private async Task TryReportAsync(long runId, string? output, CancellationToken ct)
+    {
+        try { await ReportAsync(runId, output, ct); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _log.LogError(ex, "Run {Run}: the report could not be written; run 'report --run {Run}' again", runId, runId);
+        }
+    }
+
+    /// <summary>--out may be a file (.xlsx) or a folder; default folder: Migration:ReportDirectory, else ./reports.</summary>
+    private string ReportPath(string? output, QbmReport report, long runId)
+    {
+        var name = $"{Safe(report.AppName)}-run{runId}-{report.GeneratedOn:yyyyMMdd-HHmm}.xlsx";
+        if (output is { Length: > 0 } && output.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase)) return Path.GetFullPath(output);
+        var folder = output is { Length: > 0 } ? output : c.Config["Migration:ReportDirectory"] is { Length: > 0 } configured ? configured : "reports";
+        return Path.GetFullPath(Path.Combine(folder, name));
+    }
+
+    private static string Safe(string name) =>
+        new string(name.Select(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' ? ch : '-').ToArray()).Trim('-') is { Length: > 0 } s ? s : "app";
 }
