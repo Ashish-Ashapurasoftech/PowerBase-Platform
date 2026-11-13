@@ -17,12 +17,14 @@ using PowerBase.Application.Import.FormulaTranslation;
 using PowerBase.Application.Import.Mapping;
 using PowerBase.Application.Import.Pbl;
 using PowerBase.Application.Import.Qbl;
+using PowerBase.Application.Import.Reporting;
 using PowerBase.Application.Import.Services;
 using PowerBase.Application.Relationships;
 using PowerBase.Application.Relationships.Commands.CreateRelationship;
 using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Validation;
 using PowerBase.Application.Reports.Commands.CreateReport;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Domain.FieldSettings;
@@ -99,9 +101,11 @@ public class ImportAppFromPblCommandHandler
     private readonly PblSettingsApplier _settingsApplier;
     private readonly PblPermissionsApplier _permissionsApplier;
     private readonly PblConnectedTablesApplier? _connectedTablesApplier;
+    private readonly PendingConnectedTableResolver? _pendingConnectedTableResolver;
     private readonly RelationshipFieldFactory? _reportLinkFactory;
     private readonly PowerBase.Application.FieldReferences.IFieldReferenceIndexer _refIndexer;
     private readonly PblPipelinesImporter? _pipelinesImporter;
+    private readonly IAuditRepository? _auditRepo;
 
     public ImportAppFromPblCommandHandler(
         PblValidator validator,
@@ -133,9 +137,13 @@ public class ImportAppFromPblCommandHandler
         PblConnectedTablesApplier? connectedTablesApplier = null,
         RelationshipFieldFactory? reportLinkFactory = null,
         PowerBase.Application.FieldReferences.IFieldReferenceIndexer? refIndexer = null,
-        PblPipelinesImporter? pipelinesImporter = null)
+        PblPipelinesImporter? pipelinesImporter = null,
+        PendingConnectedTableResolver? pendingConnectedTableResolver = null,
+        IAuditRepository? auditRepo = null)
     {
+        _auditRepo = auditRepo;
         _connectedTablesApplier = connectedTablesApplier;
+        _pendingConnectedTableResolver = pendingConnectedTableResolver;
         _reportLinkFactory = reportLinkFactory;
         _refIndexer = refIndexer ?? PowerBase.Application.FieldReferences.NullFieldReferenceIndexer.Instance;
         _pipelinesImporter = pipelinesImporter;
@@ -198,6 +206,20 @@ public class ImportAppFromPblCommandHandler
         }
     }
 
+    /// <summary>Retries every connected table left waiting on an application or table that did not exist yet (see
+    /// <see cref="PblConnectedTablesApplier"/>) — this import, or an earlier one, may have just supplied it. Covers the
+    /// whole tenant, not only the app(s) this call imported, so a table added later by any import keeps resolving the
+    /// same way. Never fails the import that triggers it.</summary>
+    private async Task ResolvePendingConnectedTablesAsync(CancellationToken ct)
+    {
+        if (_pendingConnectedTableResolver is null) return;
+        try { await _pendingConnectedTableResolver.ResolveAllAsync(ct); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Best effort: each still-pending row keeps its own reason and will be retried on the next import.
+        }
+    }
+
     /// <summary>Imports a file that holds exactly one application. A QBL file with several goes through <see cref="HandleBatchAsync"/>.</summary>
     public async Task<ImportReport> HandleAsync(ImportAppFromPblCommand command, CancellationToken ct = default)
     {
@@ -208,8 +230,12 @@ public class ImportAppFromPblCommandHandler
             throw new BadRequestException("IMPORT_MULTIPLE_APPS", "This file contains several applications; import it with the multi-application import.");
         var single = await ImportOneAsync(apps[0], command.Mapping?.ExcludedTableRefs, null, ct);
         if (_connectedTablesApplier is not null)
-            await _connectedTablesApplier.ApplyAsync([(apps[0].Document, single)], ct); // reports a connected table whose source app is not here
+            await _connectedTablesApplier.ApplyAsync([(apps[0].Document, single)], ct); // resolved against every app the tenant has, this one included
+        await ResolvePendingConnectedTablesAsync(ct);
         await ImportPipelinesAsync(apps, [(apps[0], single)], command.Mapping?.ActivatePipelines == true, ct);
+
+        single.Issues = ImportIssueReportBuilder.BuildFromImportReport(single.AppName, single, apps[0].Document);
+        await LogImportAuditAsync(single, ct);
         return single;
     }
 
@@ -284,9 +310,48 @@ public class ImportAppFromPblCommandHandler
                     report.Skipped.Add(new ImportSkippedItem { LogicalRef = "", Name = "Connected tables", Reason = $"Connected tables were not set up ({ex.Message})." });
             }
         }
+        await ResolvePendingConnectedTablesAsync(ct);
 
         await ImportPipelinesAsync(apps, importedApps, command.Mapping?.ActivatePipelines == true, ct);
+
+        // Structured issue report + audit record, built last so they see every skipped item/pipeline note
+        // (connected tables and pipelines are both attached to the report above).
+        foreach (var (document, report) in importedDocuments)
+        {
+            report.Issues = ImportIssueReportBuilder.BuildFromImportReport(report.AppName, report, document);
+            await LogImportAuditAsync(report, ct);
+        }
+
         return batch;
+    }
+
+    /// <summary>Preserves the full technical detail of what the import skipped/flagged — same mechanism
+    /// already used for app/table/field/role changes elsewhere (<see cref="IAuditRepository.LogActivityAsync"/>)
+    /// — so it stays available for support/debugging even though the API response now leads with the
+    /// friendlier <see cref="ImportReport.Issues"/> restatement. Never fails the import itself.</summary>
+    private async Task LogImportAuditAsync(ImportReport report, CancellationToken ct)
+    {
+        if (_auditRepo is null) return;
+        try
+        {
+            var technicalDetail = JsonSerializer.Serialize(new
+            {
+                report.Skipped,
+                report.FormulaTranslations,
+                Pipelines = report.Pipelines.Select(p => new { p.LogicalRef, p.Name, p.Status, p.Issues }),
+            });
+            await _auditRepo.LogActivityAsync(
+                AuditActions.Imported,
+                AuditEntityTypes.App,
+                report.AppPublicId.ToString(),
+                entityTitle: report.AppName,
+                newValues: technicalDetail,
+                ct: ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Best effort — the import already succeeded; losing the audit trail must not undo it.
+        }
     }
 
     /// <summary>The file's Quickbase pipelines, as PowerFlows of the apps just created. Like connected tables they come last — their

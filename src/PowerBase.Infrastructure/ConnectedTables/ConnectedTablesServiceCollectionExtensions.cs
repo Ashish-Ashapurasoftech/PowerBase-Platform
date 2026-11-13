@@ -24,6 +24,7 @@ public static class ConnectedTablesServiceCollectionExtensions
         services.AddScoped<IConnectedRunQueue, ConnectedRunQueue>();
         services.AddScoped<IConnectedAppTokenReader, ConnectedAppTokenReader>();
         services.AddScoped<IConnectedTableLock, ConnectedTableLock>();
+        services.AddScoped<IConnectedPendingImportRepository, ConnectedPendingImportRepository>();
 
         services.AddSingleton<ConnectedSourceScopeFactory>();
         services.AddScoped<ConnectedAccessVerifier>();
@@ -35,6 +36,7 @@ public static class ConnectedTablesServiceCollectionExtensions
         services.AddScoped<ConnectionHandlers>();
         services.AddScoped<ConnectedTableHandlers>();
         services.AddScoped<ConnectExistingTableHandler>();
+        services.AddScoped<IExistingTableConnector>(sp => sp.GetRequiredService<ConnectExistingTableHandler>());
         services.AddScoped<ConnectedRunHandlers>();
         services.AddScoped<DataSharingHandlers>();
         return services;
