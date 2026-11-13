@@ -1,3 +1,5 @@
+using PowerBase.Application.Import.Reporting;
+
 namespace PowerBase.Application.Import.Commands.ImportAppFromPbl;
 
 /// <summary>An element the PBL document described but that import did not create — e.g. a
@@ -99,4 +101,9 @@ public sealed class ImportReport
     /// <summary>The file's Quickbase pipelines imported (or not) as PowerFlows of this app. Empty for a file without pipelines.</summary>
     public List<PipelineImportReportItem> Pipelines { get; init; } = [];
     public int PipelinesCreated => Pipelines.Count(p => p.PipelinePublicId.HasValue);
+
+    /// <summary>The same information as <see cref="Skipped"/>/<see cref="FormulaTranslations"/>/<see cref="Pipelines"/>' issues,
+    /// restated for the UI: grouped by application/table/field, with severity and a recommended action. Set once the report is
+    /// fully assembled (see <see cref="ImportAppFromPblCommandHandler"/>) — empty until then.</summary>
+    public ImportIssueReport Issues { get; set; } = new();
 }

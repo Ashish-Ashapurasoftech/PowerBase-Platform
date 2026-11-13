@@ -1,3 +1,5 @@
+using PowerBase.Application.Import.Reporting;
+
 namespace PowerBase.Application.Import.Queries.ImportPreview;
 
 public sealed class PblIssueDto
@@ -98,6 +100,12 @@ public sealed class ImportPreviewAppItem
     public List<PblIssueDto> Warnings { get; init; } = [];
     /// <summary>Quickbase pipelines imported with this app (New App mode only).</summary>
     public List<ImportPreviewPipelineItem> Pipelines { get; init; } = [];
+
+    /// <summary><see cref="Errors"/>/<see cref="Warnings"/> restated for the UI: grouped by table/field,
+    /// with severity and a recommended action, instead of a flat technical list. Set after every
+    /// warning (including the cross-app "duplicate name" one) is known — see
+    /// <see cref="ImportPreviewQueryHandler"/>.</summary>
+    public ImportIssueReport Issues { get; set; } = new();
 }
 
 public sealed class ImportPreviewResult
@@ -109,4 +117,7 @@ public sealed class ImportPreviewResult
     /// <summary>File-level problems (unreadable file, several applications in Update mode). Per-application problems are on the app.</summary>
     public List<PblIssueDto> Errors { get; init; } = [];
     public List<PblIssueDto> Warnings { get; init; } = [];
+
+    /// <summary><see cref="Errors"/>/<see cref="Warnings"/> restated for the UI (see <see cref="ImportPreviewAppItem.Issues"/>).</summary>
+    public ImportIssueReport Issues { get; init; } = new();
 }

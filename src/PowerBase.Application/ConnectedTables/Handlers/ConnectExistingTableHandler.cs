@@ -22,6 +22,13 @@ public sealed record ConnectExistingTableCommand(
 
 public sealed record ConnectExistingTableResult(Guid ConnectedTablePublicId, int FieldsConnected, IReadOnlyList<string> Notes);
 
+/// <summary>Turns an existing ordinary table into a connected table. Extracted so callers (the QBL importer, the deferred
+/// resolver) depend on an interface rather than the concrete handler, which keeps them unit-testable.</summary>
+public interface IExistingTableConnector
+{
+    Task<ConnectExistingTableResult> ConnectAsync(ConnectExistingTableCommand command, CancellationToken ct);
+}
+
 /// <summary>
 /// "Convert in place": the same module rows as <see cref="ConnectedTableHandlers.CreateAsync"/> writes, but for a destination table and
 /// destination fields that already exist (an app import made them with the source file's field numbers, and forms and reports already
@@ -40,7 +47,7 @@ public sealed class ConnectExistingTableHandler(
     IAppFieldRepository appFields,
     IAuditRepository audit,
     IQueryContext context,
-    ILogger<ConnectExistingTableHandler> logger)
+    ILogger<ConnectExistingTableHandler> logger) : IExistingTableConnector
 {
     public async Task<ConnectExistingTableResult> ConnectAsync(ConnectExistingTableCommand command, CancellationToken ct)
     {

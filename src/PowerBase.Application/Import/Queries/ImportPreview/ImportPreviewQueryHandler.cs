@@ -3,6 +3,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Import.Commands.ImportAppFromPbl;
 using PowerBase.Application.Import.Pbl;
 using PowerBase.Application.Import.Qbl;
+using PowerBase.Application.Import.Reporting;
 using YamlDotNet.Core;
 
 namespace PowerBase.Application.Import.Queries.ImportPreview;
@@ -36,12 +37,16 @@ public class ImportPreviewQueryHandler
 
         // Update works on exactly one application; nothing in the file is worth reviewing when it has several.
         if (query.Mode == ImportMode.UpdateExistingApp && parsed.Count > 1)
+        {
+            var multiAppErrors = new List<PblIssueDto> { new() { Code = ImportDocumentParser.MULTIPLE_APPS_NOT_ALLOWED_FOR_UPDATE, Message = ImportDocumentParser.MultipleAppsMessage(parsed) } };
             return new ImportPreviewResult
             {
                 IsValid = false,
                 AppCount = parsed.Count,
-                Errors = [new PblIssueDto { Code = ImportDocumentParser.MULTIPLE_APPS_NOT_ALLOWED_FOR_UPDATE, Message = ImportDocumentParser.MultipleAppsMessage(parsed) }],
+                Errors = multiAppErrors,
+                Issues = ImportIssueReportBuilder.BuildFromPreview("", multiAppErrors, [], document: null),
             };
+        }
 
         var apps = new List<ImportPreviewAppItem>();
         foreach (var app in parsed)
@@ -51,6 +56,10 @@ public class ImportPreviewQueryHandler
         foreach (var group in apps.Where(a => a.IsValid).GroupBy(a => a.AppName.Trim(), StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
             foreach (var dup in group.Skip(1))
                 dup.Warnings.Add(new PblIssueDto { Code = "APP_NAME_DUPLICATED_IN_FILE", Message = $"Another application in this file is also named '{dup.AppName}'. Rename one of them to import both.", ElementRef = dup.AppRef });
+
+        // Built last, once every per-app warning (including the cross-app duplicate-name one above) is final.
+        for (var i = 0; i < apps.Count; i++)
+            apps[i].Issues = ImportIssueReportBuilder.BuildFromPreview(apps[i].AppName, apps[i].Errors, apps[i].Warnings, parsed[i].Document);
 
         return new ImportPreviewResult
         {
@@ -153,11 +162,16 @@ public class ImportPreviewQueryHandler
         }).ToList(),
     };
 
-    private static ImportPreviewResult FileError(string code, string message) => new()
+    private static ImportPreviewResult FileError(string code, string message)
     {
-        IsValid = false,
-        Errors = [new PblIssueDto { Code = code, Message = message }],
-    };
+        var errors = new List<PblIssueDto> { new() { Code = code, Message = message } };
+        return new ImportPreviewResult
+        {
+            IsValid = false,
+            Errors = errors,
+            Issues = ImportIssueReportBuilder.BuildFromPreview("", errors, [], document: null),
+        };
+    }
 
     private static PblIssueDto ToDto(PblIssue issue) => new()
     {
