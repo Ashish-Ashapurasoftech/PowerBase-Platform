@@ -116,6 +116,7 @@ using PowerBase.Infrastructure.Repositories;
 using PowerBase.Infrastructure.Services;
 using PowerBase.Infrastructure.UOW;
 using Serilog;
+using Azure.Monitor.OpenTelemetry.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -150,9 +151,27 @@ builder.Services.AddCors(options =>
         }
         policy.AllowAnyHeader()
               .AllowAnyMethod()
-              .AllowCredentials();
+              .AllowCredentials()
+              // Every API call carries an Authorization header, so the browser sends an OPTIONS preflight first. Without a
+              // max age it re-asks within seconds, doubling the round trips; 2 hours is the most Chromium honours.
+              .SetPreflightMaxAge(TimeSpan.FromHours(2));
     });
 });
+
+// Request, SQL and HTTP dependency, and Live Metrics telemetry for Application Insights. App Service supplies
+// APPLICATIONINSIGHTS_CONNECTION_STRING; without one (local runs) nothing is added. The App Service codeless agent does not
+// instrument this .NET 8 app on Linux, so the app does it itself.
+var azureMonitorConnection = builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"]
+    ?? builder.Configuration["ApplicationInsights:ConnectionString"];
+if (!string.IsNullOrWhiteSpace(azureMonitorConnection) && !azureMonitorConnection.StartsWith("<"))
+{
+    builder.Services.AddOpenTelemetry().UseAzureMonitor(o =>
+    {
+        o.ConnectionString = azureMonitorConnection;
+        // The background workers poll SQL every few seconds; sampling keeps that volume, and the ingestion bill, down.
+        o.SamplingRatio = builder.Configuration.GetValue("ApplicationInsights:SamplingRatio", 0.25f);
+    });
+}
 
 
 builder.Services.AddControllers();
@@ -179,6 +198,21 @@ builder.Services.AddSwaggerGen(c =>
 
 // Infrastructure
 builder.Services.AddMemoryCache();
+builder.Services.Configure<PowerBase.Application.Common.Configurations.MetadataCacheOptions>(builder.Configuration.GetSection(PowerBase.Application.Common.Configurations.MetadataCacheOptions.SectionName));
+builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.IMetadataCache, PowerBase.Infrastructure.Services.MetadataCache>();
+builder.Services.Configure<PowerBase.API.Middleware.ServerTimingOptions>(builder.Configuration.GetSection(PowerBase.API.Middleware.ServerTimingOptions.SectionName));
+builder.Services.AddScoped<PowerBase.Infrastructure.Services.ServerTiming>();
+builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IServerTiming>(sp => sp.GetRequiredService<PowerBase.Infrastructure.Services.ServerTiming>());
+// JSON responses (report rows, field lists) compress to a fraction of their size; the SPA is on another origin, so this also matters over HTTPS.
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+    options.Providers.Add<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProvider>();
+    options.Providers.Add<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProvider>();
+    options.MimeTypes = Microsoft.AspNetCore.ResponseCompression.ResponseCompressionDefaults.MimeTypes.Concat(["application/json"]);
+});
+builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
+builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
 builder.Services.AddHttpClient();
 builder.Services.AddHttpClient("PipelineMakeRequest").ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
 {
@@ -742,7 +776,9 @@ PowerBase.API.ConnectedTables.ConnectedTablesApiExtensions.AddConnectedTablesMod
 var app = builder.Build();
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
+app.UseResponseCompression();
 app.UseCors("Frontend");
+app.UseMiddleware<PowerBase.API.Middleware.ServerTimingMiddleware>();
 
 if (app.Environment.IsDevelopment())
 {

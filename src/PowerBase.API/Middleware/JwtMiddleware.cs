@@ -20,7 +20,8 @@ public class JwtMiddleware
         IUserTokenRepository userTokenRepository,
         IUserRepository userRepository,
         ITenantRepository tenantRepository,
-        IAuditRepository auditRepository)
+        IAuditRepository auditRepository,
+        IServerTiming serverTiming)
     {
         // Falls back to a `?token=` query param when there's no Authorization header — needed for
         // Code Pages: the served page is a plain document navigation/new-tab open, not an
@@ -32,6 +33,7 @@ public class JwtMiddleware
             .FirstOrDefault()?.Split(" ").Last()
             ?? context.Request.Query["token"].FirstOrDefault();
 
+        var authScope = serverTiming.Measure("auth");
         if (token is not null)
         {
             if (token.StartsWith("pb_ut_"))
@@ -93,6 +95,7 @@ public class JwtMiddleware
             }
         }
 
+        authScope.Dispose();
         await _next(context);
     }
 }

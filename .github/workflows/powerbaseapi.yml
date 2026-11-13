@@ -1,4 +1,4 @@
-name: Build and deploy .NET Core application to Web App powerbaseapi
+name: Build and deploy .NET Core application to Web App powerbaseapi-wus2
 on:
   push:
     branches:
@@ -7,7 +7,8 @@ permissions:
   id-token: write
   contents: read
 env:
-  AZURE_WEBAPP_NAME: powerbaseapi
+  # West US 2, next to the SQL server. The old West Central US app was "powerbaseapi".
+  AZURE_WEBAPP_NAME: powerbaseapi-wus2
   AZURE_WEBAPP_PACKAGE_PATH: src/PowerBase.API/publish
   CONFIGURATION: Release
   DOTNET_CORE_VERSION: 8.0.x

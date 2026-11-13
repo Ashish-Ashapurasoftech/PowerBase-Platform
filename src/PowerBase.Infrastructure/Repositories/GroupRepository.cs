@@ -13,11 +13,18 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
     public GroupRepository(
         ITenantConnectionFactory connectionFactory,
         IQueryContext queryContext,
-        IControlConnectionFactory controlFactory)
+        IControlConnectionFactory controlFactory,
+        IMetadataCache cache)
         : base(connectionFactory, queryContext)
     {
         _controlFactory = controlFactory;
+        _cache = cache;
     }
+
+    private readonly IMetadataCache _cache;
+
+    /// <summary>Group changes add, change and remove the apps' user assignments, which the metadata cache holds. Called BEFORE each write below.</summary>
+    private void AccessChanging() => _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Access, inTransaction: true);
 
     // ── CREATE ───────────────────────────────────────────────────────────────
 
@@ -119,6 +126,7 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
 
     public async Task<bool> DeleteAsync(Guid publicId, long deletedBy, CancellationToken ct = default)
     {
+        AccessChanging();
         await using var conn = await OpenConnectionAsync(ct);
         var groupId = await conn.ExecuteScalarAsync<long?>(new CommandDefinition(
             "SELECT Id FROM meta.[Group] WHERE PublicId = @publicId AND IsDeleted = 0",
@@ -177,6 +185,7 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
 
     public async Task<int> AddMembersAsync(Guid groupPublicId, IEnumerable<Guid> userPublicIds, long addedBy, CancellationToken ct = default)
     {
+        AccessChanging();
         await using var conn = await OpenConnectionAsync(ct);
         var groupId = await conn.ExecuteScalarAsync<long?>(
             "SELECT Id FROM meta.[Group] WHERE PublicId = @groupPublicId AND IsDeleted = 0", new { groupPublicId });
@@ -265,6 +274,7 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
 
     public async Task<bool> RemoveMemberAsync(Guid groupPublicId, Guid userPublicId, CancellationToken ct = default)
     {
+        AccessChanging();
         // Resolve UserPublicId → UserId via control DB
         await using var ctrlConn = _controlFactory.Create();
         await ctrlConn.OpenAsync(ct);
@@ -366,6 +376,7 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
 
     public async Task<bool> ShareWithAppsAsync(Guid groupPublicId, IEnumerable<Guid> appPublicIds, long createdBy, Guid? appRolePublicId = null, CancellationToken ct = default)
     {
+        AccessChanging();
         await using var conn = await OpenConnectionAsync(ct);
         var groupId = await conn.ExecuteScalarAsync<long?>(
             "SELECT Id FROM meta.[Group] WHERE PublicId = @groupPublicId AND IsDeleted = 0", new { groupPublicId });
@@ -424,6 +435,7 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
 
     public async Task<bool> UnshareFromAppAsync(Guid groupPublicId, Guid appPublicId, CancellationToken ct = default)
     {
+        AccessChanging();
         await using var conn = await OpenConnectionAsync(ct);
         var ids = await conn.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
             @"SELECT g.Id AS GroupId, a.Id AS AppId

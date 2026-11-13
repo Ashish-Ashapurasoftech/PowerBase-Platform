@@ -106,6 +106,17 @@ public class RunReportQueryHandler
     }
 
     private readonly ISearchFieldJobs? _searchFieldJobs;
+    private readonly IServerTiming _timing;
+
+    private static async Task<App?> WrapApp(Task<App> task) => await task;
+
+    /// <summary>Awaits <paramref name="task"/> and records how long it took as a Server-Timing step.</summary>
+    private async Task<T> Timed<T>(string step, Task<T> task)
+    {
+        var start = System.Diagnostics.Stopwatch.GetTimestamp();
+        try { return await task; }
+        finally { _timing.Add(step, System.Diagnostics.Stopwatch.GetElapsedTime(start)); }
+    }
 
     public RunReportQueryHandler(
         IReportRepository reportRepo,
@@ -122,8 +133,10 @@ public class RunReportQueryHandler
         ILogger<RunReportQueryHandler> logger,
         IAppRepository? appRepo = null,
         ISearchOutbox? searchOutbox = null,
-        ISearchFieldJobs? searchFieldJobs = null)
+        ISearchFieldJobs? searchFieldJobs = null,
+        IServerTiming? serverTiming = null)
     {
+        _timing = serverTiming ?? NoServerTiming.Instance;
         _searchOutbox = searchOutbox;
         _searchFieldJobs = searchFieldJobs;
         _reportRepo = reportRepo;
@@ -146,16 +159,22 @@ public class RunReportQueryHandler
         var page = Math.Max(1, query.Page);
         var pageSize = Math.Clamp(query.PageSize, 1, 200);
 
-        var report = await _reportRepo.GetVisibleReportAsync(query.ReportPublicId, ct)
+        var report = await Timed("report", _reportRepo.GetVisibleReportAsync(query.ReportPublicId, ct))
             ?? throw new NotFoundException("Report", query.ReportPublicId);
-        var table = await _tableRepo.GetByIdAsync(report.AppTableId, ct);
-        var app = _appRepo != null ? await _appRepo.GetByIdAsync(table.AppId, ct) : null;
+        var table = await Timed("table", _tableRepo.GetByIdAsync(report.AppTableId, ct));
+
+        // The app, the table's fields and the user's app permissions don't depend on each other, so they are fetched together;
+        // the access rules need the fields and run as soon as those are in.
+        var appTask = _appRepo != null ? Timed<App?>("app", WrapApp(_appRepo.GetByIdAsync(table.AppId, ct))) : Task.FromResult<App?>(null);
+        var fieldsTask = Timed("fields", _fieldRepo.ListByTableAsync(table.Id, ct));
+        var appPermsTask = Timed("appperms", _appUserRepo.GetUserAppPermissionsAsync(table.AppId, _queryContext.UserId, ct));
+        var allFields = await fieldsTask;
+        var accessTask = Timed("access", _enforcer.GetTableAccessAsync(table, allFields, ct));
+        await Task.WhenAll(appTask, appPermsTask, accessTask);
+        var app = appTask.Result;
         var isAppEncrypted = app?.IsEncrypted ?? false;
-        var allFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
-
-        var access = await _enforcer.GetTableAccessAsync(table, allFields, ct);
-
-        var appPerms = await _appUserRepo.GetUserAppPermissionsAsync(table.AppId, _queryContext.UserId, ct);
+        var access = accessTask.Result;
+        var appPerms = appPermsTask.Result;
         // Only genuine report designers (create or update capability) qualify for masked builder
         // preview. ReportsRead is a viewer-level permission — those users have no design intent
         // and must be blocked entirely when they lack table data access, not shown masked rows.
@@ -206,7 +225,7 @@ public class RunReportQueryHandler
 
         // The report's saved filter tree with the runtime (Advanced builder / per-column) filter tree AND'd on top,
         // every "ask the user" answer, User-field and relative-date value already resolved.
-        var filterTree = await BuildFilterTreeAsync(definition, query, table, allFields, ct);
+        var filterTree = await Timed("filter", BuildFilterTreeAsync(definition, query, table, allFields, ct));
 
         // Table reports: TableSortGroup (Phase 1's unified Sort+Group list) supersedes the legacy
         // single-field GroupByFieldId + SortFields when non-empty — derive both the sort order
@@ -386,7 +405,7 @@ public class RunReportQueryHandler
     {
         // Intersect report columns with fields the role can see (drop None-access fields)
         var visibleFieldIds = access.VisibleFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
-        var selectedFields = await ReportColumnResolver.ResolveAsync(definition, allFields, visibleFieldIds, _reportRepo, table.PublicId, ct);
+        var selectedFields = await Timed("columns", ReportColumnResolver.ResolveAsync(definition, allFields, visibleFieldIds, _reportRepo, table.PublicId, ct));
 
         // Merge role record filter into the report's filter tree.
         // NOTE: ViewFilter is intentionally merged BEFORE runtime filters but we must track it
@@ -425,10 +444,10 @@ public class RunReportQueryHandler
         // A Lookup of a stored, unencrypted parent field is read in SQL — the parent column, through the row's reference —
         // so filtering or sorting on it covers every record instead of the first InMemoryReadLimit.Rows read into memory.
         // Only the lookups this run filters or sorts on are checked. They stay in computedFids: the search index has none.
-        var sqlLookupFids = await SqlReadableLookupFidsAsync(table, allFields, isAppEncrypted,
+        var sqlLookupFids = await Timed("lookupfids", SqlReadableLookupFidsAsync(table, allFields, isAppEncrypted,
             SummaryEncryptionGuard.ConditionFieldIds(userFilterTree)
                 .Concat(SummaryEncryptionGuard.ConditionFieldIds(access.ViewFilter))
-                .Concat(sortFields.Select(s => s.FieldId)), ct);
+                .Concat(sortFields.Select(s => s.FieldId)), ct));
         if (sqlLookupFids is not null) formulaFids.ExceptWith(sqlLookupFids);
 
         var hasFormulaFilters = FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, formulaFids);
@@ -893,20 +912,34 @@ public class RunReportQueryHandler
         else
         {
             // Normal path — SQL handles pagination, sorting, and filtering entirely.
-            var rows = await _recordRepo.ListAsync(table, readFields, page, pageSize, filterTree, sortFields,
-                restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids);
-            total = await _recordRepo.CountAsync(table, allFields, filterTree,
-                restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids);
+            // The page of rows and the match count are independent queries (each opens its own connection), so they run together;
+            // the totals need the count (whether every match fits in memory) and run beside the row query.
+            var rowsTask = Timed("rows", _recordRepo.ListAsync(table, readFields, page, pageSize, filterTree, sortFields,
+                restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids));
+            var countTask = Timed("count", _recordRepo.CountAsync(table, allFields, filterTree,
+                restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids));
+            total = await countTask;
+            Task<(Dictionary<string, ColumnTotal> Totals, bool Incomplete)>? totalsTask = totalCols.Count > 0
+                ? Timed("totals", TotalsOverAllMatchesAsync(table, allFields, selectedFields, totalCols, filterTree,
+                    access.RestrictToCreatedBy, fitsInMemory: total <= InMemoryReadLimit.Rows, sqlLookupFids, ct))
+                : null;
+            var rows = await rowsTask;
+            // Totals can read every matching record through the same projector the page uses below, which keeps state per call:
+            // they are finished before the page is projected, not run beside it.
+            if (totalsTask != null)
+                (totals, totalsIncomplete) = await totalsTask;
 
-            var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, rows,
-                await _relationalProjector.ProjectAsync(table, projectedFields, rows, ct));
-            var computed = _formulaProjector.Project(allFields, rows, relational, table);
-            var userNames = await ResolveUserNamesAsync(rows, allFields, _userRepo, ct, computed);
+            IReadOnlyList<IReadOnlyDictionary<long, object?>> computed;
+            IReadOnlyDictionary<long, string> userNames;
+            using (_timing.Measure("project"))
+            {
+                var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, rows,
+                    await _relationalProjector.ProjectAsync(table, projectedFields, rows, ct));
+                computed = _formulaProjector.Project(allFields, rows, relational, table);
+            }
+            using (_timing.Measure("names"))
+                userNames = await ResolveUserNamesAsync(rows, allFields, _userRepo, ct, computed);
             items = rows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
-
-            if (totalCols.Count > 0)
-                (totals, totalsIncomplete) = await TotalsOverAllMatchesAsync(table, allFields, selectedFields, totalCols, filterTree,
-                    access.RestrictToCreatedBy, fitsInMemory: total <= InMemoryReadLimit.Rows, sqlLookupFids, ct);
         }
 
         if (isMaskedPreview)
