@@ -90,4 +90,27 @@ public class AppQueryHandlerTests
 
         await _appRepo.Received(1).DeleteAsync(id, Arg.Any<CancellationToken>());
     }
+
+    // powerflowextraRd: deleting an app deletes each of its PowerFlows through the PowerFlow delete, before the app.
+    [Fact]
+    public async Task DeleteApp_DeletesItsPowerFlowsToo()
+    {
+        var id = Guid.NewGuid();
+        _appRepo.GetByPublicIdAsync(id).Returns(new App { Id = 7, PublicId = id, Name = "HCBS QA" });
+        var pipelineRepo = Substitute.For<IPipelineRepository>();
+        var flows = new[] { (Guid.NewGuid(), "Create Note Log"), (Guid.NewGuid(), "Create Status Log") };
+        pipelineRepo.ListNamesByAppIdAsync(7, Arg.Any<CancellationToken>()).Returns(flows);
+        foreach (var (flowId, name) in flows)
+            pipelineRepo.GetByPublicIdAsync(flowId, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, PublicId = flowId, AppId = 7, Name = name });
+        var queueRepo = Substitute.For<IMainPipelineQueueRepository>();
+        _queryContext.TenantId.Returns(1L);
+        var deletePipeline = new PowerBase.Application.Pipelines.Commands.DeletePipeline.DeletePipelineCommandHandler(pipelineRepo, _auditRepo, queueRepo, _queryContext);
+        var sut = new DeleteAppCommandHandler(_appRepo, _auditRepo, null, _queryContext, pipelineRepo, deletePipeline);
+
+        await sut.HandleAsync(new DeleteAppCommand(id));
+
+        foreach (var (flowId, _) in flows)
+            await pipelineRepo.Received(1).DeleteAsync(flowId, Arg.Any<CancellationToken>());
+        await _appRepo.Received(1).DeleteAsync(id, Arg.Any<CancellationToken>());
+    }
 }

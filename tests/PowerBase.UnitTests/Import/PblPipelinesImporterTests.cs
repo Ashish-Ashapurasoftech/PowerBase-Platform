@@ -742,6 +742,127 @@ public class PblPipelinesImporterTests
             "{{steps.ref_aa._metadata.context.app_name}}|{{steps.ref_aa._metadata.record.action}}|{{steps.ref_aa._metadata.struct.fid_20.qb_field_id}}");
     }
 
+    // powerflowextraRd: Quickbase Jinja that our formula language has an equivalent for becomes a PowerFlow formula value (QblJinjaFormula),
+    // checked with the formula engine; run with that engine it prints what Quickbase prints. Now = 2025-01-05 23:30 UTC, the trigger's Name = "Ronak".
+    [Theory]
+    [InlineData("{{aa.name}}/{{time.now|date_mdy}}", "Ronak/01-05-2025")]
+    [InlineData("{{time.now | date_mdy('/')}} by {{aa.name}}", "01/05/2025 by Ronak")]
+    [InlineData("{{time.today|date_ymd('')}}", "20250105")]
+    [InlineData("D {{time.now|date_dmy('.')}}", "D 05.01.2025")]
+    [InlineData("{{aa.name|upper}}", "RONAK")]
+    [InlineData("{{aa.name|lower}}-{{aa.name|length}}", "ronak-5")]
+    [InlineData("{{aa.name|trim|first}}{{aa.name|last}}", "Rk")]
+    [InlineData("{{aa.name|replace('R', 'B')}}", "Bonak")]
+    [InlineData("{{aa.name ~ ' ' ~ 'X'}}", "Ronak X")]
+    [InlineData("{{aa.name + '!'}}", "Ronak!")]
+    [InlineData("{{(time.today + time.delta(days=7))|date_ymd}}", "2025-01-12")]
+    [InlineData("{{(time.now - time.delta(weeks=1))|date_mdy}}", "12-29-2024")]
+    [InlineData("{{(time.now + time.delta(months=1))|date_mdy}}", "02-05-2025")]
+    [InlineData("{{(time.now + time.delta(years=1))|date_ymd('/')}}", "2026/01/05")]
+    [InlineData("{{time.now.strftime('%B %d, %Y %I:%M %p')}}", "January 05, 2025 11:30 PM")]
+    [InlineData("{{time.now.strftime('%a %b %H%%')}}", "Sun Jan 23%")]
+    [InlineData("{{(time.parse('2025-03-01') - time.today).days}}", "55")]
+    [InlineData("{{(10 / 4) | round(1)}}", "2.5")]
+    [InlineData("{{7 // 2}} {{7 % 2}} {{2 * 3 + 1}}", "3 1 7")]
+    [InlineData("{{(-5)|abs}} {{ -5|abs}} {{'3.7'|float|int}}", "5 5 3")]   // Jinja: a filter applies to the negated value
+    [InlineData("{{aa.name|default('none')}}", "Ronak")]
+    [InlineData("{{'a&b c'|urlencode}}", "a%26b%20c")]
+    [InlineData("{{CLEAR}}", "")]
+    // comparisons, and / or / not, if-else, in, is-tests, ** (Jinja prints a boolean as True / False)
+    [InlineData("v{{aa.name == 'Ronak'}} {{aa.name != 'Ronak'}}", "vTrue False")]
+    [InlineData("v{{3 > 2}} {{2 >= 3}} {{2 < 3 and 1 <= 1}} {{1 > 2 or not 1 > 2}}", "vTrue False True True")]
+    [InlineData("{{'Yes' if aa.name == 'Ronak' else 'No'}}", "Yes")]
+    [InlineData("{{'big' if 5 > 10 else 'small'}}-{{'x' if 1 > 2}}-{{'on' if aa.name else 'off'}}", "small--on")]
+    [InlineData("v{{'na' in aa.name}} {{'z' not in aa.name}}", "vTrue True")]
+    [InlineData("v{{aa.name is none}}", "vFalse")]
+    [InlineData("v{{aa.name is not none}} {{aa.name is defined}}", "vTrue True")]
+    [InlineData("v{{7 is odd}} {{7 is even}} {{9 is divisibleby(3)}} {{5 is gt(3)}} {{5 is eq 5}}", "vTrue False True True True")]
+    [InlineData("{{2 ** 3}} {{ -2 ** 2}} {{2 ** 3 ** 2}}", "8 4 64")]   // Jinja: ** binds looser than a minus, left to right
+    // {{- and -}} drop the spaces before / after (whitespace control), they are no minus sign
+    [InlineData("A  {{- aa.name -}}  B {{ aa.name }} {{-5|abs}}", "ARonakB Ronak5")]
+    [InlineData("v{{true}} {{false or true}} {{(1 > 0) is true}} {{aa.name is true}} {{not aa.name}}", "vTrue True True False False")]
+    [InlineData("{{'n' if aa.name == none else 'y'}}", "y")]
+    // text methods, indexes and slices
+    [InlineData("{{aa.name.upper()}} {{aa.name.lower()}} {{'  x  '.strip()}}", "RONAK ronak x")]
+    [InlineData("v{{aa.name.startswith('Ro')}} {{aa.name.endswith('x')}}", "vTrue False")]
+    [InlineData("{{aa.name.replace('nak', 'hit')}} {{aa.name.find('n')}} {{aa.name.find('z')}} {{'a,b,a'.count('a')}}", "Rohit 2 -1 2")]
+    [InlineData("{{'ronak'.capitalize()}} {{'rONAK'|capitalize}}", "Ronak Ronak")]
+    [InlineData("{{aa.name[0]}}{{aa.name[-1]}}", "Rk")]
+    [InlineData("{{aa.name[1:3]}}|{{aa.name[:2]}}|{{aa.name[2:]}}|{{aa.name[-3:]}}|{{aa.name[:-2]}}|{{aa.name[1:-1]}}|{{aa.name[-4:-1]}}", "on|Ro|nak|nak|Ron|ona|ona")]
+    [InlineData("{{'a,b,c'.split(',')[1]}} {{'a,b,c'.split(',')|join('-')}} {{'a,b,c'.split(',')|length}} {{'a,b,c'.split(',')|first}}", "b a-b-c 3 a")]
+    [InlineData("v{{'b' in 'a,b,c'.split(',')}} {{'x' in 'a,b,c'.split(',')}}", "vTrue False")]
+    // more filters
+    [InlineData("{{aa.name|base64_encode}} {{'Um9uYWs='|base64_decode}}", "Um9uYWs= Ronak")]
+    [InlineData("{{'<b>Hi</b>'|text}}", "Hi")]
+    [InlineData("{{2.567|round(2)}} {{2.561|round(1, 'floor')}} {{2.521|round(1, 'ceil')}} {{2.5|round}}", "2.57 2.5 2.6 2.0")]
+    // Python floats print with a point; round is Python's (a half goes to the even neighbour); // rounds down
+    [InlineData("{{10 / 5}} {{10 // 4}} {{7.0 // 2}} {{ -7 // 2}} {{'3'|float}} {{1.5 * 2}} {{3.5|round}} {{0.125|round(2)}}", "2.0 2 3.0 -4 3.0 3.0 4.0 0.12")]
+    [InlineData("{{'Hello, %s!'|format(aa.name)}} {{'%d items'|format(3.7)}}", "Hello, Ronak! 3 items")]
+    // date parts and more strftime codes (2025-01-05 is a Sunday)
+    [InlineData("{{time.now.year}}-{{time.now.month}}-{{time.now.day}} {{time.now.hour}}:{{time.now.minute}} {{time.today.year}}", "2025-1-5 23:30 2025")]
+    [InlineData("{{time.now.weekday()}} {{time.now.isoweekday()}} {{time.now.strftime('%y %j %w')}}", "6 7 25 005 0")]
+    [InlineData("{{(time.now + time.delta(days=1)).day}} {{time.parse('2025-03-01').month}}", "6 3")]
+    [InlineData("v{{time.today > time.parse('2025-01-01')}}", "vTrue")]
+    public async Task NewApp_JinjaWithAFormulaEquivalent_IsSavedAsAFormulaThatPrintsTheSameText(string qbValue, string expected)
+    {
+        var report = await ImportAsync(QblPipelineConverterTests.AllStepsWith("{{aa.name}}", 0, qbValue));
+
+        var value = Config(Saved("ref_ab")).GetProperty("fieldMappings")[0].GetProperty("value").GetString()!;
+        value.Should().StartWith(PowerBase.Application.Pipelines.PipelineFormulaValue.Prefix,
+            string.Join(" | ", report.Pipelines.Single().Issues.Where(i => i.StepId == "ab").Select(i => i.Message)));
+        report.Pipelines.Single().Issues.Should().NotContain(i => i.Code == "PIPELINE_REFERENCE_CLEARED" && i.StepId == "ab");
+
+        var engine = new PowerBase.Formula.FormulaEngine();
+        var result = PowerBase.Application.Pipelines.PipelineFormulaValue.Evaluate(value,
+            token => token == "{{steps.ref_aa.fid_20}}" ? "Ronak" : throw new InvalidOperationException(token), engine,
+            _ => new PowerBase.Formula.Evaluation.EvaluationOptions { UtcNow = new DateTime(2025, 1, 5, 23, 30, 0, DateTimeKind.Utc) });
+        result.Should().Be(expected);
+    }
+
+    // powerflowextraRd: what a real Quickbase pipeline printed (YSL Dev Docs, "Test Pipeline Formula", 2026-11-13) for an empty field —
+    // None there: it prints nothing, is none, default(v) leaves it, default(v, true) replaces it, it is not equal to '' — and for
+    // whole dates: time.now / time.today are UTC datetimes ("2026-11-13 05:47:54.278606+00:00", "2026-11-13 00:00:00+00:00").
+    // The trigger's Name is empty here; Now = 2025-01-05 23:30 UTC.
+    [Theory]
+    [InlineData("[{{aa.name}}] {{aa.name is none}} [{{aa.name|default('D')}}] {{aa.name|default('D', true)}}", "[] True [] D")]
+    [InlineData("{{aa.name == ''}} {{aa.name != ''}} {{aa.name == none}} {{aa.name != none}} {{'' == ''}}", "False True True False True")]
+    [InlineData("{{'x' if aa.name else 'empty'}} {{not aa.name}}", "empty True")]
+    [InlineData("{{time.now}}|{{time.today}}|{{time.parse('2025-03-01')}}|{{time.now.date()}}", "2025-01-05 23:30:00+00:00|2025-01-05 00:00:00+00:00|2025-03-01 00:00:00|2025-01-05")]
+    [InlineData("{{time.today + time.delta(days=1)}}", "2025-01-06 00:00:00+00:00")]
+    public async Task NewApp_JinjaOnAnEmptyFieldAndWholeDates_PrintsWhatQuickbasePrints(string qbValue, string expected)
+    {
+        await ImportAsync(QblPipelineConverterTests.AllStepsWith("{{aa.name}}", 0, qbValue));
+
+        var value = Config(Saved("ref_ab")).GetProperty("fieldMappings")[0].GetProperty("value").GetString()!;
+        value.Should().StartWith(PowerBase.Application.Pipelines.PipelineFormulaValue.Prefix);
+        var result = PowerBase.Application.Pipelines.PipelineFormulaValue.Evaluate(value,
+            token => token == "{{steps.ref_aa.fid_20}}" ? "" : throw new InvalidOperationException(token), new PowerBase.Formula.FormulaEngine(),
+            _ => new PowerBase.Formula.Evaluation.EvaluationOptions { UtcNow = new DateTime(2025, 1, 5, 23, 30, 0, DateTimeKind.Utc) });
+        result.Should().Be(expected);
+    }
+
+    // powerflowextraRd: Jinja our formulas have no equivalent for is not guessed: the value is cleared, reported and the step is a draft.
+    [Theory]
+    [InlineData("{{aa.name|title}}")]
+    [InlineData("{{time.now|timezone('America/New_York')}}")]
+    [InlineData("{{runtime.pipeline_name}}")]
+    [InlineData("{{time.delta(year=2016)}}")]
+    [InlineData("{{time.now.strftime('%U')}}")]
+    [InlineData("{{aa.name|truncate(3)}}")]
+    [InlineData("{{aa.name|wordcount}}")]
+    [InlineData("{{aa.name|md5}}")]
+    [InlineData("{{aa.name|html2text}}")]
+    [InlineData("{{aa.name is string}}")]
+    [InlineData("{{aa.name.title()}}")]
+    [InlineData("{{aa.name[aa.name]}}")]
+    public async Task NewApp_JinjaWithoutAFormulaEquivalent_IsClearedAndReported(string qbValue)
+    {
+        var report = await ImportAsync(QblPipelineConverterTests.AllStepsWith("{{aa.name}}", 0, qbValue));
+
+        Config(Saved("ref_ab")).GetProperty("fieldMappings")[0].GetProperty("value").GetString().Should().BeEmpty();
+        report.Pipelines.Single().Issues.Should().Contain(i => i.Code == "PIPELINE_REFERENCE_CLEARED" && i.StepId == "ab" && i.Message.Contains(qbValue));
+    }
+
     [Fact]
     public async Task ExistingApp_QuickbaseMetadata_SchemaEntryFollowsTheMatchedField()
     {

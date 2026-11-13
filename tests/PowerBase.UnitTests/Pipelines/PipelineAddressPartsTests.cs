@@ -34,7 +34,31 @@ public class PipelineAddressPartsTests
         new() { Id = 2, Fid = 7, Name = "Notes", TypeCode = "Text" },
         new() { Id = 3, Fid = 37, Name = "Address", TypeCode = "Address" },
         new() { Id = 4, Fid = 8, Name = "Amount", TypeCode = "Number" },
+        new() { Id = 5, Fid = 21, Name = "QA Date", TypeCode = "Date", DefaultValue = "true" },
+        new() { Id = 6, Fid = 22, Name = "Stamp", TypeCode = "DateTime", DefaultValue = "true" },
     };
+
+    // powerflowextraRd: a Date field whose default is "today" (stored "true", Quickbase DefaultIsToday) and a Date / Time field whose
+    // default is "now" get today / now (UTC) when a PowerFlow creates the record without mapping them — not the text "true".
+    [Fact]
+    public async Task CreateRecord_DateTodayAndDateTimeNowDefaults_AreFilledWithTheCurrentUtcValues()
+    {
+        var before = DateTime.UtcNow;
+
+        var h = await RunAsync("create-record", [Map("fid_6", "{{trigger.fid_6}}")], TriggerWithAddress());
+
+        h.Created![21].Should().Be(DateTime.UtcNow.Date);
+        ((DateTime)h.Created[22]!).Should().BeOnOrAfter(before).And.BeOnOrBefore(DateTime.UtcNow);
+    }
+
+    [Fact]
+    public async Task CreateRecord_MappedDate_IsKeptOverTheDefault()
+    {
+        var h = await RunAsync("create-record", [Map("fid_21", "01-05-2025")], TriggerWithAddress());
+
+        h.Created![21].Should().NotBe(DateTime.UtcNow.Date);
+        h.Created[21].Should().NotBe("true");
+    }
 
     private sealed class Harness
     {
@@ -207,6 +231,20 @@ public class PipelineAddressPartsTests
         Convert.ToDecimal(h.Updated[8]).Should().Be(12.5m);
         h.Updated.Should().NotContainKey(37);
         await h.Records.DidNotReceive().GetByPublicIdAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>());
+    }
+
+    // powerflowextraRd: Quickbase {{CLEAR}} imports as the formula "" and must clear the field on update;
+    // a plain blank value or blank token still leaves the field alone.
+    [Fact]
+    public async Task UpdateRecord_FormulaThatIsEmpty_ClearsTheField_ButABlankTokenDoesNot()
+    {
+        var clear = PipelineFormulaValue.Prefix + "{\"expression\":\"\\\"\\\"\",\"fields\":[]}";
+
+        var h = await RunAsync("update-record", [Map("fid_6", clear), Map("fid_8", "{{trigger.fid_missing}}")], TriggerWithAddress(), Pune);
+
+        h.Updated.Should().ContainKey(6);
+        h.Updated![6].Should().BeNull();
+        h.Updated.Should().NotContainKey(8);
     }
 
     [Fact]

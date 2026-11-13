@@ -2530,7 +2530,15 @@ public partial class PipelineEngine : IPipelineEngine
                     if (field.Fid.HasValue)
                     {
                         var resolvedValStr = EvaluateTokens(await RenderUserTokensForTextAsync(mapping.Value, field, payloadJson, executionPath, allSteps, fieldRepo, tableRepo, ct), payloadJson, executionPath, allSteps);
-                        if (string.IsNullOrWhiteSpace(resolvedValStr)) continue;
+                        if (string.IsNullOrWhiteSpace(resolvedValStr))
+                        {
+                            // powerflowextraRd: a blank token still leaves the field as it is, but a formula that
+                            // evaluates to empty (Quickbase {{CLEAR}} imports as the formula "") clears the field.
+                            if (!PipelineFormulaValue.IsFormula(mapping.Value)) continue;
+                            values[field.Fid.Value] = null;
+                            resolvedMappings[mapping.Field] = null;
+                            continue;
+                        }
                         var parsedVal = ParseRecordMappingValueWithFormat(resolvedValStr, field, mapping.Value, mapping.FormatString);
                         values[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;

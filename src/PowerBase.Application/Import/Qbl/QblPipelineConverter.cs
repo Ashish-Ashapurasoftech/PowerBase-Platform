@@ -946,6 +946,21 @@ public static class QblPipelineConverter
                 if (!text.Contains("{{", StringComparison.Ordinal) && !text.Contains("{%", StringComparison.Ordinal))
                     return text;
 
+                // powerflowextraRd: a value using Jinja expressions ({{time.now|date_mdy}}, {{a.name|upper}}, {{CLEAR}} …) becomes a
+                // PowerFlow formula value, checked with the formula engine (QblJinjaFormula); what our formulas have no equivalent
+                // for is cleared and reported below, as before.
+                if (QblJinjaFormula.Translate(text, (string path, out List<object>? refParts, out string? kind) =>
+                    {
+                        var problem = TokenProblem(TokenPattern.Match("{{" + path + "}}"), out refParts);
+                        kind = problem is null ? JinjaKind(_lastFieldType) : null;
+                        return problem;
+                    }) is { } jinja)
+                {
+                    if (jinja.Problem is null) return jinja.Value!;
+                    Incomplete("PIPELINE_REFERENCE_CLEARED", $"{where} '{text}' was cleared: {jinja.Problem}. Set it again before turning the PowerFlow on.");
+                    return string.Empty;
+                }
+
                 var parts = new List<object>();
                 var last = 0;
                 foreach (Match token in TokenPattern.Matches(text))
@@ -967,9 +982,24 @@ public static class QblPipelineConverter
                 return new PblPipelineTextValue(parts);
             }
 
+            /// <summary>powerflowextraRd: the Quickbase type of the field the last token named, so a Jinja expression reads it as Quickbase
+            /// does: a checkbox is a boolean (False when empty), a date or date/time is a UTC datetime.</summary>
+            private string? _lastFieldType;
+
+            private static string? JinjaKind(string? fieldType) => fieldType switch
+            {
+                "QB::Field::Checkbox" or "QB::Field::Checkbox::Formula" => "bool",
+                "QB::Field::Date" or "QB::Field::Date::Formula" => "date",
+                "QB::Field::DateTime" or "QB::Field::DateTime::Formula" or "QB::Field::DateCreated" or "QB::Field::DateModified" => "datetime",
+                "QB::Field::Number" or "QB::Field::Numeric" or "QB::Field::Currency" or "QB::Field::Percent" or "QB::Field::Rating"
+                    or "QB::Field::Numeric::Formula" or "QB::Field::Currency::Formula" or "QB::Field::Percent::Formula" => "number",
+                _ => null,
+            };
+
             private string? TokenProblem(Match token, out List<object>? parts)
             {
                 parts = null;
+                _lastFieldType = null;
                 if (!token.Value.StartsWith("{{", StringComparison.Ordinal))
                     return "Jinja statements are not supported in PowerFlows";
                 var path = PathToken.Match(token.Groups[1].Value);
@@ -1068,6 +1098,7 @@ public static class QblPipelineConverter
                 if (keys.Length == 1)
                 {
                     parts = [prefix, Value(field), "}}"];
+                    _lastFieldType = field.Type;
                     return null;
                 }
                 if (keys.Length == 2 && UserFieldTypes.Contains(field.Type) && UserDetails.Contains(keys[1]))
