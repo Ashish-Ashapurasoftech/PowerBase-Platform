@@ -75,8 +75,16 @@ public class AppRoleRepository : TenantRepositoryBase, IAppRoleRepository
         WHERE Id = @roleId AND IsDeleted = 0
         """;
 
-    public AppRoleRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
-        : base(connectionFactory, queryContext) { }
+    private readonly IMetadataCache _cache;
+
+    public AppRoleRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache cache)
+        : base(connectionFactory, queryContext)
+    {
+        _cache = cache;
+    }
+
+    /// <summary>Drops everything cached about who the user is and what their roles allow. Called BEFORE each write below.</summary>
+    private void AccessChanging(bool inTransaction = false) => _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Access, inTransaction);
 
     public async Task<IReadOnlyList<AppRoleDetail>> ListDetailsByAppIdAsync(long appId, CancellationToken ct = default)
     {
@@ -141,6 +149,7 @@ public class AppRoleRepository : TenantRepositoryBase, IAppRoleRepository
 
     public async Task SetDefaultAsync(long appId, long roleId, CancellationToken ct = default)
     {
+        AccessChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.OpenAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
@@ -169,6 +178,7 @@ public class AppRoleRepository : TenantRepositoryBase, IAppRoleRepository
 
     public async Task<(long Id, Guid PublicId)> CreateAsync(AppRole role, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
+        AccessChanging(transaction is not null);
         var parameters = new { 
             appId = role.AppId, 
             name = role.Name, 
@@ -190,6 +200,7 @@ public class AppRoleRepository : TenantRepositoryBase, IAppRoleRepository
 
     public async Task SetPermissionsAsync(long appRoleId, IReadOnlyList<string> permissionCodes, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
+        AccessChanging(transaction is not null);
         if (transaction != null)
         {
             await transaction.Connection!.ExecuteAsync(new CommandDefinition(DeleteRolePermissionsSql, new { appRoleId }, transaction, cancellationToken: ct));
@@ -207,6 +218,7 @@ public class AppRoleRepository : TenantRepositoryBase, IAppRoleRepository
 
     public async Task DeleteAsync(Guid publicId, CancellationToken ct = default)
     {
+        AccessChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(SoftDeleteSql, new { publicId }, cancellationToken: ct));
@@ -227,6 +239,7 @@ public class AppRoleRepository : TenantRepositoryBase, IAppRoleRepository
 
     public async Task UpdateRoleHierarchyAsync(Guid publicId, string manageableRolesType, int? rank, IReadOnlyList<Guid> manageableRolePublicIds, CancellationToken ct = default)
     {
+        AccessChanging();
         const string getRoleSql = "SELECT Id, AppId FROM meta.AppRole WHERE PublicId = @publicId AND IsDeleted = 0";
         const string updateRoleSql = """
             UPDATE meta.AppRole

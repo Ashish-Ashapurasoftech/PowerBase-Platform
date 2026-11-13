@@ -58,6 +58,43 @@ public class FieldColumnConversionSqlTests
         items[1].GetProperty("v").GetString().Should().Be("12");
     }
 
+    // Encrypted columns: plain text stored before encrypting matches what record saves write.
+    [Fact]
+    public void ToEncryptedPlainText_MatchesRecordSaveShapes()
+    {
+        FieldColumnConversionSql.ToEncryptedPlainText(null).Should().BeNull();
+        FieldColumnConversionSql.ToEncryptedPlainText("Mahesh").Should().Be("Mahesh");
+        FieldColumnConversionSql.ToEncryptedPlainText(12.5m).Should().Be("12.5");
+        FieldColumnConversionSql.ToEncryptedPlainText(4320L).Should().Be("4320");
+        FieldColumnConversionSql.ToEncryptedPlainText(true).Should().Be("True");
+        FieldColumnConversionSql.ToEncryptedPlainText(false).Should().Be("False");
+        FieldColumnConversionSql.ToEncryptedPlainText(new DateTime(2026, 10, 2)).Should().Be("2026-10-02");
+        FieldColumnConversionSql.ToEncryptedPlainText(new DateTime(2026, 10, 2, 13, 30, 0)).Should().Be("2026-10-02T13:30:00.000");
+        FieldColumnConversionSql.ToEncryptedPlainText(new TimeSpan(13, 30, 0)).Should().Be("13:30:00");
+    }
+
+    [Fact]
+    public void EncryptedBatchJson_KeepsNullsSoUnconvertedValuesAreCleared()
+    {
+        var json = FieldColumnConversionSql.EncryptedBatchJson([new(1, "cipherA"), new(2, null)]);
+
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var items = doc.RootElement.EnumerateArray().ToList();
+        items.Should().HaveCount(2);
+        items[0].GetProperty("v").GetString().Should().Be("cipherA");
+        items[1].GetProperty("v").ValueKind.Should().Be(System.Text.Json.JsonValueKind.Null);
+    }
+
+    [Fact]
+    public void EncryptedBatchUpdateSql_UpdatesSameColumnInPlace()
+    {
+        var sql = FieldColumnConversionSql.EncryptedBatchUpdateSql("data.t_7", "f_14");
+
+        sql.Should().Contain("UPDATE t SET f_14 = m.v");
+        sql.Should().Contain("v VARCHAR(MAX)");
+        sql.Should().NotContain("CONVERT(");
+    }
+
     [Fact]
     public void BatchUpdateSql_ConvertsIntoTargetTypeFromJsonParameter()
     {
