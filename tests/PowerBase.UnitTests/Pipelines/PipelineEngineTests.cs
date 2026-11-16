@@ -3010,7 +3010,9 @@ public class PipelineEngineTests
                     ["_metadata"] = new Dictionary<string, object?>
                     {
                         ["context"] = new Dictionary<string, object?> { ["app_name"] = "HCBS QA", ["realm_host"] = "localhost" },
-                        ["record"] = new Dictionary<string, object?> { ["action"] = PipelineEngine.QuickbaseRecordAction("Added") },
+                        ["record"] = new Dictionary<string, object?> { ["action"] = PipelineEngine.QuickbaseRecordAction("Added"),
+                            // powerflowextraRd: the record before the change (Quickbase Record → Previous record).
+                            ["previous"] = new Dictionary<string, object?> { ["fid_6"] = "Ronak Old", ["fid_7"] = null } },
                         ["struct"] = new Dictionary<string, object?> { ["fid_7"] = new Dictionary<string, object?> { ["qb_field_id"] = 7, ["qb_field_type"] = "EMAIL" } }
                     }
                 },
@@ -3023,6 +3025,9 @@ public class PipelineEngineTests
 
         Eval("{{steps.ref_aa._metadata.context.app_name}}").Should().Be("HCBS QA");
         Eval("{{steps.ref_aa._metadata.record.action}}").Should().Be("Add");
+        Eval("{{steps.ref_aa.fid_6}} was {{steps.ref_aa._metadata.record.previous.fid_6}}").Should().Be("Ronak was Ronak Old");
+        // powerflowextraRd: a field with no previous value (an added record) reads as empty, not as a failed step.
+        Eval("[{{steps.ref_aa._metadata.record.previous.fid_7}}]").Should().Be("[]");
         Eval("{{steps.ref_aa._metadata.struct.fid_7.qb_field_id}}|{{steps.ref_aa._metadata.struct.fid_7.qb_field_type}}").Should().Be("7|EMAIL");
         Eval("{{steps.ref_search._metadata.batch.size}}").Should().Be("3");
         Eval("{{steps.ref_search._metadata.loop.index}}|{{steps.ref_search._metadata.batch.size}}", "main/ref_search/ref_loop/loop_index_2").Should().Be("2|3");

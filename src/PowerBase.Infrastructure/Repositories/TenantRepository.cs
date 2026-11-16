@@ -224,8 +224,13 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
         WHERE TenantId = @tenantId AND TenantRoleId = @roleId AND IsDeleted = 0
         """;
 
-    public TenantRepository(IControlConnectionFactory connectionFactory, IQueryContext queryContext)
-        : base(connectionFactory, queryContext) { }
+    private readonly IMetadataCache _cache;
+
+    public TenantRepository(IControlConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache cache)
+        : base(connectionFactory, queryContext)
+    {
+        _cache = cache;
+    }
 
     public async Task<string?> GetTenantNameByIdAsync(long tenantId, CancellationToken ct = default)
     {
@@ -258,6 +263,7 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
 
     public async Task<long> CreateAsync(Tenant tenant, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
         var connection = transaction?.Connection ?? (IDbConnection)(await OpenNewConnectionAsync(ct));
         bool ownConnection = transaction is null;
         try
@@ -278,6 +284,7 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
 
     public async Task<long> CreateRoleAsync(TenantRole role, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
         var connection = transaction?.Connection ?? (IDbConnection)(await OpenNewConnectionAsync(ct));
         bool ownConnection = transaction is null;
         try
@@ -299,6 +306,7 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
 
     public async Task CreateTenantUserAsync(TenantUser tenantUser, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
         var connection = transaction?.Connection ?? (IDbConnection)(await OpenNewConnectionAsync(ct));
         bool ownConnection = transaction is null;
         try
@@ -323,6 +331,7 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
 
     public async Task UpsertTenantUserAsync(TenantUser tenantUser, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(
             new CommandDefinition(UpsertTenantUserSql, new
@@ -400,6 +409,7 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
 
     public async Task UpdateTenantUserRoleAsync(long tenantUserId, long tenantRoleId, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateTenantUserRoleSql, new { id = tenantUserId, tenantRoleId }, cancellationToken: ct));
@@ -407,6 +417,7 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
 
     public async Task RemoveTenantUserAsync(long tenantUserId, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(
             new CommandDefinition(RemoveTenantUserSql, new { id = tenantUserId }, cancellationToken: ct));
@@ -414,6 +425,7 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
 
     public async Task ActivateTenantUserAsync(long userId, long tenantId, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(
             new CommandDefinition(ActivateTenantUserSql, new { userId, tenantId }, cancellationToken: ct));
@@ -450,6 +462,7 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
 
     public async Task<int> UpdateRoleAsync(Guid publicId, string name, string? description, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
         await using var connection = ConnectionFactory.Create();
         return await connection.ExecuteAsync(
             new CommandDefinition(UpdateRoleSql, new { publicId, name, description, tenantId = QueryContext.TenantId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
@@ -457,6 +470,7 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
 
     public async Task<int> DeleteRoleAsync(Guid publicId, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
         await using var connection = ConnectionFactory.Create();
         return await connection.ExecuteAsync(
             new CommandDefinition(SoftDeleteRoleSql, new { publicId, tenantId = QueryContext.TenantId, deletedBy = QueryContext.UserId }, cancellationToken: ct));

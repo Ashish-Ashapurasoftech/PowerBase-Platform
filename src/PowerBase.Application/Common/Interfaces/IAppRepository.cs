@@ -12,6 +12,9 @@ public interface IAppRepository
     Task<Guid> GetPublicIdByIdAsync(long appId, CancellationToken ct = default);
     Task<IReadOnlyList<App>> ListAsync(int page, int pageSize, CancellationToken ct = default);
     Task<int> CountAsync(CancellationToken ct = default);
+    /// <summary>Every non-deleted app of the tenant, unpaged. For internal lookups only (e.g. matching an import's source
+    /// app by name) — never exposed through an API endpoint.</summary>
+    Task<IReadOnlyList<App>> ListAllAsync(CancellationToken ct = default);
     Task<IReadOnlyList<AppListItemDto>> ListByUserAsync(long userId, int page, int pageSize, string? search = null, string? sortField = null, bool sortDescending = false, CancellationToken ct = default);
     Task<int> CountByUserAsync(long userId, string? search = null, CancellationToken ct = default);
     Task<IReadOnlyList<App>> ListAllByUserAsync(long userId, CancellationToken ct = default);

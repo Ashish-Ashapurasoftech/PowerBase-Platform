@@ -33,4 +33,7 @@ public class Report
     public long? RelationshipId { get; set; }
     /// <summary>Write-only helper for creation — resolved to <see cref="RelationshipId"/> by the insert.</summary>
     public Guid? RelationshipPublicId { get; set; }
+
+    /// <summary>A copy the caller may change: the metadata cache hands the same stored Report to every request.</summary>
+    public Report Clone() => (Report)MemberwiseClone();
 }

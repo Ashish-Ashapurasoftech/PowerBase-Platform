@@ -774,6 +774,32 @@ public class QblPipelineConverterTests
         pipeline.Issues.Should().Contain(i => i.Code == "PIPELINE_REFERENCE_CLEARED" && i.StepId == "am" && i.Message.Contains("{{aj.records_total}}"));
     }
 
+    // powerflowextraRd: Record → Previous record, both as the picker writes it and as Quickbase's docs do ($prev).
+    [Theory]
+    [InlineData("{{metadata.aa.record.previous.name}}")]
+    [InlineData("{{aa.$prev.name}}")]
+    public void Metadata_PreviousRecord_BecomesStepMetadataTokenByFieldNumber(string token)
+    {
+        var pipeline = ConvertOne(AllStepsWith("{{aa.name}}", 0, "was " + token));
+        var create = Root(pipeline, "ref_ab");
+
+        var mapping = ((List<object?>)create.Config["fieldMappings"]!).Cast<Dictionary<string, object?>>().Single();
+        Text(mapping["value"]).Should().Be("was {{steps.ref_aa._metadata.record.previous.[Name]}}");
+        create.IsComplete.Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData("{{metadata.aa.record.previous.no_such_field}}")]
+    [InlineData("{{metadata.aa.record.previous.name.email}}")]   // Name is not a user field
+    [InlineData("{{aa.$prev.no_such_field}}")]
+    public void Metadata_PreviousRecordWithoutAField_IsClearedAndTheStepIsADraft(string token)
+    {
+        var pipeline = ConvertOne(AllStepsWith("{{aa.name}}", 1, token));
+
+        Root(pipeline, "ref_ac").IsComplete.Should().BeFalse();
+        pipeline.Issues.Should().Contain(i => i.Code == "PIPELINE_REFERENCE_CLEARED" && i.StepId == "ac" && i.Message.Contains(token));
+    }
+
     [Theory]
     [InlineData("{{metadata.aa.context.unknown_key}}")]
     [InlineData("{{metadata.aa.struct.no_such_field.qb_field_id}}")]

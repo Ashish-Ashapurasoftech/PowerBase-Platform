@@ -17,15 +17,25 @@ public class UserPermissionRepository : ControlRepositoryBase, IUserPermissionRe
           AND tu.IsDeleted = 0
         """;
 
-    public UserPermissionRepository(IControlConnectionFactory connectionFactory, IQueryContext queryContext)
-        : base(connectionFactory, queryContext) { }
+    private readonly IMetadataCache _cache;
+
+    public UserPermissionRepository(IControlConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache cache)
+        : base(connectionFactory, queryContext)
+    {
+        _cache = cache;
+    }
 
     public async Task<IReadOnlySet<string>> GetPermissionsAsync(long userId, long tenantId, CancellationToken ct = default)
     {
-        await using var connection = ConnectionFactory.Create();
-        var codes = await connection.QueryAsync<string>(
-            new CommandDefinition(GetPermissionsSql, new { userId, tenantId }, cancellationToken: ct));
-
-        return codes.ToHashSet();
+        // Asked on every request by the auth middleware. Dropped by the control-database writes that change a user's role or a role's
+        // permissions (TenantRepository, AdminRepository, PermissionRepository); each caller gets its own copy.
+        var cached = await _cache.GetOrAddAsync<IReadOnlySet<string>>(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions, $"{userId}:{tenantId}", async () =>
+        {
+            await using var connection = ConnectionFactory.Create();
+            var codes = await connection.QueryAsync<string>(
+                new CommandDefinition(GetPermissionsSql, new { userId, tenantId }, cancellationToken: ct));
+            return codes.ToHashSet();
+        });
+        return cached.ToHashSet();
     }
 }

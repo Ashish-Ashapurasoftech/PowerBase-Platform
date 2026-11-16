@@ -5,6 +5,7 @@ using PowerBase.Application.Import.Commands.ImportAppFromPbl;
 using PowerBase.Application.Import.Diff;
 using PowerBase.Application.Import.Mapping;
 using PowerBase.Application.Import.Pbl;
+using PowerBase.Application.Import.Reporting;
 using PowerBase.Application.Import.Services;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -234,6 +235,11 @@ public class UpdateAppFromPblCommandHandler
         }
 
         var appName = diff.TargetAppName;
+        // Stage-level `failures` are shown separately in their own "Problems" panel (with reassurance that re-running
+        // is safe) rather than folded in here, so they are not listed twice.
+        var issues = ImportIssueReportBuilder.BuildFromUpdateSkipped(appName, skipped, formulaTranslations, pipelineItems, failures: null, document);
+        await LogImportAuditAsync(command.TargetAppPublicId, appName, skipped, formulaTranslations, pipelineItems, ct);
+
         return new ImportUpdateReport
         {
             AppPublicId = command.TargetAppPublicId,
@@ -249,7 +255,32 @@ public class UpdateAppFromPblCommandHandler
             Skipped = skipped,
             FormulaTranslations = formulaTranslations,
             Pipelines = pipelineItems,
+            Issues = issues,
         };
+    }
+
+    /// <summary>Same mechanism as the create-app import (<see cref="ImportAppFromPblCommandHandler"/>) —
+    /// preserves full technical detail for support/debugging. Never fails the update itself.</summary>
+    private async Task LogImportAuditAsync(
+        Guid appPublicId, string appName, List<ImportSkippedItem> skipped,
+        List<FormulaTranslationReportItem> formulaTranslations, List<PipelineImportReportItem> pipelines, CancellationToken ct)
+    {
+        try
+        {
+            var technicalDetail = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                Skipped = skipped,
+                FormulaTranslations = formulaTranslations,
+                Pipelines = pipelines.Select(p => new { p.LogicalRef, p.Name, p.Status, p.Issues }),
+            });
+            await _auditRepo.LogActivityAsync(
+                AuditActions.Imported, AuditEntityTypes.App, appPublicId.ToString(),
+                entityTitle: appName, newValues: technicalDetail, ct: ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Best effort — the update already succeeded; losing the audit trail must not undo it.
+        }
     }
 
     /// <summary>Creates the approved new PowerFlows and overwrites the approved existing ones, resolving every table and field

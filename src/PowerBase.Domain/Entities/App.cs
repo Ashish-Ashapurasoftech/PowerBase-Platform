@@ -25,4 +25,7 @@ public class App
     public DateTime? DeletedOn { get; set; }
     public long? DeletedBy { get; set; }
     public byte[] RowVersion { get; set; } = Array.Empty<byte>();
+
+    /// <summary>A copy the caller may change: the metadata cache hands the same stored app to every request.</summary>
+    public App Clone() => (App)MemberwiseClone();
 }

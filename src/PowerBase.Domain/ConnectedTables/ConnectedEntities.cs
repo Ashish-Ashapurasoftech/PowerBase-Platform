@@ -185,6 +185,27 @@ public class ConnectedLink
     public DateTime CreatedOn { get; set; }
 }
 
+/// <summary>A QBL connected table whose source application (or source table) did not exist yet when its own app was
+/// imported (tenant DB, connected.PendingImportConnection). Resolved automatically once the dependency is imported.
+/// Internal bookkeeping only — never exposed through the API.</summary>
+public class ConnectedPendingImportConnection
+{
+    public long Id { get; set; }
+    public long AppId { get; set; }
+    public long AppTableId { get; set; }
+    public string SourceAppName { get; set; } = string.Empty;
+    public string SourceTableName { get; set; } = string.Empty;
+    /// <summary>The import's own <c>PblConnectedTable</c>, serialized: field mappings, update mode, schedule, filter.</summary>
+    public string PayloadJson { get; set; } = string.Empty;
+    public string Status { get; set; } = ConnectedPendingImportStatuses.Pending;
+    public string? Reason { get; set; }
+    public int AttemptCount { get; set; }
+    public DateTime CreatedOn { get; set; }
+    public DateTime? LastAttemptOn { get; set; }
+    public DateTime? ResolvedOn { get; set; }
+    public Guid? ConnectedTablePublicId { get; set; }
+}
+
 /// <summary>A leased item of the control-DB run queue.</summary>
 public class ConnectedQueueItem
 {

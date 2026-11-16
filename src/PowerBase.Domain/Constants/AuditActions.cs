@@ -22,4 +22,7 @@ public static class AuditActions
     public const string VersionRestored = "VersionRestored";
     /// <summary>A Page was rendered/opened by a viewer — logged as data access, not a schema change.</summary>
     public const string Viewed = "Viewed";
+
+    /// <summary>A QBL/PBL file was imported (as a new app) or applied (to update an existing one).</summary>
+    public const string Imported = "Imported";
 }

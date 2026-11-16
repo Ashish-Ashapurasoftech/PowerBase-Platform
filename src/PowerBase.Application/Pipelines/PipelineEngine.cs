@@ -2530,7 +2530,15 @@ public partial class PipelineEngine : IPipelineEngine
                     if (field.Fid.HasValue)
                     {
                         var resolvedValStr = EvaluateTokens(await RenderUserTokensForTextAsync(mapping.Value, field, payloadJson, executionPath, allSteps, fieldRepo, tableRepo, ct), payloadJson, executionPath, allSteps);
-                        if (string.IsNullOrWhiteSpace(resolvedValStr)) continue;
+                        if (string.IsNullOrWhiteSpace(resolvedValStr))
+                        {
+                            // powerflowextraRd: a blank token still leaves the field as it is, but a formula that
+                            // evaluates to empty (Quickbase {{CLEAR}} imports as the formula "") clears the field.
+                            if (!PipelineFormulaValue.IsFormula(mapping.Value)) continue;
+                            values[field.Fid.Value] = null;
+                            resolvedMappings[mapping.Field] = null;
+                            continue;
+                        }
                         var parsedVal = ParseRecordMappingValueWithFormat(resolvedValStr, field, mapping.Value, mapping.FormatString);
                         values[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
@@ -4197,16 +4205,15 @@ public partial class PipelineEngine : IPipelineEngine
             var uniqueKey = $"{messageGuid}_{step.PublicId}_{Convert.ToHexString(executionPathHash)}";
             var storedFile = await fileStorageService.SaveAsync(contentStream, resolvedFileName, contentType, ct, uniqueKey);
             var fileJson = UploadFileStepContract.SerializeAttachmentValue(storedFile);
-            var outputJson = JsonSerializer.Serialize(new
-            {
-                Name = storedFile.Name,
-                Path = storedFile.Path,
-                Size = storedFile.Size,
-                ContentType = storedFile.ContentType,
-                RecordPublicId = recordPublicId,
-                Field = $"fid_{targetFields[0]!.Fid!.Value}",
-                Fields = targetFields.Select(field => $"fid_{field!.Fid!.Value}").ToArray()
-            });
+            var uploadOutput = UploadedFileExports(storedFile.Name, storedFile.Path, storedFile.Size, allSteps);
+            uploadOutput["Name"] = storedFile.Name;
+            uploadOutput["Path"] = storedFile.Path;
+            uploadOutput["Size"] = storedFile.Size;
+            uploadOutput["ContentType"] = storedFile.ContentType;
+            uploadOutput["RecordPublicId"] = recordPublicId;
+            uploadOutput["Field"] = $"fid_{targetFields[0]!.Fid!.Value}";
+            uploadOutput["Fields"] = targetFields.Select(field => $"fid_{field!.Fid!.Value}").ToArray();
+            var outputJson = JsonSerializer.Serialize(uploadOutput);
 
             PowerBase.Application.Common.Models.SearchIndexMessage? searchIndexMessage = null;
             await uow.BeginAsync(ct);
@@ -4842,6 +4849,8 @@ public partial class PipelineEngine : IPipelineEngine
             return (userSubMatch.Groups[2].Value.Equals("id", StringComparison.OrdinalIgnoreCase) ? "NUMBER" : "TEXT", null);
         // One part of an Address ({{steps.ref.fid_7.city}}) is text.
         if (IsAddressSubToken(userSub)) return ("TEXT", null);
+        // One part of a File field: its size is a number, the others text.
+        if (IsFileSubToken(userSub)) return (userSub.Contains("file_size", StringComparison.OrdinalIgnoreCase) ? "NUMBER" : "TEXT", null);
 
         var trimmedToken = token.Trim();
         bool isDynamicToken = System.Text.RegularExpressions.Regex.IsMatch(trimmedToken, @"\{\{\s*(?:steps\.|trigger\.|variables\.|[a-zA-Z0-9_]+\.)");
@@ -5176,6 +5185,7 @@ public partial class PipelineEngine : IPipelineEngine
         {
             input = ExpandUserSubTokens(input, payloadJson, executionPath, allSteps);
             input = ExpandAddressSubTokens(input, payloadJson, executionPath, allSteps);
+            input = ExpandFileSubTokens(input, payloadJson, executionPath, allSteps);
         }
         // Callable metadata is part of its durable output; HTTP request metadata is stored separately.
         if (input.Contains("._metadata.", StringComparison.Ordinal))
@@ -5488,6 +5498,7 @@ public partial class PipelineEngine : IPipelineEngine
         // A complete field reference retains its JSON type; interpolated text remains text. One part of an address is read out of
         // the stored address, as text.
         if (IsAddressSubToken((input ?? "").Trim())) return EvaluateTokens(input, payloadJson, executionPath, allSteps);
+        if (IsFileSubToken((input ?? "").Trim())) return EvaluateTokens(input, payloadJson, executionPath, allSteps);
         var match = Regex.Match(input ?? "",@"^\{\{\s*((?:steps\.|trigger\.|variables\.)?[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+)\s*\}\}$");
         if (!match.Success)
         {

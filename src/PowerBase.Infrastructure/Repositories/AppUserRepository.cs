@@ -276,8 +276,16 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         WHERE AppId = @appId AND PublicId = @appUserPublicId AND IsDeleted = 0
         """;
 
-    public AppUserRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
-        : base(connectionFactory, queryContext) { }
+    private readonly IMetadataCache _cache;
+
+    public AppUserRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache cache)
+        : base(connectionFactory, queryContext)
+    {
+        _cache = cache;
+    }
+
+    /// <summary>Drops everything cached about who the user is and what their roles allow. Called BEFORE each write below.</summary>
+    private void AccessChanging(bool inTransaction = false) => _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Access, inTransaction);
 
     public async Task<IReadOnlyList<AppUserDetail>> ListByAppIdAsync(long appId, CancellationToken ct = default)
     {
@@ -451,9 +459,13 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
 
     public async Task<AppUser?> GetByAppAndUserAsync(long appId, long userId, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        return await connection.QuerySingleOrDefaultAsync<AppUser>(
-            new CommandDefinition(GetByAppAndUserSql, new { appId, userId }, cancellationToken: ct));
+        var cached = await _cache.GetOrAddAsync<AppUser?>(QueryContext.TenantId, MetadataCacheGroups.Access, $"appuser:{appId}:{userId}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            return await connection.QuerySingleOrDefaultAsync<AppUser>(
+                new CommandDefinition(GetByAppAndUserSql, new { appId, userId }, cancellationToken: ct));
+        });
+        return cached?.Clone();
     }
 
     public async Task<AppUser?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
@@ -472,6 +484,7 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
 
     public async Task CreateAsync(AppUser appUser, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
+        AccessChanging();
         var parameters = new
         {
             publicId   = appUser.PublicId == Guid.Empty ? (Guid?)null : appUser.PublicId,
@@ -500,6 +513,7 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
 
     public async Task UpdateRoleAsync(long appId, long userId, long newRoleId, CancellationToken ct = default)
     {
+        AccessChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateRoleSql, new { appId, userId, appRoleId = newRoleId }, cancellationToken: ct));
@@ -507,6 +521,7 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
 
     public async Task UpdateRoleByAssignmentAsync(long appId, Guid appUserPublicId, long newRoleId, CancellationToken ct = default)
     {
+        AccessChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateRoleByAssignmentSql, new { appId, appUserPublicId, appRoleId = newRoleId }, cancellationToken: ct));
@@ -514,6 +529,7 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
 
     public async Task UpdateShowInUserPickersAsync(long appId, long userId, bool showInUserPickers, CancellationToken ct = default)
     {
+        AccessChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateShowInUserPickersSql, new { appId, userId, showInUserPickers }, cancellationToken: ct));
@@ -521,6 +537,7 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
 
     public async Task UpdateShowInUserPickersByAssignmentAsync(long appId, Guid appUserPublicId, bool showInUserPickers, CancellationToken ct = default)
     {
+        AccessChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateShowInUserPickersByAssignmentSql, new { appId, appUserPublicId, showInUserPickers }, cancellationToken: ct));
@@ -542,14 +559,19 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
 
     public async Task<IReadOnlySet<string>> GetUserAppPermissionsAsync(long appId, long userId, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var result = await connection.QueryAsync<string>(
-            new CommandDefinition(GetAppPermissionsSql, new { appId, userId }, cancellationToken: ct));
-        return result.ToHashSet();
+        var cached = await _cache.GetOrAddAsync<IReadOnlySet<string>>(QueryContext.TenantId, MetadataCacheGroups.Access, $"appperms:{appId}:{userId}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            var result = await connection.QueryAsync<string>(
+                new CommandDefinition(GetAppPermissionsSql, new { appId, userId }, cancellationToken: ct));
+            return result.ToHashSet();
+        });
+        return cached.ToHashSet();
     }
 
     public async Task RemoveAsync(long appId, long userId, CancellationToken ct = default)
     {
+        AccessChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(RemoveSql, new { appId, userId }, cancellationToken: ct));
@@ -557,6 +579,7 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
 
     public async Task RemoveAssignmentAsync(long appId, Guid appUserPublicId, CancellationToken ct = default)
     {
+        AccessChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(RemoveAssignmentSql, new { appId, appUserPublicId }, cancellationToken: ct));
@@ -564,10 +587,14 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
 
     public async Task<IReadOnlyList<long>> GetUserAppRoleIdsAsync(long appId, long userId, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var result = await connection.QueryAsync<long>(
-            new CommandDefinition(GetUserAppRoleIdsSql, new { appId, userId }, cancellationToken: ct));
-        return result.ToList();
+        var cached = await _cache.GetOrAddAsync<IReadOnlyList<long>>(QueryContext.TenantId, MetadataCacheGroups.Access, $"approles:{appId}:{userId}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            var result = await connection.QueryAsync<long>(
+                new CommandDefinition(GetUserAppRoleIdsSql, new { appId, userId }, cancellationToken: ct));
+            return result.ToList();
+        });
+        return cached.ToList();
     }
 
     public async Task<IReadOnlyList<string>> GetUserAppRoleNamesAsync(long appId, long userId, CancellationToken ct = default)

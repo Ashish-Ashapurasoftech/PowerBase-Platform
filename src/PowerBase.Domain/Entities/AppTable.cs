@@ -51,4 +51,12 @@ public class AppTable
     public long? DeletedBy { get; set; }
     public byte[] RowVersion { get; set; } = Array.Empty<byte>();
     public List<AppField> Fields { get; set; } = new();
+
+    /// <summary>A copy the caller may change (its Fields list included): the metadata cache hands the same stored table to every request.</summary>
+    public AppTable Clone()
+    {
+        var copy = (AppTable)MemberwiseClone();
+        copy.Fields = new List<AppField>(Fields);
+        return copy;
+    }
 }

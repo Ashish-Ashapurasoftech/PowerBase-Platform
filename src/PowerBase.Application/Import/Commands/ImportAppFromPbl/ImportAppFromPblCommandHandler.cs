@@ -17,12 +17,14 @@ using PowerBase.Application.Import.FormulaTranslation;
 using PowerBase.Application.Import.Mapping;
 using PowerBase.Application.Import.Pbl;
 using PowerBase.Application.Import.Qbl;
+using PowerBase.Application.Import.Reporting;
 using PowerBase.Application.Import.Services;
 using PowerBase.Application.Relationships;
 using PowerBase.Application.Relationships.Commands.CreateRelationship;
 using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Validation;
 using PowerBase.Application.Reports.Commands.CreateReport;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Domain.FieldSettings;
@@ -99,9 +101,12 @@ public class ImportAppFromPblCommandHandler
     private readonly PblSettingsApplier _settingsApplier;
     private readonly PblPermissionsApplier _permissionsApplier;
     private readonly PblConnectedTablesApplier? _connectedTablesApplier;
+    private readonly PendingConnectedTableResolver? _pendingConnectedTableResolver;
     private readonly RelationshipFieldFactory? _reportLinkFactory;
     private readonly PowerBase.Application.FieldReferences.IFieldReferenceIndexer _refIndexer;
     private readonly PblPipelinesImporter? _pipelinesImporter;
+    private readonly PipelineOnlyImportService? _pipelineOnlyImport;
+    private readonly IAuditRepository? _auditRepo;
 
     public ImportAppFromPblCommandHandler(
         PblValidator validator,
@@ -133,9 +138,15 @@ public class ImportAppFromPblCommandHandler
         PblConnectedTablesApplier? connectedTablesApplier = null,
         RelationshipFieldFactory? reportLinkFactory = null,
         PowerBase.Application.FieldReferences.IFieldReferenceIndexer? refIndexer = null,
-        PblPipelinesImporter? pipelinesImporter = null)
+        PblPipelinesImporter? pipelinesImporter = null,
+        PipelineOnlyImportService? pipelineOnlyImport = null,
+        PendingConnectedTableResolver? pendingConnectedTableResolver = null,
+        IAuditRepository? auditRepo = null)
     {
+        _pipelineOnlyImport = pipelineOnlyImport;
+        _auditRepo = auditRepo;
         _connectedTablesApplier = connectedTablesApplier;
+        _pendingConnectedTableResolver = pendingConnectedTableResolver;
         _reportLinkFactory = reportLinkFactory;
         _refIndexer = refIndexer ?? PowerBase.Application.FieldReferences.NullFieldReferenceIndexer.Instance;
         _pipelinesImporter = pipelinesImporter;
@@ -198,18 +209,38 @@ public class ImportAppFromPblCommandHandler
         }
     }
 
+    /// <summary>Retries every connected table left waiting on an application or table that did not exist yet (see
+    /// <see cref="PblConnectedTablesApplier"/>) — this import, or an earlier one, may have just supplied it. Covers the
+    /// whole tenant, not only the app(s) this call imported, so a table added later by any import keeps resolving the
+    /// same way. Never fails the import that triggers it.</summary>
+    private async Task ResolvePendingConnectedTablesAsync(CancellationToken ct)
+    {
+        if (_pendingConnectedTableResolver is null) return;
+        try { await _pendingConnectedTableResolver.ResolveAllAsync(ct); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Best effort: each still-pending row keeps its own reason and will be retried on the next import.
+        }
+    }
+
     /// <summary>Imports a file that holds exactly one application. A QBL file with several goes through <see cref="HandleBatchAsync"/>.</summary>
     public async Task<ImportReport> HandleAsync(ImportAppFromPblCommand command, CancellationToken ct = default)
     {
         RequireCreateMode(command);
         using var importScope = ImportRuntime.Begin();
+        if (_pipelineOnlyImport is not null && QblPipelineOnlyBinder.IsPipelinesOnly(command.PblJson))
+            return (await _pipelineOnlyImport.ImportAsync(command.PblJson, command.Mapping?.ActivatePipelines == true, ct)).Apps[0];
         var apps = ParseUploaded(command.PblJson);
         if (apps.Count > 1)
             throw new BadRequestException("IMPORT_MULTIPLE_APPS", "This file contains several applications; import it with the multi-application import.");
         var single = await ImportOneAsync(apps[0], command.Mapping?.ExcludedTableRefs, null, ct);
         if (_connectedTablesApplier is not null)
-            await _connectedTablesApplier.ApplyAsync([(apps[0].Document, single)], ct); // reports a connected table whose source app is not here
+            await _connectedTablesApplier.ApplyAsync([(apps[0].Document, single)], ct); // resolved against every app the tenant has, this one included
+        await ResolvePendingConnectedTablesAsync(ct);
         await ImportPipelinesAsync(apps, [(apps[0], single)], command.Mapping?.ActivatePipelines == true, ct);
+
+        single.Issues = ImportIssueReportBuilder.BuildFromImportReport(single.AppName, single, apps[0].Document);
+        await LogImportAuditAsync(single, ct);
         return single;
     }
 
@@ -224,6 +255,9 @@ public class ImportAppFromPblCommandHandler
         RequireCreateMode(command);
         using var importScope = ImportRuntime.Begin();
         var mapping = command.Mapping ?? new ImportMapping();
+        // A file of pipelines only (no application): its PowerFlows go into the existing apps whose tables it uses.
+        if (_pipelineOnlyImport is not null && QblPipelineOnlyBinder.IsPipelinesOnly(command.PblJson))
+            return await _pipelineOnlyImport.ImportAsync(command.PblJson, mapping.ActivatePipelines, ct);
         var apps = ParseUploaded(command.PblJson);
 
         foreach (var entry in mapping.Apps)
@@ -284,9 +318,48 @@ public class ImportAppFromPblCommandHandler
                     report.Skipped.Add(new ImportSkippedItem { LogicalRef = "", Name = "Connected tables", Reason = $"Connected tables were not set up ({ex.Message})." });
             }
         }
+        await ResolvePendingConnectedTablesAsync(ct);
 
         await ImportPipelinesAsync(apps, importedApps, command.Mapping?.ActivatePipelines == true, ct);
+
+        // Structured issue report + audit record, built last so they see every skipped item/pipeline note
+        // (connected tables and pipelines are both attached to the report above).
+        foreach (var (document, report) in importedDocuments)
+        {
+            report.Issues = ImportIssueReportBuilder.BuildFromImportReport(report.AppName, report, document);
+            await LogImportAuditAsync(report, ct);
+        }
+
         return batch;
+    }
+
+    /// <summary>Preserves the full technical detail of what the import skipped/flagged — same mechanism
+    /// already used for app/table/field/role changes elsewhere (<see cref="IAuditRepository.LogActivityAsync"/>)
+    /// — so it stays available for support/debugging even though the API response now leads with the
+    /// friendlier <see cref="ImportReport.Issues"/> restatement. Never fails the import itself.</summary>
+    private async Task LogImportAuditAsync(ImportReport report, CancellationToken ct)
+    {
+        if (_auditRepo is null) return;
+        try
+        {
+            var technicalDetail = JsonSerializer.Serialize(new
+            {
+                report.Skipped,
+                report.FormulaTranslations,
+                Pipelines = report.Pipelines.Select(p => new { p.LogicalRef, p.Name, p.Status, p.Issues }),
+            });
+            await _auditRepo.LogActivityAsync(
+                AuditActions.Imported,
+                AuditEntityTypes.App,
+                report.AppPublicId.ToString(),
+                entityTitle: report.AppName,
+                newValues: technicalDetail,
+                ct: ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Best effort — the import already succeeded; losing the audit trail must not undo it.
+        }
     }
 
     /// <summary>The file's Quickbase pipelines, as PowerFlows of the apps just created. Like connected tables they come last — their
@@ -422,6 +495,40 @@ public class ImportAppFromPblCommandHandler
 
     /// <summary>Tells the Fid policy what the source fields are numbered: for every table the highest source id (so fields PowerBase
     /// creates by itself stay above it) and the numbers of the reference, lookup and summary fields the relationship handlers create.</summary>
+    /// <summary>powerflowextraRd: the labels a table's system fields will carry — PowerBase's defaults, each replaced by the
+    /// source's own label when it renamed the built-in field (Quickbase "Last Modified By" → "LastModifiedBy").</summary>
+    private static IEnumerable<string> SystemLabelsOf(PblTable table) =>
+        AppSeeder.SystemFieldLabels.Select(label => table.SystemFieldLabels?.GetValueOrDefault(label) ?? label);
+
+    /// <summary>powerflowextraRd: gives the seeded system fields (Record ID#, Date Created, …, Last Modified By) the labels
+    /// the source app uses for them. Runs before formula fields are created, so a formula that carries the default label
+    /// (Quickbase's FID 112 "Last Modified By") keeps it, and a PowerFlow reading that field shows the same label as in
+    /// Quickbase. Only the label changes; the field's Name, FID and settings stay as seeded.</summary>
+    private async Task ApplySystemFieldLabelsAsync(PblDocument document, Guid appPublicId, CancellationToken ct)
+    {
+        var renamed = (document.Tables ?? []).Where(t => t.SystemFieldLabels is { Count: > 0 }).ToList();
+        if (renamed.Count == 0) return;
+
+        var appId = await _appRepo.GetIdByPublicIdAsync(appPublicId, ct);
+        var tableByName = (await _tableRepo.ListByAppAsync(appId, ct)).ToDictionary(t => t.Name, StringComparer.OrdinalIgnoreCase);
+        foreach (var source in renamed)
+        {
+            if (!tableByName.TryGetValue(source.Name, out var table)) continue;
+            var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
+            foreach (var (defaultLabel, label) in source.SystemFieldLabels!)
+            {
+                var field = fields.FirstOrDefault(f => f.IsSystem && string.Equals((f.Label ?? "").Trim(), defaultLabel, StringComparison.OrdinalIgnoreCase));
+                // Never take a label another field of the table already holds.
+                if (field is null || fields.Any(f => f.Id != field.Id && string.Equals((f.Label ?? "").Trim(), label, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+                await _fieldRepo.UpdateAsync(field.PublicId, table.Id, label, field.Description, field.IsRequired, field.DefaultValue,
+                    field.IsSearchable, field.IsSortable, field.IsFilterable, field.IsReportable, field.IsAuditable, field.IsUnique,
+                    field.IsEncrypted, field.IsAutoFill, field.Settings, ct);
+                field.Label = label;
+            }
+        }
+    }
+
     private async Task RegisterSourceFidsAsync(PblDocument document, Guid appPublicId, CancellationToken ct)
     {
         var plan = ImportRuntime.Fids;
@@ -520,7 +627,9 @@ public class ImportAppFromPblCommandHandler
 
             // Labels must be unique per table, and PowerBase's own system fields (Record ID#, Date Created, …) already
             // hold theirs. A source field that reuses one of those labels, or repeats another field's, gets a numbered label.
-            var usedLabels = new HashSet<string>(AppSeeder.SystemFieldLabels, StringComparer.OrdinalIgnoreCase);
+            // powerflowextraRd: the system fields hold the source's labels for them (applied after the app is created, see
+            // ApplySystemFieldLabelsAsync), so those — not PowerBase's defaults — are the labels already taken.
+            var usedLabels = new HashSet<string>(SystemLabelsOf(table), StringComparer.OrdinalIgnoreCase);
 
             foreach (var field in table.Fields ?? [])
             {
@@ -603,6 +712,7 @@ public class ImportAppFromPblCommandHandler
         try
         {
             await RegisterSourceFidsAsync(document, createResult.PublicId, ct);
+            await ApplySystemFieldLabelsAsync(document, createResult.PublicId, ct); // powerflowextraRd
             await _settingsApplier.ApplyAppSettingsAsync(document.App, createResult.PublicId, skipped, ct);
             await _settingsApplier.ApplyTableKeysAsync(document, createResult.PublicId, skipped, ct);
             ImportProgress.Report("Creating roles, relationships and formulas", 30);
