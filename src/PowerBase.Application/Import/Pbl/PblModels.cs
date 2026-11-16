@@ -311,6 +311,39 @@ public sealed class PblField
     public bool? IsAuditable { get; set; }
     public bool? IsSearchable { get; set; }
     public bool? IsReportable { get; set; }
+
+    /// <summary>The source field's type as the source wrote it (e.g. "QB::Field::Currency::Formula"). Informational only —
+    /// kept so an import note and a stand-in field can say what the field was.</summary>
+    public string? SourceType { get; set; }
+
+    /// <summary>Formula fields: the formula exactly as the source had it, before any rewriting (table-id and field-id
+    /// substitutions, dialect fixes). <see cref="FormulaExpression"/> is what gets compiled; this is what is preserved.</summary>
+    public string? OriginalFormula { get; set; }
+
+    /// <summary>Set when this field is a stand-in for a source field that PowerBase cannot create as itself (unsupported type,
+    /// a relationship that does not exist, a link with nothing to open…). <see cref="TypeCode"/> is then the plain type chosen
+    /// to hold its place; everything else the source said is in here.</summary>
+    public PblPlaceholderInfo? Placeholder { get; set; }
+}
+
+/// <summary>What a stand-in field stands in for — see <see cref="PblField.Placeholder"/>. Never a source of truth for the
+/// field's own behaviour: it is carried to the field's import note unchanged.</summary>
+public sealed class PblPlaceholderInfo
+{
+    /// <summary>The importer's stable code, e.g. "QBL_UNSUPPORTED_FIELD_TYPE".</summary>
+    public string Code { get; set; } = string.Empty;
+
+    /// <summary>Why the source field could not be created as itself, in plain words.</summary>
+    public string Reason { get; set; } = string.Empty;
+
+    /// <summary>The complete original definition (formula text, or a plain-words description of a lookup/summary/link).</summary>
+    public string? OriginalDefinition { get; set; }
+
+    /// <summary>The source field's properties as JSON.</summary>
+    public string? OriginalMetadataJson { get; set; }
+
+    /// <summary>Longer than a field description may be: the full source description, kept so nothing is cut.</summary>
+    public string? FullDescription { get; set; }
 }
 
 public sealed class PblReport

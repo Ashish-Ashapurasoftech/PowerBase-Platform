@@ -13,6 +13,10 @@ public sealed record SanitizedFieldProperties(string? Settings, string? DefaultV
 /// </summary>
 public class ImportFieldSanitizer
 {
+    /// <summary>What a field label / description may hold (CreateFieldCommandValidator).</summary>
+    public const int LABEL_MAX = 200;
+    public const int DESCRIPTION_MAX = 500;
+
     private readonly FieldSettingsValidatorRegistry _settingsRegistry;
 
     public ImportFieldSanitizer(FieldSettingsValidatorRegistry settingsRegistry)

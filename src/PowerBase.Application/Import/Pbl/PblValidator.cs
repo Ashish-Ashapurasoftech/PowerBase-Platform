@@ -128,6 +128,26 @@ public class PblValidator
             fieldNamesByTableRef[table.LogicalRef] = tableFieldNames;
         }
 
+        // Report links are computed fields a report can show as a column, so their names and labels are valid column names. They are kept
+        // apart from the field names above: a report link may share its label with another field (Quickbase allows it), and that must not
+        // read as a duplicate field name.
+        var reportLinkNamesByTableRef = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        void AddReportLinkName(string tableRef, string? name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return;
+            if (!reportLinkNamesByTableRef.TryGetValue(tableRef, out var set))
+                reportLinkNamesByTableRef[tableRef] = set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            set.Add(name);
+        }
+        foreach (var table in document.Tables)
+            foreach (var link in table.ReportLinks ?? [])
+            {
+                AddReportLinkName(table.LogicalRef, link.Name);
+                AddReportLinkName(table.LogicalRef, link.Label);
+            }
+        foreach (var rel in document.Relationships ?? [])
+            AddReportLinkName(rel.ParentTableRef, rel.ReportLink?.Label);
+
         // A relationship's Lookup/Summary can reference a field created by a *different*
         // relationship (a chained lookup/summary - confirmed real Quickbase pattern, e.g. a
         // Summary counting through a Reference field that is itself another relationship's
@@ -155,7 +175,11 @@ public class PblValidator
         ValidateRelationships(document.Relationships ?? [], tableRefs, fieldNamesByTableRef, fullFieldNamesByTableRef, issues, seenRefs);
 
         foreach (var table in document.Tables)
-            ValidateReports(table, fieldNamesByTableRef.GetValueOrDefault(table.LogicalRef, []), issues, seenRefs);
+        {
+            var reportColumnNames = new HashSet<string>(fieldNamesByTableRef.GetValueOrDefault(table.LogicalRef, []), StringComparer.OrdinalIgnoreCase);
+            if (reportLinkNamesByTableRef.TryGetValue(table.LogicalRef, out var linkNames)) reportColumnNames.UnionWith(linkNames);
+            ValidateReports(table, reportColumnNames, issues, seenRefs);
+        }
 
         foreach (var form in document.Forms ?? [])
             ValidateForm(form, tableRefs, fieldNamesByTableRef, issues, seenRefs);
@@ -328,7 +352,7 @@ public class PblValidator
             {
                 issues.Add(Warning(
                     "UNSUPPORTED_FIELD_TYPE",
-                    $"Field type '{field.TypeCode}' is not supported by this import phase and will be skipped.",
+                    $"Field type '{field.TypeCode}' is not supported by this import phase; a placeholder Text field will be created in its place.",
                     field.LogicalRef));
             }
         }
