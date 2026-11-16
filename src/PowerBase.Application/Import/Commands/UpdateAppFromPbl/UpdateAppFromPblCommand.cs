@@ -1,5 +1,6 @@
 using PowerBase.Application.Import.Commands.ImportAppFromPbl;
 using PowerBase.Application.Import.Mapping;
+using PowerBase.Application.Import.Reporting;
 
 namespace PowerBase.Application.Import.Commands.UpdateAppFromPbl;
 
@@ -51,4 +52,8 @@ public sealed class ImportUpdateReport
 
     /// <summary>The PowerFlows the update created or overwrote, with what needs review in each.</summary>
     public List<PipelineImportReportItem> Pipelines { get; init; } = [];
+
+    /// <summary><see cref="Skipped"/>/<see cref="FormulaTranslations"/>/<see cref="Pipelines"/>' issues and
+    /// <see cref="Failures"/>, restated for the UI: grouped by table/field, with severity and a recommended action.</summary>
+    public ImportIssueReport Issues { get; init; } = new();
 }

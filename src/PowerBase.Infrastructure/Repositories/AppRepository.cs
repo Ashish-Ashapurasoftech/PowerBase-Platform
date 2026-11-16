@@ -43,6 +43,13 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         WHERE IsDeleted = 0
         """;
 
+    private const string ListAllSql = $"""
+        SELECT {SelectColumns}
+        FROM meta.App
+        WHERE IsDeleted = 0
+        ORDER BY Name
+        """;
+
     private const string ListByUserSqlTemplate = """
         SELECT DISTINCT a.Id, a.PublicId, a.OwnerId, a.OwnerName, a.Name, a.Description, a.Icon, a.Color,
                a.Status, a.IsEncrypted, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
@@ -252,6 +259,13 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<int>(
             new CommandDefinition(CountSql, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyList<App>> ListAllAsync(CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var results = await connection.QueryAsync<App>(new CommandDefinition(ListAllSql, cancellationToken: ct));
+        return results.AsList();
     }
 
     public async Task<bool> NameExistsAsync(string name, CancellationToken ct = default)
