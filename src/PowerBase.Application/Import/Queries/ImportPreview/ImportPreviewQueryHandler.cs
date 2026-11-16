@@ -13,14 +13,21 @@ public class ImportPreviewQueryHandler
     private readonly PblValidator _validator;
     private readonly IAppRepository _appRepo;
 
-    public ImportPreviewQueryHandler(PblValidator validator, IAppRepository appRepo)
+    private readonly PowerBase.Application.Import.Services.PipelineOnlyImportService? _pipelineOnly;
+
+    public ImportPreviewQueryHandler(PblValidator validator, IAppRepository appRepo,
+        PowerBase.Application.Import.Services.PipelineOnlyImportService? pipelineOnly = null)
     {
+        _pipelineOnly = pipelineOnly;
         _validator = validator;
         _appRepo = appRepo;
     }
 
     public async Task<ImportPreviewResult> HandleAsync(ImportPreviewQuery query, CancellationToken ct = default)
     {
+        if (_pipelineOnly is not null && query.Mode == ImportMode.CreateNewApp && QblPipelineOnlyBinder.IsPipelinesOnly(query.PblJson))
+            return await PipelinesOnlyAsync(query.PblJson, ct);
+
         IReadOnlyList<ParsedApp> parsed;
         try
         {
@@ -161,6 +168,43 @@ public class ImportPreviewQueryHandler
             ElementRef = i.StepId,
         }).ToList(),
     };
+
+    /// <summary>A file of pipelines only: one entry per existing app its pipelines go into.</summary>
+    private async Task<ImportPreviewResult> PipelinesOnlyAsync(string content, CancellationToken ct)
+    {
+        PowerBase.Application.Import.Services.PipelineOnlyImportService.Prepared prepared;
+        try { prepared = await _pipelineOnly!.PrepareAsync(content, ct); }
+        catch (YamlException ex) { return FileError("INVALID_YAML", $"Could not parse QBL document: {ex.Message}"); }
+        if (prepared.Apps.Count == 0)
+            return FileError("PIPELINE_ONLY_NO_APP", PowerBase.Application.Import.Services.PipelineOnlyImportService.NoAppMessage(prepared.Binding));
+
+        var apps = prepared.Apps.Select((app, i) =>
+        {
+            var target = prepared.Binding.Apps.First(a => a.AppRef == app.AppRef).App;
+            var item = new ImportPreviewAppItem
+            {
+                AppRef = app.AppRef,
+                AppName = target.Name,
+                IsValid = true,
+                IsPipelinesOnly = true,
+                TargetAppPublicId = target.PublicId,
+                TableMatches = prepared.Binding.Matches.Where(m => m.AppPublicId == target.PublicId)
+                    .Select(m => $"{m.QbTableId} → {m.TableName}").Distinct().ToList(),
+                Pipelines = (app.Pipelines ?? []).Select(ToPipelineItem).ToList(),
+            };
+            if (i == 0)
+            {
+                item.Warnings.AddRange(prepared.Binding.Notes.Select(n => new PblIssueDto { Code = "PIPELINE_ONLY_NOTE", Message = n }));
+                item.Warnings.AddRange(prepared.Binding.UnmatchedTables.Select(t => new PblIssueDto
+                {
+                    Code = "PIPELINE_ONLY_TABLE_NOT_FOUND",
+                    Message = $"No existing table matches Quickbase table '{t}'; its steps are imported without a table.",
+                }));
+            }
+            return item;
+        }).ToList();
+        return new ImportPreviewResult { IsValid = true, AppCount = apps.Count, Apps = apps };
+    }
 
     private static ImportPreviewResult FileError(string code, string message)
     {
