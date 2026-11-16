@@ -130,6 +130,19 @@ public class RecordsController : ControllerBase
         return Ok(new ApiResponse<RecordResponse>(MapToResponse(result)));
     }
 
+    /// <summary>Get a single record by its numeric Record ID# (the value in the /rid/{n} URL).</summary>
+    [HttpGet("tables/{tableId:guid}/records/by-number/{number:long}")]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<RecordResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetByNumber(Guid tableId, long number, CancellationToken ct)
+    {
+        var id = await _getHandler.ResolveRecordNumberAsync(tableId, number, ct);
+        var result = await _getHandler.HandleAsync(new GetRecordQuery(tableId, id), ct);
+        return Ok(new ApiResponse<RecordResponse>(MapToResponse(result)));
+    }
+
     /// <summary>Update specific fields on an existing record.</summary>
     [HttpPatch("tables/{tableId:guid}/records/{id:guid}")]
     [RequireAppMember(AppAccessResolver.ByTableId)]
