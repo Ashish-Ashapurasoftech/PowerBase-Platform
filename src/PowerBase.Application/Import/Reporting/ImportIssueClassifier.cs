@@ -22,6 +22,19 @@ public static class ImportIssueClassifier
         "QBL_UNSUPPORTED_GAUGE_COUNT",
         "QBL_DEFAULT_COLUMN_UNAVAILABLE",
         "QBL_DEFAULT_DYNAMIC_FILTER_UNAVAILABLE",
+        // A form element / report column / sort that points at a field Quickbase itself no longer has (a dangling reference in the file):
+        // there is nothing to create, so it is recorded for information, not as something PowerBase failed to import.
+        "QBL_FORM_ELEMENT_FIELD_UNAVAILABLE",
+        "QBL_REPORT_FIELD_UNAVAILABLE",
+        // Represented by PowerBase's own field / kept as a note on the field.
+        "QBL_REFERENCE_PROXY_NOT_SEPARATE",
+        "IMPORT_FIELD_TEXT_SHORTENED",
+        "FORMULA_ADJUSTED",
+        // A Quickbase report/chart setting PowerBase has no equivalent for: the report itself was created.
+        "QBL_REPORT_SETTING_NOT_CARRIED",
+        "QBL_REPORT_FORMULA_COLUMN_NOT_CARRIED",
+        "QBL_ROLE_SETTING_NOT_CARRIED",
+        "QBL_ROLE_ORDER_NOT_CARRIED",
     };
 
     public static (ImportIssueSeverity Severity, string? RecommendedAction) Classify(
