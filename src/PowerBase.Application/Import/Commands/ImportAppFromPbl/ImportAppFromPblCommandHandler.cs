@@ -102,6 +102,7 @@ public class ImportAppFromPblCommandHandler
     private readonly RelationshipFieldFactory? _reportLinkFactory;
     private readonly PowerBase.Application.FieldReferences.IFieldReferenceIndexer _refIndexer;
     private readonly PblPipelinesImporter? _pipelinesImporter;
+    private readonly PipelineOnlyImportService? _pipelineOnlyImport;
 
     public ImportAppFromPblCommandHandler(
         PblValidator validator,
@@ -133,8 +134,10 @@ public class ImportAppFromPblCommandHandler
         PblConnectedTablesApplier? connectedTablesApplier = null,
         RelationshipFieldFactory? reportLinkFactory = null,
         PowerBase.Application.FieldReferences.IFieldReferenceIndexer? refIndexer = null,
-        PblPipelinesImporter? pipelinesImporter = null)
+        PblPipelinesImporter? pipelinesImporter = null,
+        PipelineOnlyImportService? pipelineOnlyImport = null)
     {
+        _pipelineOnlyImport = pipelineOnlyImport;
         _connectedTablesApplier = connectedTablesApplier;
         _reportLinkFactory = reportLinkFactory;
         _refIndexer = refIndexer ?? PowerBase.Application.FieldReferences.NullFieldReferenceIndexer.Instance;
@@ -203,6 +206,8 @@ public class ImportAppFromPblCommandHandler
     {
         RequireCreateMode(command);
         using var importScope = ImportRuntime.Begin();
+        if (_pipelineOnlyImport is not null && QblPipelineOnlyBinder.IsPipelinesOnly(command.PblJson))
+            return (await _pipelineOnlyImport.ImportAsync(command.PblJson, command.Mapping?.ActivatePipelines == true, ct)).Apps[0];
         var apps = ParseUploaded(command.PblJson);
         if (apps.Count > 1)
             throw new BadRequestException("IMPORT_MULTIPLE_APPS", "This file contains several applications; import it with the multi-application import.");
@@ -224,6 +229,9 @@ public class ImportAppFromPblCommandHandler
         RequireCreateMode(command);
         using var importScope = ImportRuntime.Begin();
         var mapping = command.Mapping ?? new ImportMapping();
+        // A file of pipelines only (no application): its PowerFlows go into the existing apps whose tables it uses.
+        if (_pipelineOnlyImport is not null && QblPipelineOnlyBinder.IsPipelinesOnly(command.PblJson))
+            return await _pipelineOnlyImport.ImportAsync(command.PblJson, mapping.ActivatePipelines, ct);
         var apps = ParseUploaded(command.PblJson);
 
         foreach (var entry in mapping.Apps)

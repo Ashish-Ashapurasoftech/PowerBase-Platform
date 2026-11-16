@@ -41,6 +41,9 @@ public static class QblPipelineConverter
     /// <summary>The user details a token can read after a user field (<c>{{aa.owner.email}}</c>).</summary>
     private static readonly HashSet<string> UserDetails = new(StringComparer.Ordinal) { "id", "name", "first_name", "last_name", "email", "screen_name" };
 
+    /// <summary>The parts a token can read after a file field (<c>{{ad.file_field.file_transfer_handle}}</c>).</summary>
+    private static readonly HashSet<string> FileDetails = new(StringComparer.Ordinal) { "file_transfer_handle", "browser_url", "file_name", "file_size" };
+
     private static readonly HashSet<string> UserFieldTypes = new(StringComparer.Ordinal)
     {
         "QB::Field::User", "QB::Field::User::Formula", "QB::Field::RecordOwner", "QB::Field::LastModifiedBy",
@@ -267,8 +270,16 @@ public static class QblPipelineConverter
         private readonly Dictionary<(string App, string Table, string Field), string> _partKeys = new();
         private readonly HashSet<string> _apps = new(StringComparer.Ordinal);
         private readonly Dictionary<(string App, string Table), QblFieldInfo> _keyFields = new();
+        private readonly Dictionary<string, (string App, string Table)> _tablesByQbId = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, string> _appsByQbId = new(StringComparer.Ordinal);
 
         public IReadOnlyCollection<string> Apps => _apps;
+
+        /// <summary>The table a Quickbase table id stands for. Only a pipeline-only import knows them (QblPipelineOnlyBinder
+        /// writes <c>QbTableIds</c> on the tables it matched); Quickbase application exports carry no table ids.</summary>
+        public (string App, string Table)? TableByQbId(string id) => _tablesByQbId.TryGetValue(id, out var t) ? t : null;
+
+        public string? AppByQbId(string? id) => id is not null && _appsByQbId.TryGetValue(id, out var a) ? a : null;
 
         public static FieldIndex Build(QblDocument qbl)
         {
@@ -276,6 +287,8 @@ public static class QblPipelineConverter
             foreach (var (appRef, appNode) in qbl.Resources.Where(r => r.Value.Type == "QB::Application"))
             {
                 index._apps.Add(appRef);
+                foreach (var qbId in (Scalar(appNode.Properties, "QbAppIds") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    index._appsByQbId.TryAdd(qbId, appRef);
                 foreach (var (tableRef, tableNode) in appNode.ChildMap("Tables"))
                 {
                     var fields = new Dictionary<string, QblFieldInfo>(StringComparer.Ordinal);
@@ -296,6 +309,8 @@ public static class QblPipelineConverter
                                 }
                     }
                     index._fields[(appRef, tableRef)] = fields;
+                    foreach (var qbId in (Scalar(tableNode.Properties, "QbTableIds") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                        index._tablesByQbId.TryAdd(qbId, (appRef, tableRef));
                     index._addressOwner[(appRef, tableRef)] = owners;
                     // Set Key: the field Quickbase looks a record of this table up by (Record ID# when there is none).
                     if (tableNode.PropertyRef("KeyField")?["Field"] is { } keyRef && fields.TryGetValue(keyRef, out var keyField))
@@ -1106,6 +1121,12 @@ public static class QblPipelineConverter
                     parts = [prefix, Value(field), $".{keys[1]}}}}}"];
                     return null;
                 }
+                // A file field's File transfer handle, Browser url, File name or File size: {{steps.ref.fid_N.file_name}}.
+                if (keys.Length == 2 && field.Type == "QB::Field::FileAttachment" && FileDetails.Contains(keys[1]))
+                {
+                    parts = [prefix, Value(field), $".{keys[1]}}}}}"];
+                    return null;
+                }
                 return $"'{string.Join('.', keys)}' of step '{target.Name}' ({target.Label}) has no PowerFlows equivalent";
             }
 
@@ -1741,7 +1762,7 @@ public static class QblPipelineConverter
             {
                 if (source.Channel == "http")
                     HttpRequest();
-                else if (source.Channel == "webhooks")
+                else if (source.Channel == "webhooks" && !CallsMappableQuickbaseApi())
                     WebhookRequest();
                 else
                     PowerBaseRequest();
@@ -1864,9 +1885,11 @@ public static class QblPipelineConverter
                 var url = Setting("Url")?.ToString();
                 if (url is not null && Uri.TryCreate(url, UriKind.Absolute, out var absolute) && absolute.Host.EndsWith("quickbase.com", StringComparison.OrdinalIgnoreCase))
                 {
+                    if (MapQuickbaseApi(absolute, out var reason))
+                        return;
                     // Kept as in the file so nothing is lost; the PowerBase account rejects other hosts at run time, so it never calls Quickbase.
                     Config["url"] = Text(url, "URL");
-                    Incomplete("PIPELINE_REQUEST_URL_QUICKBASE", $"The request URL '{url}' calls the Quickbase API, which PowerBase's API does not mirror; it was kept as is. Change it to the PowerBase endpoint (for example /tables/TABLE_PUBLIC_ID/records) before turning the PowerFlow on.");
+                    Incomplete("PIPELINE_REQUEST_URL_QUICKBASE", $"The request URL '{url}' calls the Quickbase API and was kept as is: {reason}. Change it to the PowerBase endpoint (for example /tables/TABLE_PUBLIC_ID/records) before turning the PowerFlow on.");
                 }
                 else if (url is not null)
                     Config["url"] = Text(url, "URL");
@@ -1875,6 +1898,64 @@ public static class QblPipelineConverter
                     Config["url"] = string.Empty;
                     Incomplete("PIPELINE_INPUT_MISSING", "The request URL is not in the file; set it before turning the PowerFlow on.");
                 }
+            }
+
+            /// <summary>A Webhooks-channel Make Request whose URL is a Quickbase API call PowerBase has an endpoint for: it becomes a
+            /// PowerBase-account request instead of an HTTP one.</summary>
+            private bool CallsMappableQuickbaseApi()
+            {
+                var url = Setting("Url")?.ToString()?.Trim();
+                if (url is null || !Uri.TryCreate(url, UriKind.Absolute, out var absolute) || !QuickbaseApiUrlMap.IsQuickbaseApi(absolute))
+                    return false;
+                var method = Setting("Method")?.ToString() ?? "GET";
+                var body = Setting("Body")?.ToString();
+                return QuickbaseApiUrlMap.Map(method, absolute, body, out _) is { } mapped && Resolve(mapped) is not null;
+            }
+
+            private List<object>? Resolve(QuickbaseApiUrlMap.Mapped mapped)
+            {
+                var parts = new List<object>();
+                foreach (var part in mapped.Path)
+                    switch (part)
+                    {
+                        case QuickbaseApiUrlMap.Literal literal: parts.Add(literal.Text); break;
+                        case QuickbaseApiUrlMap.TableId table when reader.Index.TableByQbId(table.QbTableId) is { } found:
+                            parts.Add(new PblPipelineTableValue(found.App, found.Table)); break;
+                        case QuickbaseApiUrlMap.AppId app when (reader.Index.AppByQbId(app.QbAppId) ?? (reader.Index.Apps.Count == 1 ? reader.Index.Apps.First() : null)) is { } appRef:
+                            parts.Add(new PblPipelineAppValue(appRef)); break;
+                        default: return null;
+                    }
+                return parts;
+            }
+
+            /// <summary>Quickbase API URL -> the PowerBase endpoint that does the same (relative path, run inside PowerBase by the
+            /// PowerBase account). Quickbase's own auth headers are dropped: the PowerBase account authenticates the call.</summary>
+            private bool MapQuickbaseApi(Uri absolute, out string reason)
+            {
+                var mapped = QuickbaseApiUrlMap.Map(Config["method"]?.ToString() ?? "GET", absolute, Setting("Body")?.ToString(), out reason);
+                if (mapped is null)
+                    return false;
+                if (Resolve(mapped) is not { } parts)
+                {
+                    reason = "the Quickbase table or app id it uses is not one of the imported tables";
+                    return false;
+                }
+                Config["url"] = new PblPipelineTextValue(parts);
+                var originalMethod = Config["method"]?.ToString();
+                Config["method"] = mapped.Method;
+                if (Config["headersList"] is List<object?> headers)
+                {
+                    var kept = headers.OfType<Dictionary<string, object?>>()
+                        .Where(h => h.GetValueOrDefault("name")?.ToString() is not { } n || !(n.Equals("Authorization", StringComparison.OrdinalIgnoreCase)
+                            || n.Equals("QB-Realm-Hostname", StringComparison.OrdinalIgnoreCase) || n.Equals("User-Agent", StringComparison.OrdinalIgnoreCase)))
+                        .Cast<object?>().ToList();
+                    Config["headersList"] = kept.Count > 0 ? kept : new List<object?> { new Dictionary<string, object?>(StringComparer.Ordinal) { ["name"] = "", ["value"] = "" } };
+                }
+                reader.Note(source, "PIPELINE_REQUEST_URL_MAPPED",
+                    $"The Quickbase API call '{originalMethod} {absolute}' was changed to the PowerBase endpoint '{mapped.Endpoint}'.", changesExecution: false);
+                if (mapped.BodyDiffers)
+                    Incomplete("PIPELINE_REQUEST_BODY_FORMAT", $"The request now calls PowerBase '{mapped.Endpoint}', whose request and response format differ from Quickbase's; check the body and the steps that read the response before turning the PowerFlow on.");
+                return true;
             }
 
             /// <summary>Quickbase "Incoming Request" → PowerFlows' webhook trigger. PowerFlows gives it a new URL.</summary>

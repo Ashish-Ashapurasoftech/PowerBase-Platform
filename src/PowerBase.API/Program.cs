@@ -200,6 +200,7 @@ builder.Services.AddSwaggerGen(c =>
 builder.Services.AddMemoryCache();
 builder.Services.Configure<PowerBase.Application.Common.Configurations.MetadataCacheOptions>(builder.Configuration.GetSection(PowerBase.Application.Common.Configurations.MetadataCacheOptions.SectionName));
 builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.IMetadataCache, PowerBase.Infrastructure.Services.MetadataCache>();
+builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.IRequestOriginRegistry, PowerBase.Infrastructure.Services.RequestOriginRegistry>();
 builder.Services.Configure<PowerBase.API.Middleware.ServerTimingOptions>(builder.Configuration.GetSection(PowerBase.API.Middleware.ServerTimingOptions.SectionName));
 builder.Services.AddScoped<PowerBase.Infrastructure.Services.ServerTiming>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IServerTiming>(sp => sp.GetRequiredService<PowerBase.Infrastructure.Services.ServerTiming>());
@@ -570,6 +571,7 @@ builder.Services.AddScoped<PowerBase.Application.Import.Services.PblSettingsAppl
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblPermissionsApplier>();
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblConnectedTablesApplier>();
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblPipelinesImporter>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PipelineOnlyImportService>();
 builder.Services.AddScoped<PowerBase.Application.Import.Diff.ImportDiffBuilder>();
 builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportDiff.ImportDiffQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Import.Commands.UpdateAppFromPbl.UpdateAppFromPblCommandHandler>();
@@ -805,6 +807,7 @@ app.UseStaticFiles(new StaticFileOptions
 
 app.UseMiddleware<QueryContextMiddleware>();
 app.UseMiddleware<JwtMiddleware>();
+app.UseMiddleware<PowerBase.API.Middleware.RequestOriginMiddleware>();
 app.MapControllers();
 // Liveness of the search pipeline (workers, outbox backlog, search service): counts and times only, no record data. Point an uptime probe
 // or Azure Monitor availability test at it.

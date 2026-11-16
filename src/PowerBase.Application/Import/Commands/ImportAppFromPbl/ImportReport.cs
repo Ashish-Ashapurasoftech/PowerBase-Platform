@@ -34,7 +34,7 @@ public sealed class ImportBatchReport
 {
     public List<ImportReport> Apps { get; init; } = [];
     public List<ImportAppFailure> Failed { get; init; } = [];
-    public int AppsCreated => Apps.Count;
+    public int AppsCreated => Apps.Count(a => !a.IntoExistingApp);
     public int TablesCreated => Apps.Sum(a => a.TablesCreated);
     public int FieldsCreated => Apps.Sum(a => a.FieldsCreated);
     public int ReportsCreated => Apps.Sum(a => a.ReportsCreated);
@@ -85,6 +85,8 @@ public sealed class ImportReport
 {
     public Guid AppPublicId { get; init; }
     public string AppName { get; init; } = string.Empty;
+    /// <summary>True when the file held only pipelines and they were added to this existing app (nothing else was created).</summary>
+    public bool IntoExistingApp { get; init; }
     public int TablesCreated { get; init; }
     public int FieldsCreated { get; init; }
     public int ReportsCreated { get; init; }
