@@ -225,6 +225,37 @@ public class ReferenceFilterResolverTests
     }
 
     [Fact]
+    public void EqualityPairs_TakesEqualsComparisonsToFormFields_InAndGroups_PlusDirectLegacyConditions()
+    {
+        var tree = new FilterGroup
+        {
+            Logic = "and",
+            Nodes =
+            [
+                new() { Condition = FromForm(7, "eq", 12) },
+                new() { Condition = FromForm(6, "contains", 13) },                       // not an equals: can't fill
+                new() { Condition = Literal(6, "eq", "x") },                              // a literal, not a form field
+                new() { Group = new FilterGroup { Logic = "and", Nodes = [new() { Condition = FromForm(6, "eq", 14) }] } },
+                new() { Group = new FilterGroup { Logic = "or", Nodes = [new() { Condition = FromForm(7, "eq", 15) }, new() { Condition = FromForm(6, "eq", 16) }] } },
+            ],
+        };
+        var settings = Tree(tree);
+        settings.FilterConditions = [new() { FormFid = 30, ParentFid = 7 }, new() { FormFid = 31, JunctionTableId = 99, JunctionParentFid = 6, JunctionValueFid = 7 }];
+
+        ReferenceFilterResolver.EqualityPairs(settings).Should().BeEquivalentTo(new[] { (7, 30), (7, 12), (6, 14) });
+    }
+
+    [Fact]
+    public void EqualityPairs_NoneWhileTheFilterIsSwitchedOff()
+    {
+        var settings = Tree(And(FromForm(7, "eq", 12)));
+        settings.FilterDisabled = true;
+
+        ReferenceFilterResolver.EqualityPairs(settings).Should().BeEmpty();
+        ReferenceFilterResolver.EqualityPairs(null).Should().BeEmpty();
+    }
+
+    [Fact]
     public void ControllingFids_CombinesLegacyConditionsAndTreeFormComparisons()
     {
         var settings = Tree(And(FromForm(7, "eq", 12), Literal(6, "eq", "x")));
@@ -243,6 +274,70 @@ public class ReferenceFilterResolverTests
         ReferenceFilterResolver.HasFilter(Tree(new FilterGroup())).Should().BeFalse();
         ReferenceFilterResolver.HasFilter(new ReferenceSettings { FilterTree = "{not json" }).Should().BeFalse();
         ReferenceFilterResolver.HasFilter(null).Should().BeFalse();
+    }
+
+    // ── Switched off / show all while blank ──────────────────────────────────
+
+    [Fact]
+    public async Task FilterDisabled_YieldsNoClauses_AndHasFilterIsFalse()
+    {
+        var settings = Tree(And(Literal(6, "eq", "Active"), FromForm(7, "eq", 12)));
+        settings.FilterConditions = [new() { FormFid = 12, ParentFid = 7 }];
+        settings.FilterDisabled = true;
+
+        (await Build(settings, new() { [12] = "" })).Should().BeEmpty();
+        ReferenceFilterResolver.HasFilter(settings).Should().BeFalse();
+        ReferenceFilterResolver.ControllingFids(settings).Should().Equal(12);   // kept for the delete guard
+    }
+
+    [Fact]
+    public async Task ShowAllWhenBlank_Tree_DropsTheBlankComparison_KeepsTheRest()
+    {
+        var settings = Tree(And(Literal(6, "eq", "Active"), FromForm(7, "eq", 12)));
+        settings.ShowAllWhenBlank = true;
+
+        var clauses = await Build(settings, new() { [12] = "  " });
+
+        clauses.Should().ContainSingle().Subject.Tree!.Nodes.Should().ContainSingle()
+            .Which.Condition!.Value.Should().Be("Active");
+    }
+
+    [Fact]
+    public async Task ShowAllWhenBlank_OnlyAComparison_YieldsNoClause()
+    {
+        var settings = Tree(And(FromForm(7, "eq", 12)));
+        settings.ShowAllWhenBlank = true;
+
+        (await Build(settings, new() { [12] = null })).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ShowAllWhenBlank_StillFiltersOnceAValueIsChosen()
+    {
+        var settings = Tree(And(FromForm(7, "eq", 12)));
+        settings.ShowAllWhenBlank = true;
+
+        (await Build(settings, new() { [12] = "4" })).Should().ContainSingle()
+            .Subject.Tree!.Nodes[0].Condition!.Value.Should().Be("4");
+    }
+
+    [Fact]
+    public async Task ShowAllWhenBlank_StillMatchesNothingForAValueTheColumnCannotHold()
+    {
+        var settings = Tree(And(FromForm(7, "eq", 12)));   // Type (fid 7) is Number
+        settings.ShowAllWhenBlank = true;
+
+        var cond = (await Build(settings, new() { [12] = "abc" })).Should().ContainSingle().Subject.Tree!.Nodes[0].Condition!;
+        (cond.FieldId, cond.Value).Should().Be((3L, "-1"));
+    }
+
+    [Fact]
+    public async Task ShowAllWhenBlank_LegacyCondition_IsLeftOutWhileBlank()
+    {
+        var settings = new ReferenceSettings { FilterConditions = [new() { FormFid = 12, ParentFid = 7 }], ShowAllWhenBlank = true };
+
+        (await Build(settings, new() { [12] = "" })).Should().BeEmpty();
+        (await Build(settings, new() { [12] = "5" })).Should().ContainSingle().Which.Value.Should().Be("5");
     }
 
     [Fact]
