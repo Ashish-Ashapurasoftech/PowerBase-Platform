@@ -11,6 +11,96 @@ namespace PowerBase.API.QuickbaseApi.Common;
 /// </summary>
 public static class QbWhereParser
 {
+    /// <param name="isTimestamp">Which fids are Date / Time fields: a date or wall-clock value on them is read the way
+    /// Quickbase reads it — a plain date means that whole day, both in the app's time zone (<paramref name="zone"/>).</param>
+    /// <param name="typeOf">Quickbase field type per fid (timestamp / multitext / phone get Quickbase's own comparison rules).</param>
+    public static FilterGroup Parse(string where, ISet<int> knownFids, Func<long, string?>? typeOf, TimeZoneInfo? zone)
+    {
+        var tree = Parse(where, knownFids);
+        if (typeOf is null) return tree;
+        ZoneTimestamps(tree, fid => typeOf(fid) == "timestamp", zone ?? TimeZoneInfo.Utc);
+        TypedValues(tree, typeOf);
+        return tree;
+    }
+
+    /// <summary>Only the digits of a phone number: Quickbase compares phone values digit by digit ("(555) 010-0" = "555-0100").</summary>
+    public static string PhoneDigits(string? value) => new((value ?? "").Where(char.IsDigit).ToArray());
+
+    /// <summary>
+    /// Multi-select text (live realm): a ';' list is a set — EX / XEX compare the whole set in any order, HAS needs every listed
+    /// choice, XHAS holds unless all are there. Phone: both sides compared by their digits (the stored side is read that way
+    /// in memory, see <see cref="V1.Services.QbRecordService"/>).
+    /// </summary>
+    public static void TypedValues(FilterGroup group, Func<long, string?> typeOf)
+    {
+        foreach (var node in group.Nodes)
+        {
+            if (node.Group is { } g) { TypedValues(g, typeOf); continue; }
+            if (node.Condition is not { } c || c.ValueFieldId is not null || !string.IsNullOrEmpty(c.SubField) || c.Value is null) continue;
+            var type = typeOf(c.FieldId);
+            if (type == "phone" && c.Operator is "eq" or "ne" or "contains" or "notContains" or "startsWith" or "notStartsWith" or "endsWith" or "notEndsWith")
+                c.Value = PhoneDigits(c.Value);
+            else if (type == "multitext" && c.Value.Contains(';'))
+            {
+                var parts = c.Value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                if (c.Operator is "eq" or "ne") c.Value = string.Join(",", parts);
+                else if (c.Operator is "includes" or "notIncludes" && parts.Length > 1)
+                {
+                    var all = new FilterGroup { Logic = c.Operator == "includes" ? "AND" : "OR" };
+                    foreach (var part in parts)
+                        all.Nodes.Add(new FilterNode { Condition = new FilterCondition { FieldId = c.FieldId, Operator = c.Operator, Value = part } });
+                    node.Condition = null;
+                    node.Group = all;
+                }
+            }
+        }
+    }
+
+    private static readonly string[] DAY_FORMATS = { "MM-dd-yyyy", "M-d-yyyy", "MM/dd/yyyy", "M/d/yyyy", "yyyy-MM-dd" };
+
+    /// <summary>
+    /// On a Date / Time field (live realm, app in Eastern time): {f.EX.'03-15-2026'} is that day, AF is after it, OBF is up to its
+    /// end, BF / OAF start at its beginning — the day running midnight to midnight in the app's zone (a value with a
+    /// time of day is UTC). Rewritten to UTC instants so the shared SQL filter compares them as moments.
+    /// </summary>
+    public static void ZoneTimestamps(FilterGroup group, Func<long, bool> isTimestamp, TimeZoneInfo zone)
+    {
+        foreach (var node in group.Nodes)
+        {
+            if (node.Group is { } g) { ZoneTimestamps(g, isTimestamp, zone); continue; }
+            if (node.Condition is not { } c || !isTimestamp(c.FieldId) || c.ValueFieldId is not null || !string.IsNullOrEmpty(c.SubField)
+                || c.Value is not { Length: > 0 } value || c.Operator is not ("eq" or "ne" or "gt" or "gte" or "lt" or "lte")) continue;
+            var text = value.Trim().Trim('\'');
+            if (System.DateTime.TryParseExact(text, DAY_FORMATS, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out var day))
+            {
+                var start = Utc(day.Date, zone);
+                var end = Utc(day.Date.AddDays(1), zone);
+                FilterCondition At(string op, string v) => new() { FieldId = c.FieldId, Operator = op, Value = v };
+                switch (c.Operator)
+                {
+                    case "eq":
+                    case "ne":
+                        var range = new FilterGroup { Logic = c.Operator == "eq" ? "AND" : "OR" };
+                        range.Nodes.Add(new FilterNode { Condition = At(c.Operator == "eq" ? "gte" : "lt", start) });
+                        range.Nodes.Add(new FilterNode { Condition = At(c.Operator == "eq" ? "lt" : "gte", end) });
+                        node.Condition = null;
+                        node.Group = range;
+                        break;
+                    case "gt": c.Operator = "gte"; c.Value = end; break;
+                    case "gte": c.Value = start; break;
+                    case "lt": c.Value = start; break;
+                    default: c.Operator = "lt"; c.Value = end; break;   // lte: up to the end of the day
+                }
+            }
+            // A value with a time of day ('03-15-2026 10:30') is UTC in a query (live realm), unlike in API_AddRecord: left as is.
+        }
+    }
+
+    private static string Utc(System.DateTime wall, TimeZoneInfo zone) =>
+        System.TimeZoneInfo.ConvertTimeToUtc(System.DateTime.SpecifyKind(wall, System.DateTimeKind.Unspecified), zone)
+            .ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+
     public static FilterGroup Parse(string where, ISet<int> knownFids)
     {
         // Relative periods (IR/XIR) are allowed in a Quickbase where; _ask_ prompts are not (no user to ask).
@@ -19,7 +109,35 @@ public static class QbWhereParser
         if (!result.Succeeded)
             throw QbApiException.BadRequest($"Invalid query '{where}': {result.Problem}");
         // Resolve today / yesterday / IR periods to literal dates exactly like report runs do (existing helper, called not changed).
-        return Application.Reports.Queries.RunReport.RunReportQueryHandler.ResolveDateValueModeConditions(Convert(result.Filter!))!;
+        var tree = Application.Reports.Queries.RunReport.RunReportQueryHandler.ResolveDateValueModeConditions(Convert(result.Filter!))!;
+        ModifiedFallsBackToCreated(tree);
+        return tree;
+    }
+
+    /// <summary>
+    /// Date Modified (fid 2) is never empty in Quickbase — a record never changed reads its Date Created. Our column is NULL
+    /// until the first change, so a condition on fid 2 also holds when it is empty and Date Created (fid 1) meets it.
+    /// </summary>
+    public static void ModifiedFallsBackToCreated(FilterGroup group)
+    {
+        foreach (var node in group.Nodes)
+        {
+            if (node.Group is { } g) { ModifiedFallsBackToCreated(g); continue; }
+            if (node.Condition is not { FieldId: QbIds.DATE_MODIFIED_FID } c || !string.IsNullOrEmpty(c.SubField)) continue;
+            if (c.Operator is "isEmpty" or "isNotEmpty") { c.FieldId = QbIds.DATE_CREATED_FID; continue; }
+            var created = new FilterCondition
+            {
+                FieldId = QbIds.DATE_CREATED_FID, Operator = c.Operator, Value = c.Value, ValueMode = c.ValueMode, ValueFieldId = c.ValueFieldId,
+            };
+            var never = new FilterGroup { Logic = "AND" };
+            never.Nodes.Add(new FilterNode { Condition = new FilterCondition { FieldId = QbIds.DATE_MODIFIED_FID, Operator = "isEmpty" } });
+            never.Nodes.Add(new FilterNode { Condition = created });
+            var either = new FilterGroup { Logic = "OR" };
+            either.Nodes.Add(new FilterNode { Condition = c });
+            either.Nodes.Add(new FilterNode { Group = never });
+            node.Condition = null;
+            node.Group = either;
+        }
     }
 
     /// <summary>
@@ -138,7 +256,7 @@ public static class QbWhereParser
             var condition = Convert(c);
             // Quickbase: a blank value "does not contain / start with / equal" anything, so negative operators match blanks.
             // Our SQL filter (NOT LIKE / <>) skips NULLs, so add "OR is empty" here instead of changing the shared filter.
-            if (condition.Value is not null && condition.Operator is "ne" or "notContains" or "notStartsWith" or "notEndsWith")
+            if ((condition.Value is not null || condition.ValueMode is not null) && condition.Operator is "ne" or "notContains" or "notStartsWith" or "notEndsWith" or "notIncludes")
             {
                 var either = new FilterGroup { Logic = "OR" };
                 either.Nodes.Add(new FilterNode { Condition = condition });

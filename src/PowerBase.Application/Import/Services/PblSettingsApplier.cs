@@ -168,7 +168,9 @@ public class PblSettingsApplier
                     Currency = new CurrencyFormatSettings { Symbol = f.CurrencySymbol, Position = f.CurrencyPosition },
                     // App-level numbers always use two decimal places; Standard grouping is the fallback pattern.
                     Number = new NumberFormatSettings { DecimalPlaces = 2, ThousandSeparator = f.ThousandSeparator, DisplayPattern = "Standard" },
-                    Date = new DateFormatSettings { FormatString = f.DateFormat, Separator = "-" },
+                    // The time zone the source named, else whatever the app already has.
+                    Date = new DateFormatSettings { FormatString = f.DateFormat, Separator = "-",
+                        TimeZone = f.TimeZone ?? AppFormattingSettings.GetTimeZone(existing.Formatting) },
                 };
             }
 

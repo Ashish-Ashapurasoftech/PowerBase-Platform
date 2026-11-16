@@ -59,7 +59,7 @@ public sealed class QbXmlRecordActions
         _get = get;
     }
 
-    private sealed record TableContext(AppTable Table, IReadOnlyList<AppField> Fields)
+    private sealed record TableContext(AppTable Table, IReadOnlyList<AppField> Fields, TimeZoneInfo Zone)
     {
         public Guid PublicId => Table.PublicId;
     }
@@ -74,8 +74,19 @@ public sealed class QbXmlRecordActions
         try { table = await _tables.GetByPublicIdAsync(tableId, ct); }
         catch (PowerBase.Domain.Exceptions.NotFoundException) { throw QbXmlErrors.UnknownDbid(); }
         await _access.RequireMembershipByTablePublicIdAsync(tableId, ct);
-        return new TableContext(table, await _fields.ListByTableAsync(table.Id, ct));
+        return new TableContext(table, await _fields.ListByTableAsync(table.Id, ct), await ZoneAsync(table, ct));
     }
+
+    /// <summary>The app's time zone: wall-clock date-times in XML calls are read in it, as Quickbase does.</summary>
+    private async Task<TimeZoneInfo> ZoneAsync(AppTable table, CancellationToken ct)
+    {
+        // Cached per request: API_ImportFromCSV asks once per row.
+        if (!_zones.TryGetValue(table.AppId, out var zone))
+            _zones[table.AppId] = zone = QbTimeZone.OfApp((await _apps.GetByIdAsync(table.AppId, ct)).Formatting);
+        return zone;
+    }
+
+    private readonly Dictionary<long, TimeZoneInfo> _zones = new();
 
     // ---------------------------------------------------------------- field matching / values
 
@@ -103,7 +114,8 @@ public sealed class QbXmlRecordActions
     }
 
     /// <summary>Converts a Quickbase XML text value ("How to specify values for different field types") into our input value.</summary>
-    private async Task<object?> ConvertAsync(AppField field, string text, CancellationToken ct, bool msDuration = false)
+    private async Task<object?> ConvertAsync(AppField field, string text, CancellationToken ct, bool msDuration = false,
+        TimeZoneInfo? zone = null, bool msInUtc = false)
     {
         var type = QbFieldPropertiesBuilder.TypeOf(field).FieldType;
         if (string.IsNullOrEmpty(text)) return type == "checkbox" ? false : null;
@@ -120,9 +132,13 @@ public sealed class QbXmlRecordActions
             case "checkbox":
                 return text.Trim().ToLowerInvariant() is "1" or "yes" or "true" or "on";
             case "date":
-                return ParseDate(text) is { } d ? d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) : text;
+                // a date has no zone; text Quickbase cannot read is stored as empty (live realm: no error)
+                return ParseDate(text) is { } d ? d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) : null;
             case "timestamp":
-                return ParseDate(text) is { } t ? t.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture) : text;
+                // App time zone on save is turned off for now: date-times are always saved as UTC.
+                // return QbTimeZone.ParseToUtc(text, zone ?? TimeZoneInfo.Utc, msInUtc) is { } t
+                return QbTimeZone.ParseToUtc(text, TimeZoneInfo.Utc, msInUtc: true) is { } t
+                    ? t.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture) : null;
             case "numeric" or "currency" or "percent" or "rating":
                 return decimal.TryParse(text, NumberStyles.Any, CultureInfo.InvariantCulture, out var n) ? n : text;
             case "duration":
@@ -162,10 +178,10 @@ public sealed class QbXmlRecordActions
     }
 
     private Task<(Dictionary<long, object?> Values, List<(AppField Field, QbXmlField Xml)> Files)> BuildValuesAsync(
-        TableContext t, QbXmlRequest req, CancellationToken ct) => BuildValuesAsync(t, req.Fields, req.Flag("ignoreError"), ct, req.Flag("msAsDurationDefault"));
+        TableContext t, QbXmlRequest req, CancellationToken ct) => BuildValuesAsync(t, req.Fields, req.Flag("ignoreError"), ct, req.Flag("msAsDurationDefault"), req.Flag("msInUTC"));
 
     private async Task<(Dictionary<long, object?> Values, List<(AppField Field, QbXmlField Xml)> Files)> BuildValuesAsync(
-        TableContext t, IEnumerable<QbXmlField> xmlFields, bool ignoreBuiltIn, CancellationToken ct, bool msDuration = false)
+        TableContext t, IEnumerable<QbXmlField> xmlFields, bool ignoreBuiltIn, CancellationToken ct, bool msDuration = false, bool msInUtc = false)
     {
         var values = new Dictionary<long, object?>();
         var files = new List<(AppField, QbXmlField)>();
@@ -182,7 +198,7 @@ public sealed class QbXmlRecordActions
                     $"The field named \"{(string.IsNullOrWhiteSpace(field.Label) ? field.Name : field.Label)}\" with field id {fid} cannot be modified");
             }
             if (!string.IsNullOrEmpty(xf.FileName)) { files.Add((field, xf)); continue; }
-            var converted = await ConvertAsync(field, xf.Value, ct, msDuration);
+            var converted = await ConvertAsync(field, xf.Value, ct, msDuration, t.Zone, msInUtc);
             // XML calls keep Quickbase's leniency: a value it cannot read is stored as empty instead of failing the call.
             try { values[fid] = QbRecordService.CheckValue(field, converted, lenient: true); }
             catch (QbApiException e) { throw new QbXmlException(QbXmlErrors.INVALID_INPUT, "Invalid input", e.Description); }
@@ -267,8 +283,7 @@ public sealed class QbXmlRecordActions
     public async Task<(long Rid, long UpdateId, bool IsNew, bool Changed)> ImportRowAsync(AppTable table, IReadOnlyList<AppField> fields, int keyFid,
         string? keyValue, IReadOnlyList<QbXmlField> rowFields, bool msInUtc, CancellationToken ct)
     {
-        _ = msInUtc; // millisecond timestamps are always read as UTC
-        var t = new TableContext(table, fields);
+        var t = new TableContext(table, fields, await ZoneAsync(table, ct));
         (long Rid, Guid PublicId)? existing = null;
         if (!string.IsNullOrWhiteSpace(keyValue))
         {
@@ -279,7 +294,7 @@ public sealed class QbXmlRecordActions
             catch (QbApiException ex) { throw new QbXmlException(QbXmlErrors.NO_SUCH_RECORD, "No such record", ex.Description); }
         }
         var writable = rowFields.Where(f => f.Fid is not (>= 1 and <= 5)).ToList();
-        var (values, files) = await BuildValuesAsync(t, writable, ignoreBuiltIn: true, ct);
+        var (values, files) = await BuildValuesAsync(t, writable, ignoreBuiltIn: true, ct, msInUtc: msInUtc);
         if (existing is { } e)
         {
             var (_, current) = await UpdateIdAsync(table.PublicId, e.PublicId, ct);

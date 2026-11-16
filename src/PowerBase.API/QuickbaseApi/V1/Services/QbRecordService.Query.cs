@@ -20,7 +20,12 @@ public sealed partial class QbRecordService
     /// <summary>Rows read per SQL page on the fast path.</summary>
     public const int QUERY_PAGE_SIZE = 500;
 
-    public async Task<QbRunReportResponse> QueryAsync(QbQueryRequest request, CancellationToken ct)
+    public Task<QbRunReportResponse> QueryAsync(QbQueryRequest request, CancellationToken ct) => QueryAsync(request, ct, null);
+
+    /// <param name="onRecord">Called with each returned record as our record handler read it (XML API_DoQuery needs its
+    /// update_id and raw stored values).</param>
+    public async Task<QbRunReportResponse> QueryAsync(QbQueryRequest request, CancellationToken ct,
+        Action<long, Application.Records.RecordResult>? onRecord)
     {
         if (string.IsNullOrWhiteSpace(request.From)) throw QbApiException.BadRequest("Required key 'from' not found");
         var tableId = await TableOrInvalidRequestAsync(request.From, "from", ct);
@@ -55,7 +60,10 @@ public sealed partial class QbRecordService
             if (!byFid.ContainsKey(s.FieldId) && s.FieldId != QbIds.RECORD_ID_FID) throw QbApiException.BadRequest($"Unknown field with Id \"{s.FieldId}\".");
 
         var knownFids = fields.Where(f => f.Fid.HasValue).Select(f => f.Fid!.Value).ToHashSet();
-        FilterGroup? where = string.IsNullOrWhiteSpace(request.Where) ? null : QbWhereParser.Parse(request.Where, knownFids);
+        var appRow = await _apps.GetByIdAsync(table.AppId, ct);
+        string? QbType(long fid) => byFid.TryGetValue(fid, out var tf) ? QbFieldPropertiesBuilder.TypeOf(tf).FieldType : null;
+        FilterGroup? where = string.IsNullOrWhiteSpace(request.Where) ? null
+            : QbWhereParser.Parse(request.Where, knownFids, QbType, QbTimeZone.OfApp(appRow.Formatting));
         var filter = new FilterGroup { Logic = "AND" };
         if (where is not null) filter.Nodes.Add(new FilterNode { Group = where });
         if (access.ViewFilter is { } vf) filter.Nodes.Add(new FilterNode { Group = vf });
@@ -66,7 +74,10 @@ public sealed partial class QbRecordService
         bool Computed(long fid) => byFid.TryGetValue(fid, out var f) && (PhysicalNaming.IsComputedTypeCode(f.TypeCode));
         bool Encrypted(long fid) => byFid.TryGetValue(fid, out var f) && EncryptedRowFilter.IsEncrypted(f, appEncrypted);
         var filterFids = FilterFids(filterTree).ToList();
+        // A phone condition compares digits only (Quickbase), which SQL cannot do on the stored text: judged in memory.
+        var phoneFids = (where is null ? Enumerable.Empty<long>() : FilterFids(where)).Where(f => QbType(f) == "phone").Distinct().ToList();
         var inMemory = EncryptedRowFilter.TouchesEncrypted(filterTree, fields, appEncrypted)
+                       || phoneFids.Count > 0
                        || filterFids.Any(Computed) || sort.Any(s => Computed(s.FieldId) || Encrypted(s.FieldId));
 
         int total;
@@ -107,6 +118,13 @@ public sealed partial class QbRecordService
                         var record = await _get.HandleAsync(new GetRecordQuery(tableId, RowKey(row).PublicId), ct);
                         foreach (var fid in readFids) values[fid] = record.Fields.GetValueOrDefault(fid.ToString());
                     }
+                    if (phoneFids.Count > 0)
+                    {
+                        var stored = EncryptedRowFilter.ValuesByFid(row, fields);
+                        foreach (var fid in phoneFids)
+                            if (!Computed(fid)) values[fid] = stored.GetValueOrDefault(fid) is { } pv && QbWhereParser.PhoneDigits(pv.ToString()) is { Length: > 0 } d ? d : null;
+                            else if (values.GetValueOrDefault(fid) is { } cv) values[fid] = QbWhereParser.PhoneDigits(cv.ToString());
+                    }
                     computed.Add(values);
                 }
                 var matches = filterTree is null ? null : EncryptedRowFilter.MatchingIds(rows, fields, filterTree, computed).ToHashSet();
@@ -146,7 +164,7 @@ public sealed partial class QbRecordService
         var fids = returned.Select(f => (int)f).ToList();
         var data = new List<IDictionary<string, QbCell>>(page.Count);
         foreach (var (rid, publicId) in page)
-            data.Add(await ReadFieldsAsync(tableId, rid, publicId, fids, byFid, users.GetValueOrDefault(publicId), fileBase, refTypes, ct));
+            data.Add(await ReadFieldsAsync(tableId, rid, publicId, fids, byFid, users.GetValueOrDefault(publicId), fileBase, refTypes, ct, onRecord));
 
         return new QbRunReportResponse
         {

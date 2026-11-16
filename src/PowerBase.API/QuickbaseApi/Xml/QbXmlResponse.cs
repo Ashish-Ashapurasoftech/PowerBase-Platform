@@ -13,6 +13,8 @@ public sealed class QbXmlResponse
     public string Action { get; }
     /// <summary>When set, the call answers with this HTML page instead of XML (API_GenAddRecordForm).</summary>
     public string? Html { get; init; }
+    /// <summary>When set, the complete response text, already laid out exactly as Quickbase writes it (API_DoQuery).</summary>
+    public string? Raw { get; init; }
 
     public QbXmlResponse(string action) => Action = action;
 

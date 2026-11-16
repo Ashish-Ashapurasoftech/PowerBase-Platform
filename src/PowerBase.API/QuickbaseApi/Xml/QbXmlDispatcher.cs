@@ -23,6 +23,8 @@ public sealed class QbXmlDispatcher
         "API_SENDINVITATION" => Get<QbXmlUserActions>().SendInvitationAsync(req, ct),
         "API_IMPORTFROMCSV" => Get<QbXmlImportActions>().ImportFromCsvAsync(req, ct),
         "API_RUNIMPORT" => Get<QbXmlImportActions>().RunImportAsync(req, ct),
+        "API_DOQUERY" => Get<QbXmlQueryActions>().DoQueryAsync(req, ct),
+        "API_DOQUERYCOUNT" => Get<QbXmlQueryActions>().DoQueryCountAsync(req, ct),
         "API_GENADDRECORDFORM" => Get<QbXmlImportActions>().GenAddRecordFormAsync(req, ct),
         _ => throw new QbXmlException(QbXmlErrors.NO_SUCH_OPERATION, "No Such Operation", "This operation does not exist. Please check the URL."),
     };
