@@ -40,14 +40,17 @@ public sealed class FieldTypeChangeAnalyzer
     private readonly IAppTableRepository _tableRepo;
     private readonly IRelationshipRepository _relRepo;
     private readonly FormulaEngine _engine;
+    private readonly IFieldColumnConversionService? _columns;
 
     public FieldTypeChangeAnalyzer(
-        IAppFieldRepository fieldRepo, IAppTableRepository tableRepo, IRelationshipRepository relRepo, FormulaEngine engine)
+        IAppFieldRepository fieldRepo, IAppTableRepository tableRepo, IRelationshipRepository relRepo, FormulaEngine engine,
+        IFieldColumnConversionService? columns = null)
     {
         _fieldRepo = fieldRepo;
         _tableRepo = tableRepo;
         _relRepo = relRepo;
         _engine = engine;
+        _columns = columns;
     }
 
     /// <summary>Facts about the field that limit its targets (system field, relationship key).</summary>
@@ -78,9 +81,12 @@ public sealed class FieldTypeChangeAnalyzer
         var check = FieldTypeConversionMatrix.Check(field.TypeCode, targetTypeCode, constraints);
         if (!check.IsAllowed) impact.Blockers.Add(check.BlockedReason!);
 
-        var touchesColumn = check.Kind is not ConversionKind.FormulaToFormula;
-        if (touchesColumn && (app.IsEncrypted || field.IsEncrypted))
-            impact.Blockers.Add("An encrypted field can't change type. Turn encryption off first.");
+        // Encrypted fields (encrypted app, or the field's own Encrypted setting) are converted too: values are decrypted,
+        // converted and re-encrypted by FieldColumnConversionService. Only SQL Always Encrypted tenants are refused, here,
+        // so the preview shows why and nothing starts.
+        if (check.IsAllowed && check.Kind is not ConversionKind.FormulaToFormula && _columns is not null
+            && await _columns.GetEncryptionBlockerAsync(table, field, targetTypeCode, ct) is { } encryptionBlocker)
+            impact.Blockers.Add(encryptionBlocker);
 
         try
         {

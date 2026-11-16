@@ -49,7 +49,7 @@ internal static class ValueConvert
         FormulaType.Duration => ((decimal)v.AsDuration().TotalMinutes).ToString(NumberFormat, CultureInfo.InvariantCulture),
         FormulaType.User => v.AsUser().Email ?? v.AsUser().UserId,
         FormulaType.UserList => string.Join(";", v.AsUserList().Select(u => u.Email ?? u.UserId)),
-        FormulaType.TextList => string.Join("\n", v.AsTextList()),
+        FormulaType.TextList => string.Join("; ", v.AsTextList()),
         FormulaType.RecordList => string.Join(";", v.AsRecordList().RecordIds.Select(id => id.ToString(CultureInfo.InvariantCulture))),
         _ => string.Empty,
     };

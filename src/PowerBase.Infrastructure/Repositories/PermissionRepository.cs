@@ -36,11 +36,15 @@ public class PermissionRepository : ControlRepositoryBase, IPermissionRepository
     public PermissionRepository(
         IControlConnectionFactory connectionFactory,
         ITenantConnectionFactory tenantConnectionFactory,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IMetadataCache cache)
         : base(connectionFactory, queryContext)
     {
         _tenantConnectionFactory = tenantConnectionFactory;
+        _cache = cache;
     }
+
+    private readonly IMetadataCache _cache;
 
     public async Task<IReadOnlyList<Permission>> GetAllAsync(CancellationToken ct = default)
     {
@@ -69,6 +73,7 @@ public class PermissionRepository : ControlRepositoryBase, IPermissionRepository
 
     public async Task AssignToRoleAsync(long roleId, IReadOnlyList<long> permissionIds, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
         if (transaction is not null)
         {
             foreach (var permId in permissionIds)
@@ -85,6 +90,7 @@ public class PermissionRepository : ControlRepositoryBase, IPermissionRepository
 
     public async Task ReplaceRolePermissionsAsync(long roleId, IReadOnlyList<long> permissionIds, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
         await using var connection = await OpenNewConnectionAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
         try

@@ -312,9 +312,22 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         WHERE PublicId IN @publicIds AND AppTableId = @tableId AND IsSystem = 0 AND IsDeleted = 0
         """;
 
-    public AppFieldRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
+    private const string FieldsCacheGroup = MetadataCacheGroups.Fields;
+
+    private readonly IMetadataCache _cache;
+
+    public AppFieldRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache cache)
         : base(connectionFactory, queryContext)
     {
+        _cache = cache;
+    }
+
+    /// <summary>Drops the cached field lists of this tenant. Called BEFORE each write below (see <see cref="IMetadataCache.Invalidate"/>).</summary>
+    private void FieldsChanging(bool inTransaction = false)
+    {
+        _cache.Invalidate(QueryContext.TenantId, FieldsCacheGroup, inTransaction);
+        // The role field-access maps are read through a join on meta.AppField.
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Access, inTransaction);
     }
 
     public async Task<AppField> GetByIdInTableAsync(long fieldId, long tableId, CancellationToken ct = default)
@@ -326,6 +339,14 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     }
 
     public async Task<IReadOnlyList<AppField>> ListByTableAsync(long tableId, CancellationToken ct = default)
+    {
+        // Every request gets its own copies: callers are free to change the fields they receive.
+        var cached = await _cache.GetOrAddAsync<IReadOnlyList<AppField>>(QueryContext.TenantId, FieldsCacheGroup, $"table:{tableId}",
+            () => LoadFieldsByTableAsync(tableId, ct));
+        return cached.Select(f => f.Clone()).ToList();
+    }
+
+    private async Task<IReadOnlyList<AppField>> LoadFieldsByTableAsync(long tableId, CancellationToken ct)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var sql = await GetSlotColumnsAsync(connection, ct) switch
@@ -341,6 +362,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     public async Task<int> EnsureSearchSlotsAsync(long tableId, CancellationToken ct = default)
     {
+        FieldsChanging(inTransaction: true); // the slots are allocated in a transaction of its own
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.OpenAsync(ct);
         var columns = await GetSlotColumnsAsync(connection, ct);
@@ -412,6 +434,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     public async Task<int> ReleaseDeletedFieldSlotAsync(long tableId, long fid, string slot, CancellationToken ct = default)
     {
         if (PowerBase.Application.Search.SearchSlotResolver.IsWideSlot(slot)) return 0;
+        FieldsChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var columns = await GetSlotColumnsAsync(connection, ct);
         if (columns is SlotColumns.None or SlotColumns.Unknown) return 0;
@@ -430,6 +453,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     public async Task MarkTableWideAsync(long tableId, CancellationToken ct = default)
     {
+        FieldsChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var columns = await GetSlotColumnsAsync(connection, ct);
         if (columns is SlotColumns.None or SlotColumns.Unknown) return;
@@ -602,6 +626,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     public async Task<(long Id, Guid PublicId)> CreateAsync(AppField field, CancellationToken ct = default)
     {
+        FieldsChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var row = await connection.QuerySingleAsync(
             new CommandDefinition(InsertSql, new
@@ -637,6 +662,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     public async Task UpdatePhysicalColumnNameAsync(long id, string physicalColumnName, CancellationToken ct = default)
     {
+        FieldsChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdatePhysicalColumnNameSql, new { id, physicalColumnName }, cancellationToken: ct));
@@ -644,6 +670,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     public async Task SetSnapshotConfigAsync(long id, int? sourceFid, bool editable, CancellationToken ct = default, IDbTransaction? transaction = null)
     {
+        FieldsChanging(transaction is not null);
         var command = new CommandDefinition(SetSnapshotConfigSql, new { id, sourceFid, editable }, transaction, cancellationToken: ct);
         if (transaction is not null)
         {
@@ -665,6 +692,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     public async Task SetSharedValuesAsync(long id, bool isSharedValues, CancellationToken ct = default, IDbTransaction? transaction = null)
     {
+        FieldsChanging(transaction is not null);
         var command = new CommandDefinition(SetSharedValuesSql, new { id, isSharedValues }, transaction, cancellationToken: ct);
         if (transaction is not null)
         {
@@ -677,6 +705,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     public async Task UpdateSettingsAsync(long id, string? settings, CancellationToken ct = default)
     {
+        FieldsChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateSettingsSql, new { id, settings, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
@@ -684,6 +713,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     public async Task UpdateFieldTypeAsync(long id, long fieldTypeId, string? settings, bool isRequired, CancellationToken ct = default)
     {
+        FieldsChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateFieldTypeSql,
@@ -692,6 +722,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     public async Task RevertToNumberFieldAsync(long fieldId, CancellationToken ct = default)
     {
+        FieldsChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         
         // core.FieldType (tenant DB — see database/migrations/tenant/002_core_fieldtype.sql) has no
@@ -730,6 +761,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         bool isFilterable, bool isReportable, bool isAuditable, bool isUnique, bool isEncrypted, bool isAutoFill, string? settings,
         CancellationToken ct = default, IDbTransaction? transaction = null)
     {
+        FieldsChanging(transaction is not null);
         var parameters = new
         {
             publicId, tableId, label, description,
@@ -748,6 +780,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     public async Task<int> DeleteAsync(Guid publicId, long tableId, CancellationToken ct = default, IDbTransaction? transaction = null)
     {
+        FieldsChanging(transaction is not null);
         var parameters = new { publicId, tableId, deletedBy = QueryContext.UserId };
         if (transaction is not null)
         {
@@ -762,6 +795,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     public async Task<int> BulkDeleteAsync(IEnumerable<Guid> publicIds, long tableId, CancellationToken ct = default, IDbTransaction? transaction = null)
     {
         if (!publicIds.Any()) return 0;
+        FieldsChanging(transaction is not null);
         var parameters = new { publicIds, tableId, deletedBy = QueryContext.UserId };
         if (transaction is not null)
         {

@@ -32,4 +32,7 @@ public class AppRoleTablePermission
         CanEditFieldProperties = false,
         FieldAccessLevel = TableFieldAccessLevels.FullAccess,
     };
+
+    /// <summary>A copy the caller may change: the metadata cache hands the same stored AppRoleTablePermission to every request.</summary>
+    public AppRoleTablePermission Clone() => (AppRoleTablePermission)MemberwiseClone();
 }

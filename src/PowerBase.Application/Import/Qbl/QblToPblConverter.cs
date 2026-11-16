@@ -163,6 +163,16 @@ public static class QblToPblConverter
                 if (QblFieldTypeMap.SystemFieldNames.TryGetValue(fieldNode.Type, out var systemFieldName))
                 {
                     fieldNameByRef[fieldRef] = systemFieldName;
+                    // powerflowextraRd: keep the source's label for the built-in field (Quickbase lets an app rename
+                    // "Last Modified By" to e.g. "LastModifiedBy"), so the import can label the seeded system field the
+                    // same way and a custom field holding the default label is not numbered "(2)".
+                    var systemLabel = NullIfBlank(ResolveScalar(fieldNode, "Label"))?.Trim();
+                    if (systemLabel is not null)
+                    {
+                        seenFieldLabels.Add(systemLabel);
+                        if (!string.Equals(systemLabel, systemFieldName, StringComparison.Ordinal))
+                            (table.SystemFieldLabels ??= new(StringComparer.Ordinal))[systemFieldName] = systemLabel;
+                    }
                     continue;
                 }
 

@@ -222,6 +222,20 @@ public sealed class RecordCreatePreparer
                 }
                 catch (JsonException) { return (false, null); }
 
+            // Date/DateTime store a plain 'true'/'false' flag, not a date ("true" = default to today's
+            // date / the current date & time — see coerceDefault in the form renderer). Copying the flag
+            // verbatim wrote the text "true"/"false" into the date column and failed the format check
+            // with "must be a valid date". Resolve "true" to a real value; anything else = no default.
+            case "Date":
+                return string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase)
+                    ? (true, DateTime.UtcNow.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture))
+                    : (false, null);
+
+            case "DateTime":
+                return string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase)
+                    ? (true, DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture))
+                    : (false, null);
+
             case "User":
                 return await ResolveUserDefaultAsync(raw, isMulti: false, ct);
 

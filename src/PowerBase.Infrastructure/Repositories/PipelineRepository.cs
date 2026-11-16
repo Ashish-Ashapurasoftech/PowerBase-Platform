@@ -2173,22 +2173,27 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
 
     public async Task DeleteExpiredBulkEventRecordsAsync(DateTime createdBefore, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        const string sql = """
-            DELETE r
+        // Deleted in small batches, each its own short statement. One DELETE of every expired row (over a million search-staging
+        // rows, ~2 GB, locally) escalated to a TABLE lock, ran past the 30 s command timeout and rolled back: while it held the
+        // lock, Search Records' staging INSERT into this table waited and timed out too, and the rows were never pruned.
+        // Under 5,000 row locks per statement SQL Server does not escalate, so running PowerFlows keep writing between batches.
+        const string bulkSql = """
+            DELETE TOP (@batchSize) r
             FROM meta.PipelineBulkEventRecord r
             INNER JOIN audit.PipelineRun run ON run.MessageId = r.BulkEventId
             WHERE run.Status IN ('Success', 'Failed', 'Skipped', 'Stopped')
-              AND r.CreatedOn <= @createdBefore
-
-            DELETE r
+              AND r.CreatedOn <= @createdBefore;
+            """;
+        const string searchSql = """
+            DELETE TOP (@batchSize) r
             FROM meta.PipelineBulkEventRecord r
             INNER JOIN meta.PipelineSearchWorkset w ON w.WorksetId = r.SearchWorksetId
             INNER JOIN audit.PipelineRun run ON run.MessageId = w.RunMessageId
             WHERE run.Status IN ('Success', 'Failed', 'Skipped', 'Stopped')
               AND r.CreatedOn <= @createdBefore;
-
-            DELETE w
+            """;
+        const string worksetSql = """
+            DELETE TOP (@batchSize) w
             FROM meta.PipelineSearchWorkset w
             INNER JOIN audit.PipelineRun run ON run.MessageId = w.RunMessageId
             WHERE run.Status IN ('Success', 'Failed', 'Skipped', 'Stopped')
@@ -2197,8 +2202,21 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
                   SELECT 1 FROM meta.PipelineBulkEventRecord r WHERE r.SearchWorksetId = w.WorksetId
               );
             """;
-        await connection.ExecuteAsync(new CommandDefinition(sql, new { createdBefore }, cancellationToken: ct));
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        foreach (var sql in new[] { bulkSql, searchSql, worksetSql })
+        {
+            int deleted;
+            do
+            {
+                deleted = await connection.ExecuteAsync(new CommandDefinition(sql,
+                    new { createdBefore, batchSize = BulkEventPruneBatchSize }, cancellationToken: ct));
+            }
+            while (deleted == BulkEventPruneBatchSize && !ct.IsCancellationRequested);
+        }
     }
+
+    /// <summary>Rows per pruning statement: below SQL Server's 5,000-lock escalation threshold.</summary>
+    internal const int BulkEventPruneBatchSize = 4000;
 
     public async Task<PipelineSearchWorkset> GetOrCreateSearchWorksetAsync(
         Guid worksetId, Guid runMessageId, string stepRefId, long snapshotMaxRecordId, CancellationToken ct = default)

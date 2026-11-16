@@ -488,6 +488,9 @@ public class PipelineAuditFormatterTests
         var pipelineId = 1L;
         var pipeline = new Pipeline { Id = pipelineId, Name = "Sales Pipeline", AppId = 10L, PublicId = Guid.NewGuid() };
         _pipelineRepo.GetByIdAsync(pipelineId, Arg.Any<CancellationToken>()).Returns(pipeline);
+        var appGuid = Guid.NewGuid();
+        _appRepo.GetPublicIdByIdAsync(10L, Arg.Any<CancellationToken>()).Returns(appGuid);
+        _appRepo.GetByPublicIdAsync(appGuid, Arg.Any<CancellationToken>()).Returns(new App { Id = 10, PublicId = appGuid, Name = "Sales" });
 
         var tableGuid = Guid.NewGuid();
         var table = new AppTable { Id = 20, Name = "Customer", PublicId = tableGuid };
@@ -555,6 +558,11 @@ public class PipelineAuditFormatterTests
         var change = input.GetProperty("change");
         change.GetProperty("current").Should().NotBeNull();
         change.GetProperty("previous").ValueKind.Should().Be(JsonValueKind.Null);
+
+        // The metadata names the app (Quickbase's context.app_id), not the pipeline.
+        var context = root.GetProperty("Metadata").GetProperty("context");
+        context.GetProperty("app_name").GetString().Should().Be("Sales");
+        context.GetProperty("app_id").GetString().Should().Be(appGuid.ToString()).And.NotBe(pipeline.PublicId.ToString());
     }
 
     [Fact]

@@ -106,7 +106,8 @@ public sealed class ChangeFieldTypeCommandHandler
             FieldTypeChangeSettings.Build(field, plan.TargetTypeCode, kind, dryRun?.Choices?.Choices),
             capabilities?.Default == false ? null : FieldTypeChangeSettings.BuildDefaultValue(field, plan.TargetTypeCode, plan.ConversionContext),
             keepUnique,
-            keepRequired);
+            keepRequired,
+            plan.TargetTypeCode);
 
         // The index column(s) the field uses now: a change to another column family (Text to Number, say) moves it to a new column,
         // and the old one, which still holds the old values in every document, must be emptied before another field can use it.
@@ -198,15 +199,67 @@ public sealed class ChangeFieldTypeCommandHandler
         return new ColumnConversionResult(0, 0, 0, []);
     }
 
+    /// <summary>How long the request waits for the search queue to take the job before answering; the send carries on after that.</summary>
+    internal static readonly TimeSpan SearchQueueWait = TimeSpan.FromSeconds(3);
+
     /// <summary>Stored values changed, so their indexed copies are stale — same refresh UpdateFieldCommandHandler does after a Percent
     /// rescale, through the same slots and documents the indexer writes. A field that became a formula (no stored value) or a time of
     /// day (not indexed) is cleared instead, and a field that moved to another column has its old column emptied. Never throws: the
-    /// type change itself succeeded.</summary>
-    private Task RefreshSearchIndexAsync(AppTable table, int fid, string targetTypeCode, SlotRef? oldSlot, CancellationToken ct)
+    /// type change itself succeeded.
+    /// The change is already committed, so the request does not wait on Azure: the job is recorded in the database (meta.SearchFieldJob),
+    /// then queued for the indexer worker, which writes every page. If the queue can't be reached the send carries on in the background and
+    /// the search relay re-sends the recorded job, so the index still catches up. Where jobs can't be recorded, the shared
+    /// <see cref="FieldSlotSync.SyncAsync"/> runs as before.</summary>
+    private async Task RefreshSearchIndexAsync(AppTable table, int fid, string targetTypeCode, SlotRef? oldSlot, CancellationToken ct)
     {
         var notIndexed = PhysicalNaming.IsComputedTypeCode(targetTypeCode) || !SearchSlotResolver.IsIndexableType(targetTypeCode);
-        return FieldSlotSync.SyncAsync(
-            _fieldRepo, _recordRepo, _searchService, _messagePublisher, _queryContext.TenantId, table.AppId, table.Id, fid,
-            isNullify: notIndexed, clearSlot: oldSlot, (ex, message) => _logger?.LogError(ex, "{Message}", message), ct, _fieldJobs);
+        Action<Exception, string> logError = (ex, message) => _logger?.LogError(ex, "{Message}", message);
+        var tenantId = _queryContext.TenantId;
+
+        long? jobId = null;
+        try
+        {
+            var plan = await FieldSlotSync.PlanAsync(_fieldRepo, table.Id, fid, notIndexed, ct, oldSlot);
+            if (!plan.HasTarget) return; // the index does not hold this field: nothing to write or empty
+
+            var message = FieldSlotSync.Message(tenantId, table.AppId, table.Id, fid, notIndexed, oldSlot, afterId: 0);
+            jobId = await FieldSlotSync.RecordJobAsync(_fieldJobs, message, logError);
+            if (jobId is null)
+            {
+                await FieldSlotSync.SyncAsync(_fieldRepo, _recordRepo, _searchService, _messagePublisher, tenantId, table.AppId, table.Id, fid,
+                    isNullify: notIndexed, clearSlot: oldSlot, logError, ct, _fieldJobs);
+                return;
+            }
+
+            // Only singletons (publisher, search service, logger) are used past this point, so the work may outlive the request.
+            var queued = FieldSlotSync.PublishAsync(_messagePublisher,
+                FieldSlotSync.Message(tenantId, table.AppId, table.Id, fid, notIndexed, oldSlot, afterId: 0, jobId), logError, CancellationToken.None);
+
+            // A field that became indexable can push the table past what the shared index takes (as in FieldSlotSync.SyncAsync).
+            var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
+            var moveTable = SearchSlotResolver.ShouldBeWide(fields) ? StartWideMigrationAsync(tenantId, table, logError) : Task.CompletedTask;
+
+            await Task.WhenAny(Task.WhenAll(queued, moveTable), Task.Delay(SearchQueueWait, CancellationToken.None));
+        }
+        catch (Exception ex)
+        {
+            if (ex is not OperationCanceledException)
+                logError(ex, jobId is null
+                    ? $"Search index update for field {fid} of table {table.Id} could not be started. Run the search reindex for this table to repair it."
+                    : $"Search index update for field {fid} of table {table.Id} is recorded; the search relay sends it.");
+        }
+    }
+
+    private async Task StartWideMigrationAsync(long tenantId, AppTable table, Action<Exception, string> logError)
+    {
+        try
+        {
+            if (await _searchService.CanUseWideIndexAsync(table.Id, CancellationToken.None))
+                await _messagePublisher.PublishAsync(SearchWideMigration.Message(tenantId, table.AppId, table.Id, 1, afterId: 0), CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            logError(ex, $"Could not check whether table {table.Id} has to move to its own search index; the indexer checks again.");
+        }
     }
 }

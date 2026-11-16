@@ -243,6 +243,29 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                         ["FailedRecordPages"] = summary.FailedRecordPages,
                         ["FailedRecordsStored"] = summary.FailedRecordsStored
                     });
+            // Quickbase's Copy Records Metadata ({{metadata.x.qb_table_cache_hit}} …). PowerFlows always reads the source
+            // table directly, so no table cache is used.
+            if (System.Text.Json.Nodes.JsonNode.Parse(json) is System.Text.Json.Nodes.JsonObject output && !output.ContainsKey("_metadata"))
+            {
+                output["_metadata"] = new System.Text.Json.Nodes.JsonObject
+                {
+                    ["qb_table_cache_hit"] = false,
+                    ["qb_table_cache_expires_at"] = null,
+                    ["qb_table_cache_last_modified_at"] = null
+                };
+                // Quickbase's Copy Records outputs ({{x.records_processed}} …). Every source record ends inserted, updated or
+                // rejected: a matched record is always written, so none is "unchanged", and a rejected one is skipped.
+                output["records_processed"] = summary.InsertedCount + summary.UpdatedCount + summary.ErrorCount;
+                output["records_added"] = summary.InsertedCount;
+                output["records_updated"] = summary.UpdatedCount;
+                output["records_unchanged"] = 0;
+                output["records_skipped"] = summary.ErrorCount;
+                output["error_message"] = summary.Errors.FirstOrDefault();
+                // PowerFlows has no error codes or warnings for a copy: a rejection's reason is its message.
+                output["error_code"] = null;
+                output["warnings"] = new System.Text.Json.Nodes.JsonArray();
+                return output.ToJsonString();
+            }
             return json;
         }
         var complete = await Read("/complete");

@@ -6,6 +6,11 @@ namespace PowerBase.Application.Records;
 
 public sealed record FileReservation(long UserId, string UserName, string? Comment, DateTime ReservedOn);
 
+/// <summary>A File value whose paths were replaced (<see cref="FileReservationContract.ReplacePaths"/>):
+/// <paramref name="Value"/> is null when nothing is left; <paramref name="MissingFiles"/> names the files that had no
+/// replacement and were left out.</summary>
+public sealed record FilePathReplacement(string? Value, IReadOnlyList<string> MissingFiles);
+
 public static class FileReservationContract
 {
     public static FileReservation? Read(object? value)
@@ -216,6 +221,87 @@ public static class FileReservationContract
         if (attachment["revisions"] is JsonArray revisions)
             foreach (var revision in revisions.OfType<JsonObject>()) AddPath(revision, paths);
         return paths;
+    }
+
+    /// <summary>Every stored path in a File value: each attachment (one, or each of an array) and each of its older
+    /// revisions. Unlike <see cref="ReferencedPaths"/>, not only the first attachment.</summary>
+    public static IReadOnlyList<string> AllPaths(object? value)
+    {
+        var paths = new List<string>();
+        foreach (var attachment in Attachments(Parse(value)))
+        {
+            AddPathTo(attachment, paths);
+            if (attachment["revisions"] is JsonArray revisions)
+                foreach (var revision in revisions.OfType<JsonObject>()) AddPathTo(revision, paths);
+        }
+        return paths;
+    }
+
+    /// <summary>The File value with every path (each attachment's and each revision's) replaced by
+    /// <paramref name="newPath"/>; all other keys stay as they are. A path for which <paramref name="newPath"/> returns
+    /// null is a missing file: a missing revision is left out of the revisions, and a missing current file leaves out the
+    /// whole attachment with its revisions. A value that is not a File JSON value comes back unchanged.</summary>
+    public static FilePathReplacement ReplacePaths(object? value, Func<string, string?> newPath)
+    {
+        var root = Parse(value);
+        if (root is not (JsonObject or JsonArray))
+            return new FilePathReplacement(value?.ToString(), []);
+
+        var missing = new List<string>();
+        var dropped = new List<JsonObject>();
+        foreach (var attachment in Attachments(root).ToList())
+        {
+            if (!TryReplacePath(attachment, newPath))
+            {
+                missing.Add(FileName(attachment));
+                dropped.Add(attachment);
+                continue;
+            }
+            if (attachment["revisions"] is not JsonArray revisions) continue;
+            foreach (var revision in revisions.OfType<JsonObject>().ToList())
+            {
+                if (TryReplacePath(revision, newPath)) continue;
+                missing.Add(FileName(revision) + " (older version)");
+                revisions.Remove(revision);
+            }
+            if (revisions.Count == 0) attachment.Remove("revisions");
+        }
+
+        if (root is JsonObject)
+            return new FilePathReplacement(dropped.Count > 0 ? null : root.ToJsonString(), missing);
+        var array = root.AsArray();
+        foreach (var attachment in dropped) array.Remove(attachment);
+        return new FilePathReplacement(array.Count == 0 ? null : array.ToJsonString(), missing);
+    }
+
+    /// <summary>False when the entry has a path and <paramref name="newPath"/> has no replacement for it.</summary>
+    private static bool TryReplacePath(JsonObject entry, Func<string, string?> newPath)
+    {
+        var path = entry["path"]?.ToString();
+        if (string.IsNullOrWhiteSpace(path)) return true;
+        var replacement = newPath(path);
+        if (replacement is null) return false;
+        entry["path"] = replacement;
+        return true;
+    }
+
+    private static string FileName(JsonObject entry)
+    {
+        var name = entry["name"]?.ToString();
+        return string.IsNullOrWhiteSpace(name) ? Path.GetFileName(entry["path"]?.ToString() ?? string.Empty) : name;
+    }
+
+    private static IEnumerable<JsonObject> Attachments(JsonNode? root) => root switch
+    {
+        JsonObject attachment => [attachment],
+        JsonArray array => array.OfType<JsonObject>(),
+        _ => []
+    };
+
+    private static void AddPathTo(JsonObject entry, ICollection<string> paths)
+    {
+        var path = entry["path"]?.ToString();
+        if (!string.IsNullOrWhiteSpace(path)) paths.Add(path);
     }
 
     private static HashSet<JsonObject> ResolveRevisions(IReadOnlyList<JsonObject> versions,

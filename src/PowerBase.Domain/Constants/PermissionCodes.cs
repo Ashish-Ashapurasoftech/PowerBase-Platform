@@ -6,6 +6,7 @@ public static class PermissionCodes
     public const string AppsRead     = "apps:read";
     public const string AppsUpdate   = "apps:update";
     public const string AppsDelete   = "apps:delete";
+    public const string AppsCopy     = "apps:copy";
 
     public const string TablesCreate = "tables:create";
     public const string TablesRead   = "tables:read";

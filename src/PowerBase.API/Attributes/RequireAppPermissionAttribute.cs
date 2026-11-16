@@ -40,6 +40,7 @@ internal class AppMemberFilter : IAsyncActionFilter
     public async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
     {
         var route = context.RouteData.Values;
+        var memberScope = (context.HttpContext.RequestServices.GetService<IServerTiming>() ?? NoServerTiming.Instance).Measure("member");
         try
         {
             switch (_resolver)
@@ -76,6 +77,7 @@ internal class AppMemberFilter : IAsyncActionFilter
             { StatusCode = StatusCodes.Status404NotFound };
             return;
         }
+        memberScope.Dispose();
         await next();
     }
 }

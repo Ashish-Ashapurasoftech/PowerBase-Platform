@@ -7,8 +7,13 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class AdminRepository : ControlRepositoryBase, IAdminRepository
 {
-    public AdminRepository(IControlConnectionFactory connectionFactory, IQueryContext queryContext)
-        : base(connectionFactory, queryContext) { }
+    private readonly IMetadataCache _cache;
+
+    public AdminRepository(IControlConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache cache)
+        : base(connectionFactory, queryContext)
+    {
+        _cache = cache;
+    }
 
     // ── Tenants ──────────────────────────────────────────────────────────────
 
@@ -116,6 +121,7 @@ public class AdminRepository : ControlRepositoryBase, IAdminRepository
 
     public async Task UpdateUserActiveStateAsync(Guid userPublicId, bool isActive, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
         const string sql = """
             UPDATE core.[User] SET IsActive = @isActive, ModifiedOn = SYSUTCDATETIME()
             WHERE PublicId = @userPublicId AND IsDeleted = 0
@@ -126,6 +132,7 @@ public class AdminRepository : ControlRepositoryBase, IAdminRepository
 
     public async Task UpdateUserSystemRoleAsync(Guid userPublicId, int? systemRoleId, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
         const string sql = """
             UPDATE core.[User] SET SystemRoleId = @systemRoleId, ModifiedOn = SYSUTCDATETIME()
             WHERE PublicId = @userPublicId AND IsDeleted = 0
@@ -161,6 +168,7 @@ public class AdminRepository : ControlRepositoryBase, IAdminRepository
 
     public async Task AssignUserToTenantAsync(long tenantId, long userId, long roleId, long assignedBy, bool isActive = true, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
         const string sql = """
             MERGE meta.TenantUser AS target
             USING (VALUES (@tenantId, @userId)) AS source (TenantId, UserId)
@@ -179,6 +187,7 @@ public class AdminRepository : ControlRepositoryBase, IAdminRepository
 
     public async Task RemoveUserFromTenantAsync(long tenantId, Guid userPublicId, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
         const string sql = """
             UPDATE tu SET tu.IsDeleted = 1, tu.DeletedOn = SYSUTCDATETIME()
             FROM meta.TenantUser tu
@@ -246,6 +255,7 @@ public class AdminRepository : ControlRepositoryBase, IAdminRepository
 
     public async Task ChangeMemberRoleAsync(long tenantId, Guid userPublicId, long newRoleId, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
         const string sql = """
             UPDATE tu SET tu.TenantRoleId = @newRoleId, tu.ModifiedOn = SYSUTCDATETIME()
             FROM meta.TenantUser tu
@@ -273,6 +283,7 @@ public class AdminRepository : ControlRepositoryBase, IAdminRepository
 
     public async Task ReplaceRolePermissionsAdminAsync(long tenantId, Guid rolePublicId, IReadOnlyList<string> permissionCodes, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
         var roleId = await GetTenantRoleIdByPublicIdAsync(tenantId, rolePublicId, ct)
             ?? throw new KeyNotFoundException($"Role {rolePublicId} not found in tenant {tenantId}.");
 

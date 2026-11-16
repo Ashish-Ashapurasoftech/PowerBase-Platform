@@ -673,6 +673,9 @@ public partial class PipelineEngine : IPipelineEngine
                                                 selectedDict["id"] = recIdObj.ToString();
                                                 selectedDict["publicId"] = recIdObj.ToString();
                                             }
+                                            // Quickbase's record trigger Metadata ({{steps.a._metadata.context.app_name}} …).
+                                            if (await BuildRecordTriggerMetadataAsync(triggerData, ct) is { } triggerMetadata)
+                                                selectedDict["_metadata"] = triggerMetadata;
                                             stepsDict[refId] = selectedDict;
                                         }
                                     }
@@ -2222,7 +2225,9 @@ public partial class PipelineEngine : IPipelineEngine
                     Metadata = BuildAuditFieldMetadata(table, fields)
                 });
                 return JsonSerializer.Serialize(new {
-                    mode = "chunked-search", worksetId, count = workset.DiscoveredCount
+                    mode = "chunked-search", worksetId, count = workset.DiscoveredCount,
+                    // Quickbase's Search Records Metadata: {{metadata.x.batch.size}} / {{metadata.x.loop.index}}.
+                    _metadata = SearchMetadata(workset.DiscoveredCount)
                 });
             }
 
@@ -2319,7 +2324,7 @@ public partial class PipelineEngine : IPipelineEngine
             }
 
             // count matches the chunked output's, so "did the search find records" reads {{steps.x.count}} either way.
-            var stepOutput = JsonSerializer.Serialize(new { records = normalizedResults, count = normalizedResults.Count });
+            var stepOutput = JsonSerializer.Serialize(new { records = normalizedResults, count = normalizedResults.Count, _metadata = SearchMetadata(normalizedResults.Count) });
             // No size cap unless one is configured (MaxStepOutputBytes > 0).
             if (_options.MaxStepOutputBytes > 0 && System.Text.Encoding.UTF8.GetByteCount(stepOutput) > _options.MaxStepOutputBytes)
                 throw new PipelineNonRetryableException($"Search Records output exceeds the configured maximum of {_options.MaxStepOutputBytes} bytes. Reduce MaxResults or use a bulk-event pipeline.");
@@ -2525,7 +2530,15 @@ public partial class PipelineEngine : IPipelineEngine
                     if (field.Fid.HasValue)
                     {
                         var resolvedValStr = EvaluateTokens(await RenderUserTokensForTextAsync(mapping.Value, field, payloadJson, executionPath, allSteps, fieldRepo, tableRepo, ct), payloadJson, executionPath, allSteps);
-                        if (string.IsNullOrWhiteSpace(resolvedValStr)) continue;
+                        if (string.IsNullOrWhiteSpace(resolvedValStr))
+                        {
+                            // powerflowextraRd: a blank token still leaves the field as it is, but a formula that
+                            // evaluates to empty (Quickbase {{CLEAR}} imports as the formula "") clears the field.
+                            if (!PipelineFormulaValue.IsFormula(mapping.Value)) continue;
+                            values[field.Fid.Value] = null;
+                            resolvedMappings[mapping.Field] = null;
+                            continue;
+                        }
                         var parsedVal = ParseRecordMappingValueWithFormat(resolvedValStr, field, mapping.Value, mapping.FormatString);
                         values[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
@@ -4192,16 +4205,15 @@ public partial class PipelineEngine : IPipelineEngine
             var uniqueKey = $"{messageGuid}_{step.PublicId}_{Convert.ToHexString(executionPathHash)}";
             var storedFile = await fileStorageService.SaveAsync(contentStream, resolvedFileName, contentType, ct, uniqueKey);
             var fileJson = UploadFileStepContract.SerializeAttachmentValue(storedFile);
-            var outputJson = JsonSerializer.Serialize(new
-            {
-                Name = storedFile.Name,
-                Path = storedFile.Path,
-                Size = storedFile.Size,
-                ContentType = storedFile.ContentType,
-                RecordPublicId = recordPublicId,
-                Field = $"fid_{targetFields[0]!.Fid!.Value}",
-                Fields = targetFields.Select(field => $"fid_{field!.Fid!.Value}").ToArray()
-            });
+            var uploadOutput = UploadedFileExports(storedFile.Name, storedFile.Path, storedFile.Size, allSteps);
+            uploadOutput["Name"] = storedFile.Name;
+            uploadOutput["Path"] = storedFile.Path;
+            uploadOutput["Size"] = storedFile.Size;
+            uploadOutput["ContentType"] = storedFile.ContentType;
+            uploadOutput["RecordPublicId"] = recordPublicId;
+            uploadOutput["Field"] = $"fid_{targetFields[0]!.Fid!.Value}";
+            uploadOutput["Fields"] = targetFields.Select(field => $"fid_{field!.Fid!.Value}").ToArray();
+            var outputJson = JsonSerializer.Serialize(uploadOutput);
 
             PowerBase.Application.Common.Models.SearchIndexMessage? searchIndexMessage = null;
             await uow.BeginAsync(ct);
@@ -4608,7 +4620,9 @@ public partial class PipelineEngine : IPipelineEngine
 
                     var leftCategory = await ResolveRuleTypeCategoryAsync(rule.Left, payloadJson, allSteps, fieldRepo, tableRepo, ct);
 
-                    if (!string.IsNullOrWhiteSpace(rule.Right) && System.Text.RegularExpressions.Regex.IsMatch(rule.Right.Trim(), @"\{\{\s*(?:steps\.|trigger\.|variables\.)"))
+                    // A formula on the right is a computed value (like a typed one), not another step's field: no field types to match.
+                    if (!string.IsNullOrWhiteSpace(rule.Right) && !PipelineFormulaValue.IsFormula(rule.Right)
+                        && System.Text.RegularExpressions.Regex.IsMatch(rule.Right.Trim(), @"\{\{\s*(?:steps\.|trigger\.|variables\.)"))
                     {
                         var rightCategory = await ResolveRuleTypeCategoryAsync(rule.Right, payloadJson, allSteps, fieldRepo, tableRepo, ct);
                         // A time of day against a date & time compares the time it holds (both were dates before times had their own type).
@@ -4793,6 +4807,8 @@ public partial class PipelineEngine : IPipelineEngine
         IAppFieldRepository fieldRepo, IAppTableRepository tableRepo, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(input) || !input.Contains("{{", StringComparison.Ordinal)) return input;
+        // A formula reads its fields as values (a user as its id); rewriting tokens inside it would break the formula.
+        if (PipelineFormulaValue.IsFormula(input)) return input;
         if (destination.TypeCode is "User" or "MultiUser" or "Formula_User" or "Formula_ListUser") return input;
         var tokens = Regex.Matches(input, @"\{\{[^{}]*\}\}").Select(m => m.Value).Distinct().ToList();
         foreach (var token in tokens)
@@ -4833,6 +4849,8 @@ public partial class PipelineEngine : IPipelineEngine
             return (userSubMatch.Groups[2].Value.Equals("id", StringComparison.OrdinalIgnoreCase) ? "NUMBER" : "TEXT", null);
         // One part of an Address ({{steps.ref.fid_7.city}}) is text.
         if (IsAddressSubToken(userSub)) return ("TEXT", null);
+        // One part of a File field: its size is a number, the others text.
+        if (IsFileSubToken(userSub)) return (userSub.Contains("file_size", StringComparison.OrdinalIgnoreCase) ? "NUMBER" : "TEXT", null);
 
         var trimmedToken = token.Trim();
         bool isDynamicToken = System.Text.RegularExpressions.Regex.IsMatch(trimmedToken, @"\{\{\s*(?:steps\.|trigger\.|variables\.|[a-zA-Z0-9_]+\.)");
@@ -5086,14 +5104,88 @@ public partial class PipelineEngine : IPipelineEngine
             $"fid_{f.Id}".Equals(fieldRef, StringComparison.OrdinalIgnoreCase));
     }
 
+    private PowerBase.Formula.FormulaEngine? _fallbackFormulaEngine;
+
+    /// <summary>The app's formula engine (the one every other formula runs on), from the step's services.</summary>
+    private PowerBase.Formula.FormulaEngine StepFormulaEngine =>
+        CurrentStepServices.GetService<PowerBase.Formula.FormulaEngine>() ?? (_fallbackFormulaEngine ??= new PowerBase.Formula.FormulaEngine());
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, string> _formulaAppIds = new();
+
+    /// <summary>The evaluation options a step value's formula runs with, built as the record formulas build them (FormulaProjector):
+    /// the clock, the acting user and the user directory, the fields' types, the PowerFlow's app and the frontend's URLs. A step value
+    /// belongs to no table, so TableId is empty.</summary>
+    private PowerBase.Formula.Evaluation.EvaluationOptions FormulaEvaluationOptions(IReadOnlyList<AppField> fields, List<PipelineStep>? allSteps)
+    {
+        var services = CurrentStepServices;
+        var query = services.GetService<IQueryContext>() ?? _queryContext;
+        var users = services.GetService<IUserRepository>();
+        var runtime = services.GetService<IFormulaRuntimeContext>();
+        return new PowerBase.Formula.Evaluation.EvaluationOptions
+        {
+            UtcNow = DateTime.UtcNow,
+            UserLookup = users is null ? null : new FormulaUserDirectory(users).Lookup,
+            FieldTypes = FormulaTypeMap.FieldTypesByFid(fields),
+            CurrentUser = query.UserId > 0
+                ? new PowerBase.Formula.Types.UserRef(query.UserId.ToString(CultureInfo.InvariantCulture), query.UserEmail, query.UserName)
+                : null,
+            AppId = FormulaAppId(allSteps, services),
+            TableId = string.Empty,
+            UrlRoot = runtime?.UrlRoot ?? string.Empty,
+            ReturnUrl = runtime?.ReturnUrl ?? string.Empty,
+        };
+    }
+
+    /// <summary>The PowerFlow's app public id (what AppID() returns), looked up once per PowerFlow. The evaluator is synchronous, so the
+    /// lookup blocks, as FormulaProjector's does.</summary>
+    private string FormulaAppId(List<PipelineStep>? allSteps, IServiceProvider services)
+    {
+        var pipelineId = allSteps?.FirstOrDefault(s => s.PipelineId > 0)?.PipelineId ?? 0;
+        if (pipelineId <= 0) return string.Empty;
+        return _formulaAppIds.GetOrAdd(pipelineId, id =>
+        {
+            try
+            {
+                var pipeline = _pipelineRepo.GetByIdAsync(id).GetAwaiter().GetResult();
+                var apps = services.GetService<IAppRepository>();
+                return pipeline is null || apps is null ? string.Empty : apps.GetPublicIdByIdAsync(pipeline.AppId).GetAwaiter().GetResult().ToString();
+            }
+            catch (Exception)
+            {
+                return string.Empty;
+            }
+        });
+    }
+
+    /// <summary>One field a formula reads. A field with no value is blank in the formula (the formula decides what blank means),
+    /// where a plain reference to it would fail the step.</summary>
+    private string? ResolveFormulaToken(string token, string payloadJson, string? executionPath, List<PipelineStep>? allSteps)
+    {
+        if (string.IsNullOrEmpty(payloadJson)) return null;
+        try
+        {
+            var value = EvaluateTokens(token, payloadJson, executionPath, allSteps);
+            return value == token ? null : value;
+        }
+        catch (PipelineStepException)
+        {
+            return null;
+        }
+    }
+
     private string EvaluateTokens(string? input, string payloadJson, string? executionPath = null, List<PipelineStep>? allSteps = null)
     {
         if (string.IsNullOrEmpty(input)) return string.Empty;
+        // A value written as a formula: each field it reads is resolved like any reference, then the formula runs on them.
+        if (PipelineFormulaValue.IsFormula(input))
+            return PipelineFormulaValue.Evaluate(input, token => ResolveFormulaToken(token, payloadJson, executionPath, allSteps),
+                StepFormulaEngine, fields => FormulaEvaluationOptions(fields, allSteps));
         if (string.IsNullOrEmpty(payloadJson)) return input;
         if (input.Contains(".fid_", StringComparison.OrdinalIgnoreCase))
         {
             input = ExpandUserSubTokens(input, payloadJson, executionPath, allSteps);
             input = ExpandAddressSubTokens(input, payloadJson, executionPath, allSteps);
+            input = ExpandFileSubTokens(input, payloadJson, executionPath, allSteps);
         }
         // Callable metadata is part of its durable output; HTTP request metadata is stored separately.
         if (input.Contains("._metadata.", StringComparison.Ordinal))
@@ -5148,7 +5240,10 @@ public partial class PipelineEngine : IPipelineEngine
                                 var targetStep = allSteps.FirstOrDefault(s => string.Equals(s.Id.ToString(), loopOverStepId, StringComparison.OrdinalIgnoreCase) || string.Equals(s.RefId, loopOverStepId, StringComparison.OrdinalIgnoreCase));
                                 if (targetStep != null)
                                 {
-                                    var targetPattern = $@"(?:\bsteps\.)?(?:{Regex.Escape(targetStep.RefId)}|{Regex.Escape(targetStep.Id.ToString())})(?=\.(?!(?:records|count)\b)[a-zA-Z0-9_]+)";
+                                    // Quickbase's {{metadata.x.loop.index}} is the position of the current item in the loop over x.
+                                    var targetRef = $@"(?:\bsteps\.)?(?:{Regex.Escape(targetStep.RefId)}|{Regex.Escape(targetStep.Id.ToString())})";
+                                    input = Regex.Replace(input, targetRef + @"\._metadata\.loop\.index\b", $"steps.{loopStep.RefId}.index", RegexOptions.IgnoreCase);
+                                    var targetPattern = targetRef + @"(?=\.(?!(?:records|count|_metadata)\b)[a-zA-Z0-9_]+)";
                                     input = Regex.Replace(input, targetPattern, $"steps.{loopStep.RefId}.item", RegexOptions.IgnoreCase);
                                 }
                             }
@@ -5403,6 +5498,7 @@ public partial class PipelineEngine : IPipelineEngine
         // A complete field reference retains its JSON type; interpolated text remains text. One part of an address is read out of
         // the stored address, as text.
         if (IsAddressSubToken((input ?? "").Trim())) return EvaluateTokens(input, payloadJson, executionPath, allSteps);
+        if (IsFileSubToken((input ?? "").Trim())) return EvaluateTokens(input, payloadJson, executionPath, allSteps);
         var match = Regex.Match(input ?? "",@"^\{\{\s*((?:steps\.|trigger\.|variables\.)?[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+)\s*\}\}$");
         if (!match.Success)
         {
