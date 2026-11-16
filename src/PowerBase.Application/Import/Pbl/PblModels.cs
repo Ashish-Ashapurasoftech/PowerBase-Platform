@@ -324,6 +324,13 @@ public sealed class PblField
     /// a relationship that does not exist, a link with nothing to open…). <see cref="TypeCode"/> is then the plain type chosen
     /// to hold its place; everything else the source said is in here.</summary>
     public PblPlaceholderInfo? Placeholder { get; set; }
+
+    /// <summary>SingleSelect/MultiSelect only: when the source field's choices come live from another field's values
+    /// (Quickbase's "choices come from another field" input type), the other field's fully-qualified <see cref="PblField.LogicalRef"/>
+    /// (same format as every other field's own LogicalRef — table ref + field ref). <see cref="PowerBase.Domain.FieldSettings.ChoiceSourceSettings"/>
+    /// needs a real <c>TableId</c>/<c>Fid</c>, which don't exist yet at conversion time — resolved once every field
+    /// exists (see ImportAppFromPblCommandHandler.ApplyChoiceSourcesAsync) and patched onto the already-created field's Settings.</summary>
+    public string? ChoiceSourceFieldRef { get; set; }
 }
 
 /// <summary>What a stand-in field stands in for — see <see cref="PblField.Placeholder"/>. Never a source of truth for the
@@ -396,6 +403,29 @@ public sealed class PblReport
 
     /// <summary>Roles allowed to see the report. Null = no restriction information in the source (visible to all with table access).</summary>
     public List<string>? VisibleToRoleRefs { get; set; }
+
+    /// <summary>Table reports only: the source's report-level formula columns (Quickbase's <c>QB::Report::Formula::*</c>), up to
+    /// <see cref="PowerBase.Application.Reports.ReportFormulaFields.MaxFormulas"/>. A formula's name also appears in <see cref="Columns"/>
+    /// at the position it occupied in the source — resolved against the real table's fields and translated to PowerBase formula
+    /// syntax at report-creation time (needs real Fids, the same as a Formula field — see ImportAppFromPblCommandHandler.CreateReportAsync).</summary>
+    public List<PblReportFormula> ReportFormulas { get; set; } = [];
+}
+
+/// <summary>One report-level calculated column from the source, not yet translated (see <see cref="PblReport.ReportFormulas"/>).</summary>
+public sealed class PblReportFormula
+{
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>The source result type, already mapped to the FormulaTranslator's vocabulary ("Text", "Number", "Date", "Bool"
+    /// or "Time" — from Quickbase's Report::Formula::Text/Numeric/NumericPercent/Date/Checkbox/TimeOfDay respectively).</summary>
+    public string ResultType { get; set; } = "Text";
+
+    /// <summary>Numeric only: "Percent" when the source was NumericPercent; otherwise null (plain number).</summary>
+    public string? DisplayAs { get; set; }
+
+    /// <summary>Quickbase-syntax formula text, exactly as the source had it — translated to PowerBase syntax at
+    /// report-creation time, the same split as a Formula field's OriginalFormula/FormulaExpression.</summary>
+    public string Expression { get; set; } = string.Empty;
 }
 
 /// <summary>An AND/OR tree of field conditions — the translation of a Quickbase query.</summary>

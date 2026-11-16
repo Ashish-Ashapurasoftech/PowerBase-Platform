@@ -27,9 +27,9 @@ public static class QblUnmappedSettings
         new("ButtonColor", NotBlank, v => $"The button colour ({v}) is not carried; PowerBase uses its own button colour.", Urls),
         new("InputOptions.AllowCreateChoices", v => Is(v, "true"),
             _ => "Quickbase lets users add new choices while entering data; PowerBase has no such option.", ["QB::Field::TextMultipleChoice", "QB::Field::MultiselectText"]),
-        new("InputOptions.InputType", v => Is(v, "FromAnotherField"),
-            _ => "The choices come from another field's values in Quickbase; use the field's shared-values setting in PowerBase.",
-            ["QB::Field::TextMultipleChoice", "QB::Field::MultiselectText"]),
+        // InputOptions.InputType: FromAnotherField is handled specifically in QblFieldMapper (mapped to
+        // SelectSettingsBase.ChoiceSource when the source field it comes from can be resolved), not reported
+        // generically here — see QblFieldMapper.MapChoiceSource.
         new("UseNewWindow", v => Is(v, "true"), _ => "The link opens in a new window in Quickbase; PowerBase's report link has no such option.", ["QB::Field::ReportLink"]),
         new("IsInternational", v => Is(v, "true"), _ => "The phone number accepts international formats in Quickbase; PowerBase does not distinguish them.", Phones),
         new("HasExtension", v => Is(v, "true"), _ => "The phone number has an extension part in Quickbase; PowerBase's phone field has none.", ["QB::Field::PhoneNumber"]),

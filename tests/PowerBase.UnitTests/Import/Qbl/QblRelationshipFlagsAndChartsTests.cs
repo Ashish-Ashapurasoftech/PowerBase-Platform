@@ -203,7 +203,7 @@ public class QblRelationshipFlagsAndChartsTests
         var report = result.Document.Tables.Single(t => t.Name == "Projects").Reports.Single(r => r.Name == "With formula column");
 
         report.Columns.Should().Equal("Project Name");
-        result.Issues.Should().Contain(i => i.Code == "QBL_REPORT_FORMULA_COLUMN_NOT_CARRIED" && i.Message.Contains("ReportFormula_Weeks"));
+        result.Issues.Should().Contain(i => i.Code == "QBL_REPORT_FORMULA_COLUMN_NOT_CARRIED" && i.Message.Contains("Weeks"));
     }
 
     [Fact]

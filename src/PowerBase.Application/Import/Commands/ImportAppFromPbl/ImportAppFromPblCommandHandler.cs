@@ -1060,12 +1060,17 @@ public class ImportAppFromPblCommandHandler
             // Every field now exists, so the table's default columns, dynamic filters and sort can name their real Fids.
             await ApplyDefaultReportSettingsAsync(document, tableByName, skipped, ct);
 
+            // Select fields whose choices come from another field (ChoiceSourceSettings) need the OTHER field's real
+            // TableId/Fid, which also only exist now.
+            await ApplyChoiceSourcesAsync(document, tableByName, skipped, ct);
+
             ImportProgress.Report("Creating reports", 68);
             // Role refs → the roles this app has now, for report visibility.
             var roleIdsByRef = await ResolveRoleIdsByRefAsync(document, appPublicId, ct);
 
             // Reports go in before forms: an embedded related-records grid on a form points at a report that must already exist.
             var createdReports = new Dictionary<string, CreatedReport>(StringComparer.Ordinal);
+            AppTableAliasSchema? reportFormulaAliasSchema = null;
 
             foreach (var table in document.Tables ?? [])
             {
@@ -1083,6 +1088,50 @@ public class ImportAppFromPblCommandHandler
 
                 foreach (var report in pblReports)
                 {
+                    // Report-level formula columns (source: QB::Report::Formula::*) are scoped to this one report —
+                    // translate them now (needs the table's real fields, like any Formula field) and give each a
+                    // reserved Fid (ReportFormulaFields.FirstId..+2) so the Columns/sort resolution below picks them
+                    // up exactly like a real field. A formula that fails to translate or compiles to a type report
+                    // formulas can't hold is left out of the name map — it then falls through to the same
+                    // "column whose field was not created" handling as any other missing column.
+                    var reportFormulas = new List<ReportFormulaCommand>();
+                    var reportFidByName = fidByName;
+                    if (report.ReportFormulas.Count > 0)
+                    {
+                        reportFidByName = new Dictionary<string, long>(fidByName, StringComparer.Ordinal);
+                        reportFormulaAliasSchema ??= await AppTableAliasSchema.BuildAsync(_tableRepo, createdTable.AppId, ct);
+
+                        foreach (var formula in report.ReportFormulas.Take(ReportFormulaFields.MaxFormulas))
+                        {
+                            FormulaTranslationResult translation;
+                            try
+                            {
+                                translation = _formulaTranslator.Translate(formula.ResultType, formula.Expression, allFields, reportFormulaAliasSchema);
+                            }
+                            catch (Exception ex) when (ex is not OperationCanceledException)
+                            {
+                                translation = new FormulaTranslationResult { Status = FormulaTranslationStatus.NeedsManualReview, Diagnostics = [$"The formula could not be analysed: {ex.Message}"] };
+                            }
+
+                            if (translation.Status == FormulaTranslationStatus.NeedsManualReview ||
+                                !ReportFormulaFields.IsAllowedTypeCode(translation.TypeCode) ||
+                                translation.TypeCode == "Formula_Number" && formula.DisplayAs is not null && !ReportFormulaFields.IsAllowedDisplayAs(formula.DisplayAs))
+                            {
+                                skipped.Add(new ImportSkippedItem
+                                {
+                                    LogicalRef = report.LogicalRef,
+                                    Name = formula.Name,
+                                    Reason = $"Report formula column '{formula.Name}' on report '{report.Name}' was not carried: {(translation.Diagnostics.Count > 0 ? string.Join(" ", translation.Diagnostics) : "its result type has no PowerBase report-formula equivalent")}.",
+                                });
+                                continue;
+                            }
+
+                            var id = ReportFormulaFields.FirstId + reportFormulas.Count;
+                            reportFormulas.Add(new ReportFormulaCommand(id, formula.Name, translation.TypeCode!, formula.DisplayAs, TranslatedExpression(translation) ?? formula.Expression));
+                            reportFidByName[formula.Name] = id;
+                        }
+                    }
+
                     // A column pointing at a field that didn't make it (a formula that failed
                     // to translate, an unsupported type) costs that column, not the whole
                     // report. Dropping the report outright would be badly disproportionate:
@@ -1090,15 +1139,15 @@ public class ImportAppFromPblCommandHandler
                     // anywhere would take the table's main view down with it — and with the
                     // seeded default views suppressed for imported tables, that can leave a
                     // table with no reports at all.
-                    var unresolved = report.Columns.Where(c => !fidByName.ContainsKey(c))
-                        .Concat(report.SortFields.Select(s => s.FieldName).Where(n => !fidByName.ContainsKey(n)))
+                    var unresolved = report.Columns.Where(c => !reportFidByName.ContainsKey(c))
+                        .Concat(report.SortFields.Select(s => s.FieldName).Where(n => !reportFidByName.ContainsKey(n)))
                         .Distinct()
                         .ToList();
 
-                    var columns = report.Columns.Where(fidByName.ContainsKey).Select(c => fidByName[c]).ToList();
+                    var columns = report.Columns.Where(reportFidByName.ContainsKey).Select(c => reportFidByName[c]).ToList();
                     var sortFields = report.SortFields
-                        .Where(s => fidByName.ContainsKey(s.FieldName))
-                        .Select(s => new SortSpec { FieldId = fidByName[s.FieldName], Desc = s.Desc })
+                        .Where(s => reportFidByName.ContainsKey(s.FieldName))
+                        .Select(s => new SortSpec { FieldId = reportFidByName[s.FieldName], Desc = s.Desc })
                         .ToList();
 
                     // Nothing left to show — now the report really is meaningless.
@@ -1123,7 +1172,7 @@ public class ImportAppFromPblCommandHandler
                         });
                     }
 
-                    var createdReport = await CreateReportAsync(report, createdTable, allFields, columns, sortFields, roleIdsByRef, skipped, ct);
+                    var createdReport = await CreateReportAsync(report, createdTable, allFields, columns, sortFields, roleIdsByRef, reportFormulas, skipped, ct);
                     if (createdReport is null)
                         continue;
 
@@ -1285,6 +1334,15 @@ public class ImportAppFromPblCommandHandler
         return (typeCode, JsonSerializer.Serialize(expressionOnly));
     }
 
+    /// <summary>The translated PowerBase-syntax expression text out of a successful <see cref="FormulaTranslationResult"/> —
+    /// same extraction <see cref="BuildFormulaSettings"/> does for a real Formula field's Settings JSON.</summary>
+    private static string? TranslatedExpression(FormulaTranslationResult translation)
+    {
+        if (translation.SettingsJson is null) return null;
+        using var doc = JsonDocument.Parse(translation.SettingsJson);
+        return doc.RootElement.TryGetProperty("expression", out var expr) ? expr.GetString() : null;
+    }
+
     private async Task<Dictionary<string, Guid>> ResolveRoleIdsByRefAsync(PblDocument document, Guid appPublicId, CancellationToken ct)
     {
         var result = new Dictionary<string, Guid>(StringComparer.Ordinal);
@@ -1307,7 +1365,7 @@ public class ImportAppFromPblCommandHandler
     /// </summary>
     private async Task<ReportDetailResult?> CreateReportAsync(
         PblReport report, AppTable table, IReadOnlyList<AppField> fields, List<long> columns, List<SortSpec> sortFields,
-        Dictionary<string, Guid> roleIdsByRef, List<ImportSkippedItem> skipped, CancellationToken ct)
+        Dictionary<string, Guid> roleIdsByRef, List<ReportFormulaCommand> reportFormulas, List<ImportSkippedItem> skipped, CancellationToken ct)
     {
         var byName = FieldFids.ByNameOrLabel(fields);
 
@@ -1461,7 +1519,8 @@ public class ImportAppFromPblCommandHandler
             Chart: report.ReportType == "Chart" ? chartConfig : minimal ? null : crosstab,
             Options: minimal || report.ReportType is "Summary" or "Chart" ? null : options,
             TableSortGroup: minimal ? null : tableSortGroup,
-            RowGroupLevels: report.ReportType == "Summary" ? (minimal ? recordIdGroup ?? rowGroupLevels : rowGroupLevels) : null);
+            RowGroupLevels: report.ReportType == "Summary" ? (minimal ? recordIdGroup ?? rowGroupLevels : rowGroupLevels) : null,
+            ReportFormulas: report.ReportType == "Table" && reportFormulas.Count > 0 ? reportFormulas : null);
 
         try
         {
@@ -1781,6 +1840,57 @@ public class ImportAppFromPblCommandHandler
     /// <summary>Fills each table's hidden Default Report Settings record (what the "Default report" page edits) with the source table's
     /// default columns, default dynamic filters, quick search and default sort. A name that did not become a field is reported and left out;
     /// a part the source does not state keeps PowerBase's default.</summary>
+    /// <summary>SingleSelect/MultiSelect fields whose choices come from another field (<see cref="PblField.ChoiceSourceFieldRef"/>)
+    /// need that other field's real TableId/Fid, which only exist once every table's fields are created. Builds one
+    /// LogicalRef → (real table, real field) map across the whole app, then patches each such field's own Settings with the
+    /// resolved ChoiceSource. A target that was never created (unsupported type, failed formula, or this import's best-effort
+    /// guess at where Quickbase names the source field turning out wrong) is reported, never left as a silently empty choice list.</summary>
+    private async Task ApplyChoiceSourcesAsync(
+        PblDocument document, Dictionary<string, AppTable> tableByName, List<ImportSkippedItem> skipped, CancellationToken ct)
+    {
+        var candidates = (document.Tables ?? [])
+            .SelectMany(t => (t.Fields ?? []).Where(f => f.ChoiceSourceFieldRef is not null).Select(f => (Table: t, Field: f)))
+            .ToList();
+        if (candidates.Count == 0) return;
+
+        var realByRef = new Dictionary<string, (AppTable Table, AppField Field)>(StringComparer.Ordinal);
+        foreach (var table in document.Tables ?? [])
+        {
+            if (!tableByName.TryGetValue(table.Name, out var createdTable)) continue;
+            var realFields = await _fieldRepo.ListByTableAsync(createdTable.Id, ct);
+            var byName = realFields.ToDictionary(f => f.Name, StringComparer.OrdinalIgnoreCase);
+            foreach (var field in table.Fields ?? [])
+                if (byName.TryGetValue(field.Name, out var real))
+                    realByRef[field.LogicalRef] = (createdTable, real);
+        }
+
+        foreach (var (table, field) in candidates)
+        {
+            if (!realByRef.TryGetValue(field.LogicalRef, out var source))
+                continue; // the select field itself was never created — nothing to patch
+
+            if (!realByRef.TryGetValue(field.ChoiceSourceFieldRef!, out var target))
+            {
+                skipped.Add(new ImportSkippedItem
+                {
+                    LogicalRef = field.LogicalRef,
+                    Name = field.Name,
+                    Reason = $"Field '{field.Name}' on table '{table.Name}' has choices that come from another field in Quickbase, but that field could not be found in this import. Set up the field's \"choices from another field\" setting manually in PowerBase.",
+                });
+                continue;
+            }
+
+            var settings = new Dictionary<string, object?>(StringComparer.Ordinal);
+            if (!string.IsNullOrEmpty(source.Field.Settings))
+                foreach (var prop in JsonDocument.Parse(source.Field.Settings).RootElement.EnumerateObject())
+                    settings[prop.Name] = prop.Value.Clone();
+            settings.Remove("options");
+            settings["choiceSource"] = new Dictionary<string, object?> { ["tableId"] = target.Table.PublicId, ["fid"] = target.Field.Fid };
+
+            await _fieldRepo.UpdateSettingsAsync(source.Field.Id, JsonSerializer.Serialize(settings), ct);
+        }
+    }
+
     private async Task ApplyDefaultReportSettingsAsync(
         PblDocument document, Dictionary<string, AppTable> tableByName, List<ImportSkippedItem> skipped, CancellationToken ct)
     {
