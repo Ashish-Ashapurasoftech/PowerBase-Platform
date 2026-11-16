@@ -90,6 +90,11 @@ public sealed class ImportPreviewAppItem
     public bool IsValid { get; init; }
     /// <summary>True when an app with this name already exists in the tenant; the user must rename it to import.</summary>
     public bool NameExists { get; init; }
+    /// <summary>The file holds only pipelines: they are added to this existing app (<see cref="TargetAppPublicId"/>); no app is created.</summary>
+    public bool IsPipelinesOnly { get; init; }
+    public Guid? TargetAppPublicId { get; init; }
+    /// <summary>Pipelines only: which existing table each Quickbase table id of the file was matched to ("bwcrtu9k5 → Employee").</summary>
+    public List<string> TableMatches { get; init; } = [];
     public List<ImportPreviewTableItem> Tables { get; init; } = [];
     public List<ImportPreviewRelationshipItem> Relationships { get; init; } = [];
     public List<ImportPreviewFormItem> Forms { get; init; } = [];

@@ -80,10 +80,25 @@ public partial class PipelineEngine
                 catch (Exception ex) when (ex is not OperationCanceledException) { /* user stays empty */ }
             }
 
+            var record = new Dictionary<string, object?> { ["action"] = QuickbaseRecordAction(Text("EventType")) };
+            // powerflowextraRd: Quickbase's Record → Previous record ({{metadata.a.record.previous.name}}, docs: {{a.$prev.name}}) —
+            // the record as it was before the change, "available only if action is Replace". PowerFlows keys it by field number,
+            // like the trigger's own values: {{steps.a._metadata.record.previous.fid_N}} (a user field also .fid_N.email …).
+            // Every field of the table is present (empty unless the record was replaced), so a token reading the previous value
+            // resolves to empty on an added / deleted record, as in Quickbase, instead of failing the step.
+            var previous = schema.Keys.ToDictionary(key => key, _ => (object?)null, StringComparer.Ordinal);
+            if (record["action"] is "Replace" && triggerData.TryGetValue("OldValues", out var oldValues)
+                && oldValues is JsonElement { ValueKind: JsonValueKind.Object } element)
+            {
+                foreach (var property in element.EnumerateObject())
+                    previous[property.Name] = JsonSerializer.Deserialize<object?>(property.Value.GetRawText());
+            }
+            record["previous"] = previous;
+
             return new Dictionary<string, object?>
             {
                 ["context"] = context,
-                ["record"] = new Dictionary<string, object?> { ["action"] = QuickbaseRecordAction(Text("EventType")) },
+                ["record"] = record,
                 ["struct"] = schema
             };
         }

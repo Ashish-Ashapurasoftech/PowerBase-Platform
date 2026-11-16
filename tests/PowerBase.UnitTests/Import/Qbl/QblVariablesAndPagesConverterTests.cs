@@ -128,4 +128,47 @@ public class QblVariablesAndPagesConverterTests
         fields.Select(f => f.Label).Should().Equal("Add SPC", "Add SPC (2)");
         result.Issues.Should().Contain(i => i.Code == "QBL_DUPLICATE_FIELD_LABEL");
     }
+
+    // powerflowextraRd: Quickbase's HCBS QA app renamed the built-in Last Modified By (FID 5) to "LastModifiedBy" and has a
+    // formula field labelled "Last Modified By" (FID 112) that its PowerFlows read.
+    [Fact]
+    public void Convert_RenamedBuiltInField_KeepsItsLabelAndTheCustomFieldIsNotNumbered()
+    {
+        const string yaml = """
+        Version: '0.12'
+        Resources:
+          $App_Test:
+            Type: QB::Application
+            Properties:
+              Name: Test App
+            Tables:
+              $Table_A:
+                Type: QB::Table
+                Properties:
+                  Name: A
+                Fields:
+                  $Field_Last_Modified_By:
+                    Type: QB::Field::Text
+                    Id: 112
+                    Properties:
+                      Label: Last Modified By
+                  $Field_LastModifiedBy:
+                    Type: QB::Field::LastModifiedBy
+                    Id: 5
+                    Properties:
+                      Label: LastModifiedBy
+                  $Field_Record_Owner:
+                    Type: QB::Field::RecordOwner
+                    Id: 4
+                    Properties:
+                      Label: Record Owner
+        """;
+
+        var result = Convert(yaml);
+
+        var table = result.Document.Tables[0];
+        table.Fields.Select(f => f.Label ?? f.Name).Should().Equal("Last Modified By");
+        table.SystemFieldLabels.Should().BeEquivalentTo(new Dictionary<string, string> { ["Last Modified By"] = "LastModifiedBy" });
+        result.Issues.Should().NotContain(i => i.Code == "QBL_DUPLICATE_FIELD_LABEL");
+    }
 }

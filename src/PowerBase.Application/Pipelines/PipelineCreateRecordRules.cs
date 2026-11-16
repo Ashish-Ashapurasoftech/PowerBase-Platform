@@ -72,6 +72,12 @@ internal static class PipelineCreateRecordRules
         {
             case "Boolean":
                 return (true, string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase));
+            // powerflowextraRd: a Date field's "true" default is "today" (Quickbase DefaultIsToday) and a Date / Time field's is "now"
+            // (DefaultIsNow); the record form fills it in the browser, a PowerFlow fills it here, in UTC as Quickbase Pipelines does.
+            case "Date" when string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase):
+                return (true, DateTime.UtcNow.Date);
+            case "DateTime" when string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase):
+                return (true, DateTime.UtcNow);
             case "NumericRange":
             case "DateRange":
                 try

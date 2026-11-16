@@ -243,7 +243,11 @@ public class QblPipelineMoreStepsTests
 
         Step(pipeline, "ref_ab").Config["maxResults"].Should().Be(105);
         var update = Step(pipeline, "ref_ac");
-        Mapping(update, "Name").Should().Be("{{steps.ref_ab.[Email]}} {{steps.ref_aa.[Date Created]}}");
+        // powerflowextraRd: a date/time field written inside a text prints as Quickbase prints it (a UTC datetime), so the value
+        // becomes a formula reading both fields.
+        var name = Mapping(update, "Name");
+        name.Should().StartWith(PowerBase.Application.Pipelines.PipelineFormulaValue.Prefix);
+        name.Should().Contain("{{steps.ref_ab.[Email]}}").And.Contain("{{steps.ref_aa.[Date Created]}}").And.Contain("\\u002B00:00");
         Mapping(update, "TCheckbox").Should().Be("{{steps.ref_ab.[TCheckbox]}}");
         Mapping(update, "Email").Should().Be("{{steps.ref_aa.[TestUser].email}}");
         // T_Address_City sets the City part of T Address (fid_N.city).
