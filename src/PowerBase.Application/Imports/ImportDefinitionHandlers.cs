@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Imports.Files;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -6,7 +7,8 @@ using PowerBase.Domain.Exceptions;
 namespace PowerBase.Application.Imports;
 
 public sealed class SaveImportDefinitionHandler(
-    ImportPlanBuilder planBuilder, IAppTableRepository tables, IImportDefinitionRepository definitions, IQueryContext user)
+    ImportPlanBuilder planBuilder, IAppTableRepository tables, IImportDefinitionRepository definitions, IQueryContext user,
+    IFieldReferenceIndexer? refIndexer = null)
 {
     /// <summary>Creates (<paramref name="definitionId"/> null) or updates a definition and returns its id. The full
     /// configuration is validated exactly as a run would validate it, so a saved import is always runnable.
@@ -53,6 +55,8 @@ public sealed class SaveImportDefinitionHandler(
 
         if (definitionId is null) await definitions.CreateAsync(entity, ct);
         else await definitions.UpdateAsync(entity, ct);
+        // Field Usage index; never fails the save.
+        await (refIndexer ?? NullFieldReferenceIndexer.Instance).ReindexImportAsync(entity.PublicId, ct);
         return entity.PublicId;
     }
 }
@@ -105,7 +109,8 @@ public sealed class GetImportDefinitionHandler(
 }
 
 public sealed class DeleteImportDefinitionHandler(
-    IAppTableRepository tables, IAppAccessService access, IImportDefinitionRepository definitions, IQueryContext user)
+    IAppTableRepository tables, IAppAccessService access, IImportDefinitionRepository definitions, IQueryContext user,
+    IFieldReferenceIndexer? refIndexer = null)
 {
     public async Task HandleAsync(Guid definitionId, CancellationToken ct)
     {
@@ -113,6 +118,7 @@ public sealed class DeleteImportDefinitionHandler(
         var destination = await tables.GetByIdAsync(def.DestinationTableId, ct);
         await access.RequirePermissionByTablePublicIdAsync(destination.PublicId, PowerBase.Domain.Constants.PermissionCodes.RecordsCreate, ct);
         await definitions.DeleteAsync(def.Id, user.UserId, ct);
+        await (refIndexer ?? NullFieldReferenceIndexer.Instance).RemoveSourceAsync(FieldReferenceSourceTypes.Import, def.PublicId, ct);
     }
 }
 
@@ -120,7 +126,8 @@ public sealed class DeleteImportDefinitionHandler(
 /// by the same rule as deleting one (the right to add records to its first table), or none is deleted. Only imports of this app are
 /// considered, so an id from another app is simply not found.</summary>
 public sealed class DeleteImportDefinitionsHandler(
-    IAppRepository apps, IAppTableRepository tables, IAppAccessService access, IImportDefinitionRepository definitions, IQueryContext user)
+    IAppRepository apps, IAppTableRepository tables, IAppAccessService access, IImportDefinitionRepository definitions, IQueryContext user,
+    IFieldReferenceIndexer? refIndexer = null)
 {
     public const int MaxAtOnce = 200;
 
@@ -141,6 +148,8 @@ public sealed class DeleteImportDefinitionsHandler(
             await access.RequirePermissionByTablePublicIdAsync(table.PublicId, PowerBase.Domain.Constants.PermissionCodes.RecordsCreate, ct);
         }
         await definitions.DeleteManyAsync(found.Select(d => d.Id).ToList(), user.UserId, ct);
+        foreach (var d in found)
+            await (refIndexer ?? NullFieldReferenceIndexer.Instance).RemoveSourceAsync(FieldReferenceSourceTypes.Import, d.PublicId, ct);
         return found.Count;
     }
 }

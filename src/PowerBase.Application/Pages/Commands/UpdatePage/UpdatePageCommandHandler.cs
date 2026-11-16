@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Enums;
@@ -15,11 +16,14 @@ public class UpdatePageCommandHandler
     private readonly IAuditRepository _auditRepo;
     private readonly ITenantRepository _tenantRepo;
     private readonly UpdatePageCommandValidator _validator;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public UpdatePageCommandHandler(
         IPageRepository pageRepo, IAppRoleRepository appRoleRepo, IAppUserRepository appUserRepo,
-        IQueryContext queryContext, IAuditRepository auditRepo, ITenantRepository tenantRepo)
+        IQueryContext queryContext, IAuditRepository auditRepo, ITenantRepository tenantRepo,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _pageRepo = pageRepo;
         _appRoleRepo = appRoleRepo;
         _appUserRepo = appUserRepo;
@@ -90,6 +94,8 @@ public class UpdatePageCommandHandler
         page.CurrentVersionNo += 1;
 
         await _pageRepo.UpdateAsync(page, ct);
+        if (page.PageType == PageTypes.Dashboard)
+            await _refIndexer.ReindexDashboardAsync(page.PublicId, ct); // Usage tab: which fields the dashboard binds / searches
 
         var rolesToSave = await ResolvePageRoleIdsAsync(command.Visibility, command.VisibleToRoleIds, page.AppId, page.OwnerId, ct);
         await _pageRepo.ReplacePageRolesAsync(page.Id, rolesToSave, ct);

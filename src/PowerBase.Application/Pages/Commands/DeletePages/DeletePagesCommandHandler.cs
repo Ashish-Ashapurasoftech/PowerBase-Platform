@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
@@ -9,12 +10,14 @@ public class DeletePagesCommandHandler
     private readonly IAppRepository _appRepo;
     private readonly IPageRepository _pageRepo;
     private readonly IAuditRepository _auditRepo;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
-    public DeletePagesCommandHandler(IAppRepository appRepo, IPageRepository pageRepo, IAuditRepository auditRepo)
+    public DeletePagesCommandHandler(IAppRepository appRepo, IPageRepository pageRepo, IAuditRepository auditRepo, IFieldReferenceIndexer? refIndexer = null)
     {
         _appRepo = appRepo;
         _pageRepo = pageRepo;
         _auditRepo = auditRepo;
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
     }
 
     public async Task HandleAsync(DeletePagesCommand command, CancellationToken ct = default)
@@ -36,6 +39,8 @@ public class DeletePagesCommandHandler
         }
 
         await _pageRepo.SoftDeleteManyAsync(command.PagePublicIds, ct);
+        foreach (var pagePublicId in command.PagePublicIds)
+            await _refIndexer.RemoveSourceAsync(FieldReferenceSourceTypes.Dashboard, pagePublicId, ct);
 
         foreach (var (pagePublicId, name) in command.PagePublicIds.Zip(names))
         {

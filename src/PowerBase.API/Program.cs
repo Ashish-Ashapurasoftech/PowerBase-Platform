@@ -477,6 +477,7 @@ builder.Services.AddScoped<IReportRepository, ReportRepository>();
 builder.Services.AddScoped<IFieldReferenceRepository, FieldReferenceRepository>();
 builder.Services.AddScoped<PowerBase.Application.FieldReferences.IFieldReferenceIndexer, PowerBase.Application.FieldReferences.FieldReferenceIndexer>();
 builder.Services.AddScoped<PowerBase.Application.FieldReferences.RebuildFieldReferencesCommandHandler>();
+builder.Services.AddHostedService<PowerBase.API.Workers.PipelineReferenceSyncWorker>();
 builder.Services.AddScoped<PowerBase.Application.Search.Commands.BackfillSearchIndex.BackfillSearchIndexCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Search.Commands.SanitizeEncryptedData.SanitizeEncryptedDataCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IExemptFieldEncryptionCleanupService, PowerBase.Infrastructure.Services.ExemptFieldEncryptionCleanupService>();
