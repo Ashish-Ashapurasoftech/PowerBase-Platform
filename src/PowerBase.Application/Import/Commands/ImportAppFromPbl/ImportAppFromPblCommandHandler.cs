@@ -651,6 +651,48 @@ public class ImportAppFromPblCommandHandler
     private static IEnumerable<string> SystemLabelsOf(PblTable table) =>
         AppSeeder.SystemFieldLabels.Select(label => table.SystemFieldLabels?.GetValueOrDefault(label) ?? label);
 
+    /// <summary>The default system-field labels (Record ID#, Date Created, …) that the source renamed on this table. Until
+    /// <see cref="ApplySystemFieldLabelsAsync"/> runs, PowerBase's seeded system field still holds each of these, so no other field may be
+    /// created with one of them.</summary>
+    public static HashSet<string> SystemLabelCollisions(PblTable table) =>
+        new(AppSeeder.SystemFieldLabels.Where(label => table.SystemFieldLabels is not null
+                && table.SystemFieldLabels.TryGetValue(label, out var renamedTo)
+                && !string.Equals(renamedTo, label, StringComparison.OrdinalIgnoreCase)),
+            StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Gives back its real label to every field that was created under a temporary one (see <see cref="SystemLabelCollisions"/>).
+    /// If the system field could not be renamed (so the real label is still taken) the temporary label stays and the import says so.</summary>
+    private async Task RestoreLabelsAfterSystemRenameAsync(
+        List<(string TableName, string TemporaryLabel, string FinalLabel)> restores, Guid appPublicId, List<ImportSkippedItem> skipped, CancellationToken ct)
+    {
+        if (restores.Count == 0) return;
+
+        var appId = await _appRepo.GetIdByPublicIdAsync(appPublicId, ct);
+        var tableByName = (await _tableRepo.ListByAppAsync(appId, ct)).ToDictionary(t => t.Name, StringComparer.OrdinalIgnoreCase);
+        foreach (var group in restores.GroupBy(r => r.TableName, StringComparer.OrdinalIgnoreCase))
+        {
+            if (!tableByName.TryGetValue(group.Key, out var table)) continue;
+            var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
+            foreach (var (_, temporary, final) in group)
+            {
+                var field = fields.FirstOrDefault(f => !f.IsSystem && string.Equals((f.Label ?? "").Trim(), temporary, StringComparison.OrdinalIgnoreCase));
+                if (field is null) continue;
+
+                if (fields.Any(f => f.Id != field.Id && string.Equals((f.Label ?? "").Trim(), final, StringComparison.OrdinalIgnoreCase)))
+                {
+                    skipped.Add(new ImportSkippedItem { LogicalRef = field.PublicId.ToString(), Name = temporary,
+                        Reason = $"Kept as '{temporary}': the label '{final}' is still used by a built-in field of '{group.Key}'." });
+                    continue;
+                }
+
+                await _fieldRepo.UpdateAsync(field.PublicId, table.Id, final, field.Description, field.IsRequired, field.DefaultValue,
+                    field.IsSearchable, field.IsSortable, field.IsFilterable, field.IsReportable, field.IsAuditable, field.IsUnique,
+                    field.IsEncrypted, field.IsAutoFill, field.Settings, ct);
+                field.Label = final;
+            }
+        }
+    }
+
     /// <summary>powerflowextraRd: gives the seeded system fields (Record ID#, Date Created, …, Last Modified By) the labels
     /// the source app uses for them. Runs before formula fields are created, so a formula that carries the default label
     /// (Quickbase's FID 112 "Last Modified By") keeps it, and a PowerFlow reading that field shows the same label as in
@@ -771,6 +813,10 @@ public class ImportAppFromPblCommandHandler
 
         var tableSpecs = new List<TableSpec>();
 
+        // Fields created under a temporary label because the source gave a field the label of one of PowerBase's system fields while renaming
+        // that system field itself (see SystemLabelCollisions); their real label is put back once the system fields are renamed.
+        var labelRestores = new List<(string TableName, string TemporaryLabel, string FinalLabel)>();
+
         // Field-level notes collected while this app is built (stand-ins made late, rewritten formulas, shortened text); stored at the end.
         var fieldNotes = new List<ImportFieldNoteDraft>();
 
@@ -836,8 +882,19 @@ public class ImportAppFromPblCommandHandler
                         Name = field.Name,
                         Reason = $"Imported as '{uniqueLabel}': the label '{item.Label.Trim()}' is already used by another field on '{table.Name}'.",
                     });
+                // The system fields are renamed only after the app exists, so until then PowerBase's seeded one still holds the default label.
+                // A source field that uses that default label (while renaming its own system field, e.g. "Date Created" → "DateCreated") would
+                // be rejected as a duplicate when the table is created: it is created under a temporary label and given its own label back
+                // right after the system field is renamed.
+                var createLabel = uniqueLabel;
+                if (SystemLabelCollisions(table).Contains(uniqueLabel))
+                {
+                    createLabel = UniqueLabel($"{uniqueLabel} (imported)", usedLabels);
+                    labelRestores.Add((table.Name, createLabel, uniqueLabel));
+                }
+
                 fieldSpecs.Add(new AppFieldSpec(
-                    uniqueLabel, item.TypeCode, item.Settings, Name: item.Name, Description: item.Description, HelpText: item.HelpText,
+                    createLabel, item.TypeCode, item.Settings, Name: item.Name, Description: item.Description, HelpText: item.HelpText,
                     IsRequired: item.IsRequired, DefaultValue: item.DefaultValue, IsAuditable: item.IsAuditable,
                     IsSearchable: item.IsSearchable, IsReportable: item.IsReportable, Fid: KeptFid(field)));
             }
@@ -891,6 +948,7 @@ public class ImportAppFromPblCommandHandler
         {
             await RegisterSourceFidsAsync(document, createResult.PublicId, ct);
             await ApplySystemFieldLabelsAsync(document, createResult.PublicId, ct); // powerflowextraRd
+            await RestoreLabelsAfterSystemRenameAsync(labelRestores, createResult.PublicId, skipped, ct);
             await _settingsApplier.ApplyAppSettingsAsync(document.App, createResult.PublicId, skipped, ct);
             await _settingsApplier.ApplyTableKeysAsync(document, createResult.PublicId, skipped, ct);
             ImportProgress.Report("Creating roles, relationships and formulas", 30);
@@ -1412,6 +1470,13 @@ public class ImportAppFromPblCommandHandler
         PblReport report, AppTable table, IReadOnlyList<AppField> fields, List<long> columns, List<SortSpec> sortFields,
         Dictionary<string, Guid> roleIdsByRef, List<ReportFormulaCommand> reportFormulas, List<ImportSkippedItem> skipped, CancellationToken ct)
     {
+        // The report's own formulas are not table fields, but its filter and grouping name them: give them their reserved ids here so those
+        // names resolve exactly like a field's (the same virtual fields the report runs against).
+        var virtualFormulaFields = ReportFormulaFields.Build(
+            reportFormulas.Select(f => new ReportFormula { Id = f.Id, Name = f.Name, TypeCode = f.TypeCode, DisplayAs = f.DisplayAs, Expression = f.Expression }), table.Id);
+        if (virtualFormulaFields.Count > 0)
+            fields = [.. fields, .. virtualFormulaFields];
+
         var byName = FieldFids.ByNameOrLabel(fields);
 
         FilterGroup? filter = null;

@@ -403,15 +403,18 @@ public class PblValidator
             if (!SupportedReportTypes.Contains(report.ReportType))
                 issues.Add(Error("UNSUPPORTED_REPORT_TYPE", $"Report type must be one of: {string.Join(", ", SupportedReportTypes)}.", report.LogicalRef));
 
+            // The report's own formulas are valid column / sort names for that report (they are not table fields).
+            var reportFormulaNames = (report.ReportFormulas ?? []).Select(f => f.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
             foreach (var column in report.Columns ?? [])
             {
-                if (!validFieldNames.Contains(column))
+                if (!validFieldNames.Contains(column) && !reportFormulaNames.Contains(column))
                     issues.Add(Error("UNKNOWN_REPORT_FIELD", $"Report '{report.Name}' references unknown field '{column}'.", report.LogicalRef));
             }
 
             foreach (var sort in report.SortFields ?? [])
             {
-                if (!validFieldNames.Contains(sort.FieldName))
+                if (!validFieldNames.Contains(sort.FieldName) && !reportFormulaNames.Contains(sort.FieldName))
                     issues.Add(Error("UNKNOWN_REPORT_FIELD", $"Report '{report.Name}' references unknown field '{sort.FieldName}'.", report.LogicalRef));
             }
         }
