@@ -102,6 +102,122 @@ public class PblSettingsApplier
         }
     }
 
+    // ---- searchable / allowed in reports / unique on lookup, summary and reference fields ----
+
+    /// <summary>Applies the source's "searchable", "allowed in reports" and "unique" choices to the reference, lookup and summary fields. The
+    /// relationship handlers always create these with the defaults, so the choices are set afterwards through the same update the field page uses
+    /// (a rejected one is reported, not silently dropped).</summary>
+    public virtual async Task ApplyRelationshipFieldFlagsAsync(PblDocument document, Guid appPublicId, List<ImportSkippedItem> skipped, CancellationToken ct)
+    {
+        var rels = document.Relationships ?? [];
+        var standaloneLinks = (document.Tables ?? []).SelectMany(t => (t.ReportLinks ?? []).Select(l => (Table: t, Link: l))).Where(x => x.Link.Flags is not null).ToList();
+        if (!rels.Any(r => r.ReferenceFlags is not null || r.ReportLink?.Flags is not null || r.Lookups.Any(l => l.Flags is not null) || r.Summaries.Any(s => s.Flags is not null))
+            && standaloneLinks.Count == 0)
+            return;
+
+        var appId = await _appRepo.GetIdByPublicIdAsync(appPublicId, ct);
+        var tables = (await _tableRepo.ListByAppAsync(appId, ct)).ToDictionary(t => t.Name, StringComparer.OrdinalIgnoreCase);
+        var tableNameByRef = (document.Tables ?? []).ToDictionary(t => t.LogicalRef, t => t.Name, StringComparer.Ordinal);
+        var fieldCache = new Dictionary<long, IReadOnlyList<AppField>>();
+
+        async Task SetAsync(string tableRef, int? sourceId, string? label, string name, PblFieldFlags flags)
+        {
+            if (!tableNameByRef.TryGetValue(tableRef, out var tableName) || !tables.TryGetValue(tableName, out var table)) return;
+            if (!fieldCache.TryGetValue(table.Id, out var fields))
+                fieldCache[table.Id] = fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
+            var field = fields.FirstOrDefault(f => sourceId.HasValue && f.Fid == sourceId)
+                ?? fields.FirstOrDefault(f => string.Equals(f.Label ?? f.Name, label ?? name, StringComparison.OrdinalIgnoreCase));
+            if (field is null) return; // a stand-in or missing field: nothing to apply to
+
+            var searchable = flags.IsSearchable ?? field.IsSearchable;
+            var reportable = flags.IsReportable ?? field.IsReportable;
+            var unique = flags.IsUnique ?? field.IsUnique;
+            if (searchable == field.IsSearchable && reportable == field.IsReportable && unique == field.IsUnique) return;
+
+            try
+            {
+                // Searchable / reportable: the field was created a moment ago (no records, no search index yet), so the switches are written
+                // straight to the row. Going through the full field update for each of the ~1,400 fields in a big app (version history, search
+                // index sync, audit entry, formula reindex) is what made imports crawl.
+                if (searchable != field.IsSearchable || reportable != field.IsReportable)
+                    await _fieldRepo.SetSearchableReportableAsync(field.Id, searchable, reportable, ct);
+
+                // Unique needs the physical index, so it still goes through the normal update (only a handful of fields).
+                if (unique != field.IsUnique)
+                {
+                    await _updateFieldHandler.HandleAsync(new UpdateFieldCommand(
+                        table.PublicId, field.PublicId, field.Label ?? field.Name, field.Description, field.IsRequired, field.DefaultValue,
+                        searchable, field.IsSortable, field.IsFilterable, reportable, field.IsAuditable,
+                        unique, field.IsEncrypted, field.IsAutoFill, field.Settings, UPDATE_COMMIT_MESSAGE), ct);
+                }
+                fieldCache.Remove(table.Id);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                skipped.Add(new ImportSkippedItem { LogicalRef = tableRef, Name = field.Label ?? field.Name, Reason = $"The source's searchable / allowed-in-reports / unique choices were not applied: {ex.Message}" });
+            }
+        }
+
+        foreach (var rel in rels)
+        {
+            if (rel.ReferenceFlags is { } referenceFlags)
+                await SetAsync(rel.ChildTableRef, rel.ReferenceFieldSourceId, rel.ReferenceFieldLabel, rel.ReferenceFieldName, referenceFlags);
+            foreach (var l in rel.Lookups.Where(l => l.Flags is not null))
+                await SetAsync(rel.ChildTableRef, l.SourceId, l.Label, l.Name, l.Flags!);
+            foreach (var s in rel.Summaries.Where(s => s.Flags is not null))
+                await SetAsync(rel.ParentTableRef, s.SourceId, s.Label, s.Name, s.Flags!);
+            if (rel.ReportLink is { Flags: { } linkFlags } ownLink)
+                await SetAsync(rel.ParentTableRef, ownLink.SourceId, ownLink.Label, ownLink.Label ?? string.Empty, linkFlags);
+        }
+        foreach (var (table, link) in standaloneLinks)
+            await SetAsync(table.LogicalRef, link.SourceId, link.Label, link.Name, link.Flags!);
+    }
+
+    // ---- "display as link to the parent record" ----
+
+    /// <summary>Turns on "display as link to the parent record" for the reference fields and lookups the source had it on. The relationship
+    /// handlers do not take the flag, so it is set afterwards on the field's settings, exactly as the field page does
+    /// (<see cref="Relationships.Commands.UpdateParentLink.UpdateParentLinkCommandHandler.WithFlag"/>).</summary>
+    public virtual async Task ApplyParentLinksAsync(PblDocument document, Guid appPublicId, List<ImportSkippedItem> skipped, CancellationToken ct)
+    {
+        var rels = document.Relationships ?? [];
+        if (!rels.Any(r => r.ReferenceDisplayAsLinkToParent || r.Lookups.Any(l => l.DisplayAsLinkToParent)))
+            return;
+
+        var appId = await _appRepo.GetIdByPublicIdAsync(appPublicId, ct);
+        var tables = (await _tableRepo.ListByAppAsync(appId, ct)).ToDictionary(t => t.Name, StringComparer.OrdinalIgnoreCase);
+        var tableNameByRef = (document.Tables ?? []).ToDictionary(t => t.LogicalRef, t => t.Name, StringComparer.Ordinal);
+
+        var fieldCache = new Dictionary<long, IReadOnlyList<AppField>>();
+
+        async Task SetAsync(string tableRef, int? sourceId, string? label, string name)
+        {
+            if (!tableNameByRef.TryGetValue(tableRef, out var tableName) || !tables.TryGetValue(tableName, out var table)) return;
+            try
+            {
+                // The field list is read once per table: the flag is written straight to the field's settings, which does not change the list.
+                if (!fieldCache.TryGetValue(table.Id, out var fields))
+                    fieldCache[table.Id] = fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
+                var field = fields.FirstOrDefault(f => sourceId.HasValue && f.Fid == sourceId)
+                    ?? fields.FirstOrDefault(f => string.Equals(f.Label ?? f.Name, label ?? name, StringComparison.OrdinalIgnoreCase));
+                if (field is null) return; // a stand-in or missing field: nothing to link
+                await _fieldRepo.UpdateSettingsAsync(field.Id, Relationships.Commands.UpdateParentLink.UpdateParentLinkCommandHandler.WithFlag(field.Settings, true), ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                skipped.Add(new ImportSkippedItem { LogicalRef = tableRef, Name = label ?? name, Reason = $"'Display as link to the parent record' was not applied: {ex.Message}" });
+            }
+        }
+
+        foreach (var rel in rels)
+        {
+            if (rel.ReferenceDisplayAsLinkToParent)
+                await SetAsync(rel.ChildTableRef, rel.ReferenceFieldSourceId, rel.ReferenceFieldLabel, rel.ReferenceFieldName);
+            foreach (var l in rel.Lookups.Where(l => l.DisplayAsLinkToParent))
+                await SetAsync(rel.ChildTableRef, l.SourceId, l.Label, l.Name);
+        }
+    }
+
     // ---- dependent dropdowns ----
 
     /// <summary>Sets up the "choices depend on another field" filter of every reference field the source had one on. Needs both

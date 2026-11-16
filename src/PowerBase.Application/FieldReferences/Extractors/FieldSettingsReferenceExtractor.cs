@@ -1,5 +1,6 @@
 using System.Text.Json;
 using PowerBase.Application.Formulas;
+using PowerBase.Application.Relationships;
 using PowerBase.Application.Reports;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -39,6 +40,11 @@ public static class FieldSettingsReferenceExtractor
             case "Lookup": await ExtractLookupAsync(field, table, otherTables, collector, ct); break;
             case "Summary": await ExtractSummaryAsync(field, table, otherTables, collector, ct); break;
             case "ReportLink": await ExtractReportLinkAsync(field, table, otherTables, collector, ct); break;
+            case "Reference":
+                // The fields on this table whose value narrows the dropdown (dependent dropdown filter).
+                foreach (var fid in ReferenceFilterResolver.ControllingFids(FormulaTypeMap.ParseReferenceSettings(field.Settings)))
+                    collector.Add(table.IdOfFid(fid), FieldReferenceUsages.ReferenceFilter);
+                break;
             default:
                 if (PhysicalNaming.IsActionButtonTypeCode(field.TypeCode))
                     ExtractActionButton(field, table, engine, collector);

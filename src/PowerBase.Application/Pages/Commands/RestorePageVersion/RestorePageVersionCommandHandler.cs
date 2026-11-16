@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -10,11 +11,13 @@ public class RestorePageVersionCommandHandler
     private readonly IPageRepository _pageRepo;
     private readonly IAuditRepository _auditRepo;
     private readonly RestorePageVersionCommandValidator _validator;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
-    public RestorePageVersionCommandHandler(IPageRepository pageRepo, IAuditRepository auditRepo)
+    public RestorePageVersionCommandHandler(IPageRepository pageRepo, IAuditRepository auditRepo, IFieldReferenceIndexer? refIndexer = null)
     {
         _pageRepo = pageRepo;
         _auditRepo = auditRepo;
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _validator = new RestorePageVersionCommandValidator();
     }
 
@@ -56,6 +59,8 @@ public class RestorePageVersionCommandHandler
         page.CurrentVersionNo += 1;
 
         await _pageRepo.UpdateAsync(page, ct);
+        if (page.PageType == PageTypes.Dashboard)
+            await _refIndexer.ReindexDashboardAsync(page.PublicId, ct);
 
         await _auditRepo.LogActivityAsync(
             AuditActions.VersionRestored, AuditEntityTypes.Page, page.PublicId.ToString(),

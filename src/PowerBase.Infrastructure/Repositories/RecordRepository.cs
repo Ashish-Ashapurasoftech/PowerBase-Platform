@@ -1484,7 +1484,14 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return await connection.QuerySingleAsync<long>(new CommandDefinition(sql, new { publicId }, cancellationToken: ct));
     }
 
-    public async Task<IReadOnlyDictionary<Guid, long>> GetRecordIdsByPublicIdsAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, IDbTransaction? transaction = null, CancellationToken ct = default)
+    public async Task<Guid?> FindPublicIdByRecordIdAsync(AppTable table, long recordId, CancellationToken ct = default)
+    {
+        var sql = $"SELECT PublicId FROM {PhysicalNaming.FullTableName(table.Id)} WHERE Id = @recordId AND IsDeleted = 0";
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.QuerySingleOrDefaultAsync<Guid?>(new CommandDefinition(sql, new { recordId }, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyDictionary<Guid, long>> GetRecordIdsByPublicIdsAsync(AppTable table,IReadOnlyCollection<Guid> publicIds, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         var sql = $"SELECT PublicId, Id FROM {PhysicalNaming.FullTableName(table.Id)} WHERE PublicId IN @publicIds";
         if (transaction is not null)

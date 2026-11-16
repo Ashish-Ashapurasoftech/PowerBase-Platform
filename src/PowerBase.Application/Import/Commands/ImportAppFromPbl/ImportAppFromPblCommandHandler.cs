@@ -72,7 +72,6 @@ public class ImportAppFromPblCommandHandler
 {
     /// <summary>Upper bound on lookup/summary/formula dependency rounds; each round must make progress, so it usually ends sooner.</summary>
     private const int MAX_DEPENDENCY_ROUNDS = 8;
-    private const int PLACEHOLDER_DESCRIPTION_MAX = 500;
 
     private readonly PblValidator _validator;
     private readonly CreateAppCommandHandler _createAppHandler;
@@ -107,6 +106,7 @@ public class ImportAppFromPblCommandHandler
     private readonly PblPipelinesImporter? _pipelinesImporter;
     private readonly PipelineOnlyImportService? _pipelineOnlyImport;
     private readonly IAuditRepository? _auditRepo;
+    private readonly ImportFieldNoteRecorder? _fieldNoteRecorder;
 
     public ImportAppFromPblCommandHandler(
         PblValidator validator,
@@ -141,9 +141,11 @@ public class ImportAppFromPblCommandHandler
         PblPipelinesImporter? pipelinesImporter = null,
         PipelineOnlyImportService? pipelineOnlyImport = null,
         PendingConnectedTableResolver? pendingConnectedTableResolver = null,
-        IAuditRepository? auditRepo = null)
+        IAuditRepository? auditRepo = null,
+        ImportFieldNoteRecorder? fieldNoteRecorder = null)
     {
         _pipelineOnlyImport = pipelineOnlyImport;
+        _fieldNoteRecorder = fieldNoteRecorder;
         _auditRepo = auditRepo;
         _connectedTablesApplier = connectedTablesApplier;
         _pendingConnectedTableResolver = pendingConnectedTableResolver;
@@ -405,9 +407,21 @@ public class ImportAppFromPblCommandHandler
             : $"Summary could not be created on '{item.ChildTable.Name}' (waiting for a field that never appeared).";
     }
 
-    /// <summary>A lookup, summary or formula that still could not be created after every retry gets a plain Text field with the same name
-    /// and Fid, so the field exists, forms/reports/rules that refer to it resolve, and it can be repaired by hand. The original definition
-    /// and the reason are kept in the field's description. New-app imports only (the update flow does not renumber).</summary>
+    private static readonly JsonSerializerOptions NoteJson = new()
+    {
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+    };
+
+    private sealed record PlaceholderWanted(
+        string TableName, string Ref, string Name, string? Label, int? Fid, string TypeCode, string? Description, string? HelpText,
+        string Definition, string Metadata, string? SourceType, string Code);
+
+    /// <summary>A lookup, summary or formula that still could not be created after every retry gets a plain field with the same name
+    /// and Fid, so the field exists, forms/reports/rules that refer to it resolve, and it can be repaired later. The field is typed after
+    /// the source's result type where that is certain (Text otherwise). The original definition — complete, never truncated — and the
+    /// reason go to the field's import note, not into its description. One placeholder that cannot be created never stops the others.
+    /// New-app imports only (the update flow does not renumber).</summary>
     private async Task<int> CreatePlaceholderFieldsAsync(
         PblDocument document,
         List<PblRelationship> relationships,
@@ -415,6 +429,7 @@ public class ImportAppFromPblCommandHandler
         Dictionary<string, AppTable> tableByName,
         List<ImportSkippedItem> skipped,
         List<FormulaTranslationReportItem> formulaTranslations,
+        List<ImportFieldNoteDraft> notes,
         CancellationToken ct)
     {
         if (ImportRuntime.Fids is null) return 0;
@@ -423,20 +438,78 @@ public class ImportAppFromPblCommandHandler
         foreach (var s in skipped.Where(s => !string.IsNullOrEmpty(s.LogicalRef)))
             reasonByRef.TryAdd(s.LogicalRef, s);
 
-        var wanted = new List<(string TableName, string Ref, string Name, string? Label, int? Fid, string Original, string? Help)>();
+        var fieldCache = new Dictionary<string, IReadOnlyList<AppField>>(StringComparer.OrdinalIgnoreCase);
+        async Task<string?> TypeOfAsync(string? tableName, string? fieldName)
+        {
+            if (tableName is null || fieldName is null || !tableByName.TryGetValue(tableName, out var t)) return null;
+            if (!fieldCache.TryGetValue(tableName, out var fields))
+                fieldCache[tableName] = fields = await _fieldRepo.ListByTableAsync(t.Id, ct);
+            return fields.FirstOrDefault(f => string.Equals(f.Name, fieldName, StringComparison.OrdinalIgnoreCase)
+                || string.Equals((f.Label ?? "").Trim(), fieldName.Trim(), StringComparison.OrdinalIgnoreCase))?.TypeCode;
+        }
+
+        static string Capped(string? text) => text is { Length: > ImportFieldSanitizer.DESCRIPTION_MAX } ? text[..(ImportFieldSanitizer.DESCRIPTION_MAX - 1)] + "…" : text ?? "";
+
+        var wanted = new List<PlaceholderWanted>();
         foreach (var rel in relationships)
         {
+            var relationshipInfo = new { rel.LogicalRef, rel.ParentTableRef, rel.ChildTableRef, rel.ReferenceFieldName };
+
+            // A relationship that could not be created takes its reference field with it.
+            var relationshipFailed = skipped.Any(s => s.LogicalRef == rel.LogicalRef
+                && (s.Code == "REFERENCE_NOT_CREATED" || s.Reason.StartsWith("Relationship references a table that was not created", StringComparison.Ordinal)));
+            if (relationshipFailed && tableNameByRef.TryGetValue(rel.ChildTableRef, out var referenceTable))
+            {
+                tableNameByRef.TryGetValue(rel.ParentTableRef, out var referenceParent);
+                wanted.Add(new PlaceholderWanted(referenceTable, rel.LogicalRef, rel.ReferenceFieldName, rel.ReferenceFieldLabel, rel.ReferenceFieldSourceId, "Number",
+                    rel.ReferenceFieldDescription is null ? null : Capped(rel.ReferenceFieldDescription), null,
+                    $"Reference field to the records of '{referenceParent ?? rel.ParentTableRef}'",
+                    JsonSerializer.Serialize(new { kind = "Reference", relationship = relationshipInfo, isRequired = rel.IsReferenceRequired, description = rel.ReferenceFieldDescription }, NoteJson),
+                    "QB::Field::Reference", "REFERENCE_NOT_CREATED"));
+            }
             if (rel.Lookups.Count > 0 && tableNameByRef.TryGetValue(rel.ChildTableRef, out var childName))
+            {
+                tableNameByRef.TryGetValue(rel.ParentTableRef, out var parentOfLookup);
                 foreach (var l in rel.Lookups.Where(l => reasonByRef.ContainsKey(l.LogicalRef)))
-                    wanted.Add((childName, l.LogicalRef, l.Name, l.Label, l.SourceId, $"Lookup of '{l.SourceFieldName}' from the related '{rel.ReferenceFieldName}' record", null));
+                {
+                    var type = QblPlaceholders.TypeForExistingField(await TypeOfAsync(parentOfLookup, l.SourceFieldName));
+                    wanted.Add(new PlaceholderWanted(childName, l.LogicalRef, l.Name, l.Label, l.SourceId, type,
+                        l.Description is null ? null : Capped(l.Description), null,
+                        $"Lookup of '{l.SourceFieldName}' from the related '{rel.ReferenceFieldName}' record",
+                        JsonSerializer.Serialize(new { kind = "Lookup", lookup = l, relationship = relationshipInfo }, NoteJson),
+                        "QB::Field::Lookup", "LOOKUP_NOT_CREATED"));
+                }
+            }
             if (rel.Summaries.Count > 0 && tableNameByRef.TryGetValue(rel.ParentTableRef, out var parentName))
+            {
+                tableNameByRef.TryGetValue(rel.ChildTableRef, out var childOfSummary);
                 foreach (var sm in rel.Summaries.Where(sm => reasonByRef.ContainsKey(sm.LogicalRef)))
-                    wanted.Add((parentName, sm.LogicalRef, sm.Name, sm.Label, sm.SourceId,
-                        $"Summary: {sm.Function}{(sm.TargetFieldName is { Length: > 0 } t ? $" of '{t}'" : "")}{(string.IsNullOrWhiteSpace(sm.QueryCriteria) ? "" : $" where {sm.QueryCriteria}")}", null));
+                {
+                    var type = SummaryPlaceholderType(sm.Function, await TypeOfAsync(childOfSummary, sm.TargetFieldName));
+                    wanted.Add(new PlaceholderWanted(parentName, sm.LogicalRef, sm.Name, sm.Label, sm.SourceId, type,
+                        sm.Description is null ? null : Capped(sm.Description), null,
+                        $"Summary: {sm.Function}{(sm.TargetFieldName is { Length: > 0 } t ? $" of '{t}'" : "")}{(string.IsNullOrWhiteSpace(sm.QueryCriteria) ? "" : $" where {sm.QueryCriteria}")}",
+                        JsonSerializer.Serialize(new { kind = "Summary", summary = sm, relationship = relationshipInfo }, NoteJson),
+                        "QB::Field::Summary", "SUMMARY_NOT_CREATED"));
+                }
+            }
         }
         foreach (var table in document.Tables ?? [])
             foreach (var f in (table.Fields ?? []).Where(IsFormulaField).Where(f => reasonByRef.ContainsKey(f.LogicalRef)))
-                wanted.Add((table.Name, f.LogicalRef, f.Name, f.Label, KeptFid(f), $"Formula: {f.FormulaExpression}", f.HelpText));
+            {
+                var diagnostics = formulaTranslations.FirstOrDefault(t => t.LogicalRef == f.LogicalRef)?.Diagnostics;
+                wanted.Add(new PlaceholderWanted(table.Name, f.LogicalRef, f.Name, f.Label, KeptFid(f),
+                    QblPlaceholders.TypeForFormula(f.ResultType, f.FormulaVariant, f.SourceType),
+                    f.Description is null ? null : Capped(f.Description), f.HelpText,
+                    f.OriginalFormula ?? f.FormulaExpression ?? string.Empty,
+                    JsonSerializer.Serialize(new
+                    {
+                        kind = "Formula", sourceType = f.SourceType, resultType = f.ResultType, variant = f.FormulaVariant, sourceId = f.SourceId,
+                        settings = f.Settings, convertedExpression = f.FormulaExpression, translationDiagnostics = diagnostics,
+                        description = f.Description, helpText = f.HelpText,
+                    }, NoteJson),
+                    f.SourceType ?? "QB::Field::Formula", "FORMULA_NEEDS_MANUAL_REVIEW"));
+            }
 
         var created = 0;
         foreach (var group in wanted.GroupBy(w => w.TableName, StringComparer.OrdinalIgnoreCase))
@@ -447,39 +520,117 @@ public class ImportAppFromPblCommandHandler
             var usedLabels = existing.Select(f => (f.Label ?? "").Trim()).Where(l => l.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var usedNames = existing.Select(f => f.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            var items = new List<BulkCreateFieldItem>();
+            var items = new List<(PlaceholderWanted W, BulkCreateFieldItem Item)>();
             foreach (var w in group)
             {
-                if (usedNames.Contains(w.Name)) continue; // something with this name exists already
+                // The field exists already (it was created after all - an earlier warning about it does not mean it failed): nothing to stand in for.
+                if (usedNames.Contains(w.Name))
+                    continue;
+                // Same for a reference field whose relationship was created after all (only part of it failed).
+                if (w.Code == "REFERENCE_NOT_CREATED" && usedLabels.Contains((w.Label ?? w.Name).Trim()))
+                    continue;
                 var label = UniqueLabel((w.Label ?? w.Name).Trim(), usedLabels);
-                var reason = reasonByRef[w.Ref].Reason;
-                var description = $"Placeholder created by the import - repair or replace it. Original definition - {w.Original}. Why it could not be created - {reason}";
-                // A field description holds 500 characters at most; a longer one rejected the whole batch for the table.
-                if (description.Length > PLACEHOLDER_DESCRIPTION_MAX)
-                    description = description[..(PLACEHOLDER_DESCRIPTION_MAX - 1)] + "…";
-                items.Add(new BulkCreateFieldItem("Text", label,
-                    Description: description, IsEncrypted: true,
-                    Name: w.Name, HelpText: w.Help, Fid: w.Fid));
+                items.Add((w, new BulkCreateFieldItem(w.TypeCode, label, Description: string.IsNullOrWhiteSpace(w.Description) ? null : w.Description,
+                    IsEncrypted: true, Name: w.Name, HelpText: w.HelpText, Fid: w.Fid)));
             }
             if (items.Count == 0) continue;
 
-            try
+            foreach (var (w, ok, typeUsed, error) in await CreatePlaceholdersAsync(table, items, ct))
             {
-                await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(table.PublicId, items), ct);
-                created += items.Count;
-                foreach (var w in group)
+                if (!ok)
                 {
-                    if (reasonByRef.TryGetValue(w.Ref, out var s) && skipped.IndexOf(s) is var at and >= 0)
-                        skipped[at] = new ImportSkippedItem { LogicalRef = s.LogicalRef, Name = s.Name, Reason = s.Reason + " A repairable placeholder text field was created in its place." };
-                    formulaTranslations.FirstOrDefault(t => t.LogicalRef == w.Ref)?.Diagnostics.Add("A placeholder text field was created in its place.");
+                    skipped.Add(new ImportSkippedItem { LogicalRef = w.Ref, Name = w.Name, Code = "PLACEHOLDER_NOT_CREATED",
+                        Reason = $"The placeholder for '{w.Name}' on '{group.Key}' could not be created: {error}" });
+                    continue;
                 }
-            }
-            catch (DomainException ex)
-            {
-                skipped.Add(new ImportSkippedItem { LogicalRef = "", Name = $"Placeholder fields on '{group.Key}'", Reason = $"Placeholders could not be created: {Describe(ex)}" });
+
+                created++;
+                var reason = reasonByRef.TryGetValue(w.Ref, out var s) ? s.Reason : "The field could not be created as itself.";
+                if (reasonByRef.TryGetValue(w.Ref, out s) && skipped.IndexOf(s) is var at and >= 0)
+                    skipped[at] = new ImportSkippedItem { LogicalRef = s.LogicalRef, Name = s.Name, Code = s.Code, Reason = s.Reason + $" A repairable placeholder {typeUsed} field was created in its place." };
+                formulaTranslations.FirstOrDefault(t => t.LogicalRef == w.Ref)?.Diagnostics.Add($"A placeholder {typeUsed} field was created in its place.");
+
+                notes.Add(new ImportFieldNoteDraft
+                {
+                    TableName = group.Key,
+                    FieldName = w.Name,
+                    FieldLabel = w.Label,
+                    SourceFid = w.Fid,
+                    Severity = ImportNoteSeverities.Warning,
+                    Code = w.Code,
+                    Message = $"{reason} A placeholder {typeUsed} field was created in its place.",
+                    RecommendedAction = ImportFieldNoteBuilder.PlaceholderAction(w.Definition, w.SourceType),
+                    SourceLogicalRef = w.Ref,
+                    SourceType = w.SourceType,
+                    IsPlaceholder = true,
+                    OriginalDefinition = w.Definition,
+                    OriginalMetadata = w.Metadata,
+                });
             }
         }
         return created;
+    }
+
+    /// <summary>Creates the stand-in fields of one table. The whole batch first; if anything in it fails, one at a time, so a single field
+    /// that cannot be created costs only itself (a field that cannot be created in its own type is retried as plain Text).</summary>
+    private async Task<List<(PlaceholderWanted W, bool Ok, string TypeUsed, string? Error)>> CreatePlaceholdersAsync(
+        AppTable table, List<(PlaceholderWanted W, BulkCreateFieldItem Item)> items, CancellationToken ct)
+    {
+        var results = new List<(PlaceholderWanted, bool, string, string?)>();
+        try
+        {
+            await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(table.PublicId, items.Select(i => i.Item).ToList()), ct);
+            results.AddRange(items.Select(i => (i.W, true, i.Item.TypeCode, (string?)null)));
+            return results;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // fall through: some of the batch may exist already
+        }
+
+        foreach (var (w, item) in items)
+        {
+            string? lastError = null;
+            foreach (var candidate in item.TypeCode == "Text" ? new[] { item } : new[] { item, item with { TypeCode = "Text" } })
+            {
+                try
+                {
+                    var current = await _fieldRepo.ListByTableAsync(table.Id, ct);
+                    if (current.Any(f => string.Equals(f.Name, w.Name, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        results.Add((w, true, current.First(f => string.Equals(f.Name, w.Name, StringComparison.OrdinalIgnoreCase)).TypeCode, null));
+                        lastError = null;
+                        break;
+                    }
+                    await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(table.PublicId, [candidate]), ct);
+                    results.Add((w, true, candidate.TypeCode, null));
+                    lastError = null;
+                    break;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    lastError = ex is DomainException de ? Describe(de) : ex.Message;
+                }
+            }
+            if (lastError is not null)
+                results.Add((w, false, item.TypeCode, lastError));
+        }
+        return results;
+    }
+
+    /// <summary>The plain type that holds a summary's place: counts and totals are numbers, "any related records" a Boolean, minimum/maximum
+    /// the summarized field's own type, combined text Text.</summary>
+    private static string SummaryPlaceholderType(string function, string? targetTypeCode)
+    {
+        var target = QblPlaceholders.TypeForExistingField(targetTypeCode);
+        return function switch
+        {
+            "Count" or "DistinctCount" => "Number",
+            "Exists" => "Boolean",
+            "Sum" or "Avg" => target is "Currency" or "Percent" or "Duration" ? target : "Number",
+            "Min" or "Max" => target,
+            _ => QblPlaceholders.TEXT,
+        };
     }
 
     /// <summary>The app's variables, for the formula translator. The caller assigns <see cref="ImportRuntime.Variables"/> itself.</summary>
@@ -616,9 +767,12 @@ public class ImportAppFromPblCommandHandler
         var skipped = new List<ImportSkippedItem>();
         skipped.AddRange(conversionIssues
             .Where(i => i.Severity == PblIssueSeverity.Warning)
-            .Select(i => new ImportSkippedItem { LogicalRef = i.ElementRef ?? "", Name = i.ElementRef ?? "", Reason = i.Message }));
+            .Select(i => new ImportSkippedItem { LogicalRef = i.ElementRef ?? "", Name = i.ElementRef ?? "", Reason = i.Message, Code = i.Code }));
 
         var tableSpecs = new List<TableSpec>();
+
+        // Field-level notes collected while this app is built (stand-ins made late, rewritten formulas, shortened text); stored at the end.
+        var fieldNotes = new List<ImportFieldNoteDraft>();
 
         // Pass 1 input: scalar fields only. Formula fields are deferred to pass 2.
         foreach (var table in document.Tables ?? [])
@@ -631,25 +785,49 @@ public class ImportAppFromPblCommandHandler
             // ApplySystemFieldLabelsAsync), so those — not PowerBase's defaults — are the labels already taken.
             var usedLabels = new HashSet<string>(SystemLabelsOf(table), StringComparer.OrdinalIgnoreCase);
 
-            foreach (var field in table.Fields ?? [])
+            foreach (var sourceField in table.Fields ?? [])
             {
-                if (IsFormulaField(field))
+                if (IsFormulaField(sourceField))
                     continue;
 
+                var field = sourceField;
                 if (!PblValidator.SupportedFieldTypeCodes.Contains(field.TypeCode))
                 {
+                    // A field of a type this import cannot create is never dropped: a plain Text field keeps its place and the import
+                    // note keeps what the document said about it.
+                    var reason = $"Unsupported field type '{field.TypeCode}' for this import phase";
                     skipped.Add(new ImportSkippedItem
                     {
                         LogicalRef = field.LogicalRef,
                         Name = field.Name,
-                        Reason = $"Unsupported field type '{field.TypeCode}' for this import phase.",
+                        Reason = $"{reason}. A placeholder Text field was created in its place.",
+                        Code = "UNSUPPORTED_FIELD_TYPE",
                     });
-                    continue;
+                    fieldNotes.Add(new ImportFieldNoteDraft
+                    {
+                        TableName = table.Name,
+                        FieldName = field.Name,
+                        FieldLabel = field.Label,
+                        SourceFid = field.SourceId,
+                        Code = "UNSUPPORTED_FIELD_TYPE",
+                        Message = $"{reason}. A placeholder Text field was created in its place.",
+                        RecommendedAction = ImportFieldNoteBuilder.PLACEHOLDER_ACTION,
+                        SourceLogicalRef = field.LogicalRef,
+                        SourceType = field.TypeCode,
+                        IsPlaceholder = true,
+                        OriginalMetadata = JsonSerializer.Serialize(field),
+                    });
+                    field = new PblField
+                    {
+                        LogicalRef = field.LogicalRef, Name = field.Name, Label = field.Label, TypeCode = "Text", Description = field.Description,
+                        HelpText = field.HelpText, SourceId = field.SourceId, SourceType = field.TypeCode,
+                        Placeholder = new PblPlaceholderInfo { Code = "UNSUPPORTED_FIELD_TYPE", Reason = reason },
+                    };
                 }
 
                 // Preserve the imported file's exact Name (its stable third-party identifier) rather
                 // than regenerating one — see AppFieldSpec.Name.
-                var item = BuildScalarItem(field, skipped);
+                var item = BuildScalarItem(field, skipped, fieldNotes, table.Name);
                 var uniqueLabel = UniqueLabel(item.Label.Trim(), usedLabels);
                 if (!string.Equals(uniqueLabel, item.Label.Trim(), StringComparison.Ordinal))
                     skipped.Add(new ImportSkippedItem
@@ -716,11 +894,13 @@ public class ImportAppFromPblCommandHandler
             await _settingsApplier.ApplyAppSettingsAsync(document.App, createResult.PublicId, skipped, ct);
             await _settingsApplier.ApplyTableKeysAsync(document, createResult.PublicId, skipped, ct);
             ImportProgress.Report("Creating roles, relationships and formulas", 30);
-            applied = await ApplyDocumentAsync(document, createResult.PublicId, null, skipped, formulaTranslations, ct);
+            applied = await ApplyDocumentAsync(document, createResult.PublicId, null, skipped, formulaTranslations, ct, fieldNotes);
             ImportProgress.Report("Applying table settings", 92);
             await _settingsApplier.ApplyTableSettingsAsync(document, createResult.PublicId, skipped, ct);
             await _settingsApplier.ApplyReferenceFiltersAsync(document, createResult.PublicId, skipped, ct);
             await _settingsApplier.ApplyRelationshipFieldDescriptionsAsync(document, createResult.PublicId, skipped, ct);
+            await _settingsApplier.ApplyRelationshipFieldFlagsAsync(document, createResult.PublicId, skipped, ct);
+            await _settingsApplier.ApplyParentLinksAsync(document, createResult.PublicId, skipped, ct);
             ImportRuntime.Variables = await LoadVariableSchemaAsync(createResult.PublicId, ct); // the value set inside ApplyDocumentAsync does not reach this method
             await _settingsApplier.ApplyCustomDataRulesAsync(document, createResult.PublicId, skipped, ct);
         }
@@ -756,6 +936,8 @@ public class ImportAppFromPblCommandHandler
         foreach (var note in ImportRuntime.Fids?.DrainFallbacks() ?? [])
             skipped.Add(new ImportSkippedItem { LogicalRef = "", Name = "Field number", Reason = note });
 
+        await StoreFieldNotesAsync(document, createResult.PublicId, skipped, fieldNotes, ct);
+
         return new ImportReport
         {
             AppPublicId = createResult.PublicId,
@@ -774,6 +956,29 @@ public class ImportAppFromPblCommandHandler
         };
     }
 
+    /// <summary>Stores the field-level import notes (stand-in fields with their complete original definition, rewritten formulas, anything else
+    /// that was reported about one field) next to the fields they are about. Never fails the import: the app is already built, and every note
+    /// is also in the report.</summary>
+    private async Task StoreFieldNotesAsync(PblDocument document, Guid appPublicId, List<ImportSkippedItem> skipped, List<ImportFieldNoteDraft> lateNotes, CancellationToken ct)
+    {
+        if (_fieldNoteRecorder is null) return;
+        try
+        {
+            var drafts = ImportFieldNoteBuilder.Build(document, skipped, lateNotes);
+            var result = await _fieldNoteRecorder.RecordAsync(appPublicId, drafts, ct);
+            foreach (var lost in result.Unmatched.Where(d => d.IsPlaceholder))
+                skipped.Add(new ImportSkippedItem
+                {
+                    LogicalRef = lost.SourceLogicalRef ?? "", Name = lost.FieldName, Code = "FIELD_NOTE_NOT_STORED",
+                    Reason = $"The import note for '{lost.FieldName}' on '{lost.TableName}' could not be attached because the field was not found. Original definition: {lost.OriginalDefinition}",
+                });
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            skipped.Add(new ImportSkippedItem { LogicalRef = "", Name = "Field import notes", Code = "FIELD_NOTES_NOT_STORED", Reason = $"The app was imported, but its field-level import notes could not be saved ({ex.Message}); the same warnings are in this report." });
+        }
+    }
+
     /// <summary>
     /// Runs passes 2–7 plus variables and code pages for <paramref name="document"/> against an app
     /// that already exists with the document's tables and scalar fields in place. Shared by Create
@@ -787,8 +992,10 @@ public class ImportAppFromPblCommandHandler
         ISet<string>? tablesKeepingDefaults,
         List<ImportSkippedItem> skipped,
         List<FormulaTranslationReportItem> formulaTranslations,
-        CancellationToken ct)
+        CancellationToken ct,
+        List<ImportFieldNoteDraft>? notes = null)
     {
+        notes ??= [];
         var fieldsCreated = 0;
         var reportsCreated = 0;
         var relationshipsCreated = 0;
@@ -828,8 +1035,14 @@ public class ImportAppFromPblCommandHandler
                 relationshipsCreated = await CreateRelationshipsAsync(relationships, tableNameByRef, tableByName, appPublicId, deferredLookups, deferredSummaries, skipped, ct);
 
             // Source report links that are not a relationship's own, once the reference fields they match on exist.
+            // A link that opens (or matches on) a formula or lookup field cannot be made yet: those are created below, so it is retried afterwards.
+            var deferredReportLinks = new List<string>();
             if (ImportRuntime.Fids is not null && (document.Tables ?? []).Any(t => (t.ReportLinks ?? []).Count > 0))
-                fieldsCreated += await CreateStandaloneReportLinksAsync(document, tableNameByRef, tableByName, appPublicId, skipped, ct);
+            {
+                var (linksCreated, linksDeferred) = await CreateStandaloneReportLinksAsync(document, tableNameByRef, tableByName, appPublicId, skipped, ct, final: false);
+                fieldsCreated += linksCreated;
+                deferredReportLinks = linksDeferred;
+            }
 
             // Formula fields must exist before forms and reports are built: a form element or
             // report column referencing a formula field can only resolve once that field has a
@@ -840,7 +1053,7 @@ public class ImportAppFromPblCommandHandler
                 .SelectMany(t => (t.Fields ?? []).Where(IsFormulaField).Select(f => (Table: t, Field: f)))
                 .ToList();
             ImportProgress.Report("Creating formula fields", 55);
-            var (formulasCreated, pendingFormulas) = await CreateFormulaFieldsAsync(formulaCandidates, tableByName, formulaTranslations, ct);
+            var (formulasCreated, pendingFormulas) = await CreateFormulaFieldsAsync(formulaCandidates, tableByName, formulaTranslations, notes, ct);
             fieldsCreated += formulasCreated;
 
             // Lookups, summaries and formulas can depend on each other in a cycle, so keep going
@@ -853,7 +1066,7 @@ public class ImportAppFromPblCommandHandler
 
                 if (pendingFormulas.Count > 0)
                 {
-                    var (created, stillPending) = await CreateFormulaFieldsAsync(pendingFormulas, tableByName, formulaTranslations, ct);
+                    var (created, stillPending) = await CreateFormulaFieldsAsync(pendingFormulas, tableByName, formulaTranslations, notes, ct);
                     fieldsCreated += created;
                     progress += created;
                     pendingFormulas = stillPending;
@@ -862,6 +1075,20 @@ public class ImportAppFromPblCommandHandler
                 if (progress == 0)
                     break;
             }
+
+            // A formula that still does not compile after every retry is saved anyway - as a formula field, exactly as written in the source,
+            // like Quickbase does (it shows the error when the field is opened). Only one PowerBase cannot save at all gets a stand-in below.
+            if (pendingFormulas.Count > 0)
+            {
+                ImportProgress.Report("Saving formulas that do not compile yet", 62);
+                var (savedBroken, notSaved) = await CreateBrokenFormulaFieldsAsync(pendingFormulas, tableByName, formulaTranslations, skipped, notes, ct);
+                fieldsCreated += savedBroken;
+                pendingFormulas = notSaved;
+            }
+
+            // Formulas, lookups and summaries exist now: the report links held back earlier can be made (whatever still fails is reported).
+            if (deferredReportLinks.Count > 0)
+                fieldsCreated += (await CreateStandaloneReportLinksAsync(document, tableNameByRef, tableByName, appPublicId, skipped, ct, onlyRefs: deferredReportLinks, final: true)).Created;
 
             foreach (var l in deferredLookups)
                 skipped.Add(new ImportSkippedItem { LogicalRef = l.Lookup.LogicalRef, Name = l.Lookup.Name, Reason = $"Lookup source field '{l.Lookup.SourceFieldName}' was not created on '{l.ParentTable.Name}'." });
@@ -873,10 +1100,14 @@ public class ImportAppFromPblCommandHandler
                 skipped.Add(new ImportSkippedItem { LogicalRef = field.LogicalRef, Name = field.Name, Reason = $"Formula needs manual review: {string.Join("; ", diagnostics)}" });
             }
 
-            fieldsCreated += await CreatePlaceholderFieldsAsync(document, relationships, tableNameByRef, tableByName, skipped, formulaTranslations, ct);
+            fieldsCreated += await CreatePlaceholderFieldsAsync(document, relationships, tableNameByRef, tableByName, skipped, formulaTranslations, notes, ct);
 
             // Every field now exists, so the table's default columns, dynamic filters and sort can name their real Fids.
             await ApplyDefaultReportSettingsAsync(document, tableByName, skipped, ct);
+
+            // Select fields whose choices come from another field (ChoiceSourceSettings) need the OTHER field's real
+            // TableId/Fid, which also only exist now.
+            await ApplyChoiceSourcesAsync(document, tableByName, skipped, ct);
 
             ImportProgress.Report("Creating reports", 68);
             // Role refs → the roles this app has now, for report visibility.
@@ -884,6 +1115,7 @@ public class ImportAppFromPblCommandHandler
 
             // Reports go in before forms: an embedded related-records grid on a form points at a report that must already exist.
             var createdReports = new Dictionary<string, CreatedReport>(StringComparer.Ordinal);
+            AppTableAliasSchema? reportFormulaAliasSchema = null;
 
             foreach (var table in document.Tables ?? [])
             {
@@ -901,6 +1133,50 @@ public class ImportAppFromPblCommandHandler
 
                 foreach (var report in pblReports)
                 {
+                    // Report-level formula columns (source: QB::Report::Formula::*) are scoped to this one report —
+                    // translate them now (needs the table's real fields, like any Formula field) and give each a
+                    // reserved Fid (ReportFormulaFields.FirstId..+2) so the Columns/sort resolution below picks them
+                    // up exactly like a real field. A formula that fails to translate or compiles to a type report
+                    // formulas can't hold is left out of the name map — it then falls through to the same
+                    // "column whose field was not created" handling as any other missing column.
+                    var reportFormulas = new List<ReportFormulaCommand>();
+                    var reportFidByName = fidByName;
+                    if (report.ReportFormulas.Count > 0)
+                    {
+                        reportFidByName = new Dictionary<string, long>(fidByName, StringComparer.Ordinal);
+                        reportFormulaAliasSchema ??= await AppTableAliasSchema.BuildAsync(_tableRepo, createdTable.AppId, ct);
+
+                        foreach (var formula in report.ReportFormulas.Take(ReportFormulaFields.MaxFormulas))
+                        {
+                            FormulaTranslationResult translation;
+                            try
+                            {
+                                translation = _formulaTranslator.Translate(formula.ResultType, formula.Expression, allFields, reportFormulaAliasSchema);
+                            }
+                            catch (Exception ex) when (ex is not OperationCanceledException)
+                            {
+                                translation = new FormulaTranslationResult { Status = FormulaTranslationStatus.NeedsManualReview, Diagnostics = [$"The formula could not be analysed: {ex.Message}"] };
+                            }
+
+                            if (translation.Status == FormulaTranslationStatus.NeedsManualReview ||
+                                !ReportFormulaFields.IsAllowedTypeCode(translation.TypeCode) ||
+                                translation.TypeCode == "Formula_Number" && formula.DisplayAs is not null && !ReportFormulaFields.IsAllowedDisplayAs(formula.DisplayAs))
+                            {
+                                skipped.Add(new ImportSkippedItem
+                                {
+                                    LogicalRef = report.LogicalRef,
+                                    Name = formula.Name,
+                                    Reason = $"Report formula column '{formula.Name}' on report '{report.Name}' was not carried: {(translation.Diagnostics.Count > 0 ? string.Join(" ", translation.Diagnostics) : "its result type has no PowerBase report-formula equivalent")}.",
+                                });
+                                continue;
+                            }
+
+                            var id = ReportFormulaFields.FirstId + reportFormulas.Count;
+                            reportFormulas.Add(new ReportFormulaCommand(id, formula.Name, translation.TypeCode!, formula.DisplayAs, TranslatedExpression(translation) ?? formula.Expression));
+                            reportFidByName[formula.Name] = id;
+                        }
+                    }
+
                     // A column pointing at a field that didn't make it (a formula that failed
                     // to translate, an unsupported type) costs that column, not the whole
                     // report. Dropping the report outright would be badly disproportionate:
@@ -908,15 +1184,15 @@ public class ImportAppFromPblCommandHandler
                     // anywhere would take the table's main view down with it — and with the
                     // seeded default views suppressed for imported tables, that can leave a
                     // table with no reports at all.
-                    var unresolved = report.Columns.Where(c => !fidByName.ContainsKey(c))
-                        .Concat(report.SortFields.Select(s => s.FieldName).Where(n => !fidByName.ContainsKey(n)))
+                    var unresolved = report.Columns.Where(c => !reportFidByName.ContainsKey(c))
+                        .Concat(report.SortFields.Select(s => s.FieldName).Where(n => !reportFidByName.ContainsKey(n)))
                         .Distinct()
                         .ToList();
 
-                    var columns = report.Columns.Where(fidByName.ContainsKey).Select(c => fidByName[c]).ToList();
+                    var columns = report.Columns.Where(reportFidByName.ContainsKey).Select(c => reportFidByName[c]).ToList();
                     var sortFields = report.SortFields
-                        .Where(s => fidByName.ContainsKey(s.FieldName))
-                        .Select(s => new SortSpec { FieldId = fidByName[s.FieldName], Desc = s.Desc })
+                        .Where(s => reportFidByName.ContainsKey(s.FieldName))
+                        .Select(s => new SortSpec { FieldId = reportFidByName[s.FieldName], Desc = s.Desc })
                         .ToList();
 
                     // Nothing left to show — now the report really is meaningless.
@@ -941,7 +1217,7 @@ public class ImportAppFromPblCommandHandler
                         });
                     }
 
-                    var createdReport = await CreateReportAsync(report, createdTable, allFields, columns, sortFields, roleIdsByRef, skipped, ct);
+                    var createdReport = await CreateReportAsync(report, createdTable, allFields, columns, sortFields, roleIdsByRef, reportFormulas, skipped, ct);
                     if (createdReport is null)
                         continue;
 
@@ -1020,15 +1296,52 @@ public class ImportAppFromPblCommandHandler
     /// (see <see cref="ImportFieldSanitizer"/>) so a single bad value never fails the table. Unique is applied afterwards
     /// (it needs a physical index), see <see cref="PblSettingsApplier"/>.
     /// </summary>
-    public BulkCreateFieldItem BuildScalarItem(PblField field, List<ImportSkippedItem> skipped)
+    public BulkCreateFieldItem BuildScalarItem(PblField field, List<ImportSkippedItem> skipped, List<ImportFieldNoteDraft>? notes = null, string? tableName = null)
     {
         var label = (field.Label ?? field.Name).Trim();
         var clean = _fieldSanitizer.Sanitize(field.TypeCode, label, field.Settings, field.DefaultValue, field.IsRequired, field.IsUnique == true);
         foreach (var note in clean.Notes)
             skipped.Add(new ImportSkippedItem { LogicalRef = field.LogicalRef, Name = field.Name, Reason = note });
 
+        // A label or description longer than PowerBase holds would be rejected, and with it every other field of the table. It is cut
+        // instead — and the complete text stays in the field's import note.
+        var description = field.Description;
+        var fullText = new List<string>();
+        if (label.Length > ImportFieldSanitizer.LABEL_MAX)
+        {
+            fullText.Add($"Label: {label}");
+            label = label[..(ImportFieldSanitizer.LABEL_MAX - 1)].TrimEnd() + "…";
+            skipped.Add(new ImportSkippedItem { LogicalRef = field.LogicalRef, Name = field.Name, Code = "IMPORT_FIELD_TEXT_SHORTENED", Reason = $"The label was longer than {ImportFieldSanitizer.LABEL_MAX} characters and was shortened; the complete label is kept in the field's import note." });
+        }
+        if (description is { Length: > ImportFieldSanitizer.DESCRIPTION_MAX })
+        {
+            fullText.Add($"Description: {description}");
+            description = description[..(ImportFieldSanitizer.DESCRIPTION_MAX - 1)] + "…";
+            skipped.Add(new ImportSkippedItem { LogicalRef = field.LogicalRef, Name = field.Name, Code = "IMPORT_FIELD_TEXT_SHORTENED", Reason = $"The description was longer than {ImportFieldSanitizer.DESCRIPTION_MAX} characters and was shortened; the complete text is kept in the field's import note." });
+        }
+        if (PowerBase.Formula.Binding.FieldIdReference.IsReservedLabel(label))
+        {
+            skipped.Add(new ImportSkippedItem { LogicalRef = field.LogicalRef, Name = field.Name, Code = "IMPORT_FIELD_TEXT_SHORTENED", Reason = $"The label '{label}' is reserved for referencing a field by its id in formulas; imported as '{label} (imported)'." });
+            fullText.Add($"Label: {label}");
+            label += " (imported)";
+        }
+        if (fullText.Count > 0 && notes is not null && tableName is not null)
+            notes.Add(new ImportFieldNoteDraft
+            {
+                TableName = tableName,
+                FieldName = field.Name,
+                FieldLabel = label,
+                SourceFid = field.SourceId,
+                Severity = ImportNoteSeverities.Information,
+                Code = "IMPORT_FIELD_TEXT_SHORTENED",
+                Message = "Part of the label or description was longer than PowerBase holds and was shortened; the complete original text is kept here.",
+                SourceLogicalRef = field.LogicalRef,
+                SourceType = field.SourceType,
+                OriginalDefinition = string.Join(Environment.NewLine, fullText),
+            });
+
         return new BulkCreateFieldItem(
-            field.TypeCode, label, field.Description, clean.IsRequired, field.IsAuditable == true, clean.Settings, clean.DefaultValue,
+            field.TypeCode, label, description, clean.IsRequired, field.IsAuditable == true, clean.Settings, clean.DefaultValue,
             IsEncrypted: true, Name: field.Name, HelpText: field.HelpText, IsSearchable: field.IsSearchable, IsReportable: field.IsReportable);
     }
 
@@ -1066,6 +1379,15 @@ public class ImportAppFromPblCommandHandler
         return (typeCode, JsonSerializer.Serialize(expressionOnly));
     }
 
+    /// <summary>The translated PowerBase-syntax expression text out of a successful <see cref="FormulaTranslationResult"/> —
+    /// same extraction <see cref="BuildFormulaSettings"/> does for a real Formula field's Settings JSON.</summary>
+    private static string? TranslatedExpression(FormulaTranslationResult translation)
+    {
+        if (translation.SettingsJson is null) return null;
+        using var doc = JsonDocument.Parse(translation.SettingsJson);
+        return doc.RootElement.TryGetProperty("expression", out var expr) ? expr.GetString() : null;
+    }
+
     private async Task<Dictionary<string, Guid>> ResolveRoleIdsByRefAsync(PblDocument document, Guid appPublicId, CancellationToken ct)
     {
         var result = new Dictionary<string, Guid>(StringComparer.Ordinal);
@@ -1088,7 +1410,7 @@ public class ImportAppFromPblCommandHandler
     /// </summary>
     private async Task<ReportDetailResult?> CreateReportAsync(
         PblReport report, AppTable table, IReadOnlyList<AppField> fields, List<long> columns, List<SortSpec> sortFields,
-        Dictionary<string, Guid> roleIdsByRef, List<ImportSkippedItem> skipped, CancellationToken ct)
+        Dictionary<string, Guid> roleIdsByRef, List<ReportFormulaCommand> reportFormulas, List<ImportSkippedItem> skipped, CancellationToken ct)
     {
         var byName = FieldFids.ByNameOrLabel(fields);
 
@@ -1242,7 +1564,8 @@ public class ImportAppFromPblCommandHandler
             Chart: report.ReportType == "Chart" ? chartConfig : minimal ? null : crosstab,
             Options: minimal || report.ReportType is "Summary" or "Chart" ? null : options,
             TableSortGroup: minimal ? null : tableSortGroup,
-            RowGroupLevels: report.ReportType == "Summary" ? (minimal ? recordIdGroup ?? rowGroupLevels : rowGroupLevels) : null);
+            RowGroupLevels: report.ReportType == "Summary" ? (minimal ? recordIdGroup ?? rowGroupLevels : rowGroupLevels) : null,
+            ReportFormulas: report.ReportType == "Table" && reportFormulas.Count > 0 ? reportFormulas : null);
 
         try
         {
@@ -1277,6 +1600,7 @@ public class ImportAppFromPblCommandHandler
         IReadOnlyList<(PblTable Table, PblField Field)> candidates,
         Dictionary<string, AppTable> tableByName,
         List<FormulaTranslationReportItem> formulaTranslations,
+        List<ImportFieldNoteDraft> notes,
         CancellationToken ct)
     {
         var created = 0;
@@ -1293,7 +1617,7 @@ public class ImportAppFromPblCommandHandler
             var formulaFields = tableGroup.Select(c => c.Field).ToList();
 
             var currentFields = await _fieldRepo.ListByTableAsync(createdTable.Id, ct);
-            var formulaItems = new List<BulkCreateFieldItem>();
+            var formulaItems = new List<(PblField Field, BulkCreateFieldItem Item, FormulaTranslationResult Translation)>();
 
             // PowerBase requires a unique label per table (case-insensitive); the source file can
             // carry a formula whose label matches a field that already exists (confirmed in a real
@@ -1307,7 +1631,20 @@ public class ImportAppFromPblCommandHandler
             foreach (var field in formulaFields)
             {
                 aliasSchema ??= await AppTableAliasSchema.BuildAsync(_tableRepo, createdTable.AppId, ct);
-                var translation = _formulaTranslator.Translate(field.ResultType, field.FormulaExpression, currentFields, aliasSchema);
+                FormulaTranslationResult translation;
+                try
+                {
+                    translation = _formulaTranslator.Translate(field.ResultType, field.FormulaExpression, currentFields, aliasSchema);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // A formula the engine chokes on costs only that field.
+                    translation = new FormulaTranslationResult
+                    {
+                        Status = FormulaTranslationStatus.NeedsManualReview,
+                        Diagnostics = [$"The formula could not be analysed: {ex.Message}"],
+                    };
+                }
 
                 var reportItem = new FormulaTranslationReportItem
                 {
@@ -1334,20 +1671,210 @@ public class ImportAppFromPblCommandHandler
                     reportItem.Diagnostics.Add($"Label '{(field.Label ?? field.Name).Trim()}' is already used by another field on this table; imported as '{label}'.");
 
                 var (formulaTypeCode, formulaSettings) = BuildFormulaSettings(field, translation, reportItem.Diagnostics);
-                formulaItems.Add(new BulkCreateFieldItem(
-                    formulaTypeCode, label, field.Description, IsRequired: false, IsAuditable: field.IsAuditable == true,
+                var description = field.Description;
+                if (description is { Length: > ImportFieldSanitizer.DESCRIPTION_MAX })
+                {
+                    // Too long for a field description (it would be refused, and with it the whole batch): cut, the full text goes to the note.
+                    notes.Add(new ImportFieldNoteDraft
+                    {
+                        TableName = table.Name, FieldName = field.Name, FieldLabel = label, SourceFid = KeptFid(field),
+                        Severity = ImportNoteSeverities.Information, Code = "IMPORT_FIELD_TEXT_SHORTENED",
+                        Message = "The description was longer than PowerBase holds and was shortened; the complete original text is kept here.",
+                        SourceLogicalRef = field.LogicalRef, SourceType = field.SourceType, OriginalDefinition = $"Description: {description}",
+                    });
+                    description = description[..(ImportFieldSanitizer.DESCRIPTION_MAX - 1)] + "…";
+                }
+                formulaItems.Add((field, new BulkCreateFieldItem(
+                    formulaTypeCode, label, description, IsRequired: false, IsAuditable: field.IsAuditable == true,
                     Settings: formulaSettings, Name: field.Name, HelpText: field.HelpText,
-                    IsSearchable: field.IsSearchable, IsReportable: field.IsReportable, Fid: KeptFid(field)));
+                    IsSearchable: field.IsSearchable, IsReportable: field.IsReportable, Fid: KeptFid(field)), translation));
             }
 
             if (formulaItems.Count > 0)
             {
-                await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(createdTable.PublicId, formulaItems), ct);
-                created += formulaItems.Count;
+                var (ok, failed) = await CreateFormulaBatchAsync(createdTable, formulaItems.Select(i => (i.Field, i.Item)).ToList(), ct);
+                created += ok.Count;
+
+                foreach (var (field, error) in failed)
+                {
+                    // It compiled but could not be saved: retried with the others, and a stand-in field at the end if it never works.
+                    formulaTranslations.FirstOrDefault(t => t.LogicalRef == field.LogicalRef)?.Diagnostics.Add($"The formula field could not be created: {error}");
+                    stillPending.Add((table, field));
+                }
+
+                // A formula that only compiled after PowerBase rewrote it keeps its original text in an import note.
+                foreach (var (field, item, translation) in formulaItems.Where(i => ok.Contains(i.Field) && i.Translation.Status == FormulaTranslationStatus.Adjusted))
+                {
+                    var converted = ConvertedExpression(translation);
+                    var original = field.OriginalFormula ?? field.FormulaExpression;
+                    if (string.IsNullOrEmpty(original) || string.Equals(original, converted, StringComparison.Ordinal)) continue;
+                    notes.Add(new ImportFieldNoteDraft
+                    {
+                        TableName = table.Name, FieldName = field.Name, FieldLabel = item.Label, SourceFid = KeptFid(field),
+                        Severity = ImportNoteSeverities.Information, Code = "FORMULA_ADJUSTED",
+                        Message = "The formula was rewritten so PowerBase accepts it (Quickbase allows constructs PowerBase does not). The original text is kept here.",
+                        SourceLogicalRef = field.LogicalRef, SourceType = field.SourceType,
+                        OriginalDefinition = original,
+                        OriginalMetadata = JsonSerializer.Serialize(new { kind = "Formula", sourceType = field.SourceType, resultType = field.ResultType, convertedExpression = converted }, NoteJson),
+                    });
+                }
             }
         }
 
         return (created, stillPending);
+    }
+
+    private static string? ConvertedExpression(FormulaTranslationResult translation)
+    {
+        if (translation.SettingsJson is null) return null;
+        using var doc = JsonDocument.Parse(translation.SettingsJson);
+        return doc.RootElement.TryGetProperty("expression", out var e) ? e.GetString() : null;
+    }
+
+    /// <summary>Creates a table's formula fields: the whole batch first (the usual case); if anything in it fails, one at a time, so a
+    /// field PowerBase will not save costs only itself, never the other formulas and never the app.</summary>
+    private async Task<(List<PblField> Created, List<(PblField Field, string Error)> Failed)> CreateFormulaBatchAsync(
+        AppTable table, List<(PblField Field, BulkCreateFieldItem Item)> items, CancellationToken ct)
+    {
+        try
+        {
+            await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(table.PublicId, items.Select(i => i.Item).ToList()), ct);
+            return (items.Select(i => i.Field).ToList(), []);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // fall through: part of the batch may exist already
+        }
+
+        var created = new List<PblField>();
+        var failed = new List<(PblField, string)>();
+        foreach (var (field, item) in items)
+        {
+            try
+            {
+                var current = await _fieldRepo.ListByTableAsync(table.Id, ct);
+                if (!current.Any(f => string.Equals(f.Name, field.Name, StringComparison.OrdinalIgnoreCase)))
+                    await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(table.PublicId, [item]), ct);
+                created.Add(field);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                failed.Add((field, ex is DomainException de ? Describe(de) : ex.Message));
+            }
+        }
+        return (created, failed);
+    }
+
+    /// <summary>Saves the formulas that never compiled as formula fields of their result type, with the expression exactly as the source had it.
+    /// PowerBase evaluates a formula that does not compile to blank (it never breaks a listing) and shows the error when the field is opened,
+    /// the way Quickbase does. Every formula is compiled once more against the finished table, so one that only failed because it reads another
+    /// broken formula (which now exists) is not reported. The rest get an audit-history note with the reason in plain words. A formula PowerBase
+    /// cannot save even so is handed back, and gets a stand-in field.</summary>
+    private async Task<(int Saved, List<(PblTable Table, PblField Field)> NotSaved)> CreateBrokenFormulaFieldsAsync(
+        IReadOnlyList<(PblTable Table, PblField Field)> pending,
+        Dictionary<string, AppTable> tableByName,
+        List<FormulaTranslationReportItem> formulaTranslations,
+        List<ImportSkippedItem> skipped,
+        List<ImportFieldNoteDraft> notes,
+        CancellationToken ct)
+    {
+        var saved = 0;
+        var notSaved = new List<(PblTable Table, PblField Field)>();
+
+        foreach (var tableGroup in pending.GroupBy(p => p.Table))
+        {
+            var table = tableGroup.Key;
+            if (!tableByName.TryGetValue(table.Name, out var createdTable))
+            {
+                notSaved.AddRange(tableGroup);
+                continue;
+            }
+
+            var existing = await _fieldRepo.ListByTableAsync(createdTable.Id, ct);
+            var usedLabels = existing.Select(f => (f.Label ?? "").Trim()).Where(l => l.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var usedNames = existing.Select(f => f.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            var items = new List<(PblField Field, BulkCreateFieldItem Item)>();
+            foreach (var (_, field) in tableGroup)
+            {
+                if (usedNames.Contains(field.Name)) continue; // it exists already (created after all)
+
+                var expected = FormulaTypeMap.ParseExpected(field.ResultType)?.ToString() ?? nameof(PowerBase.Formula.Types.FormulaType.Text);
+                var typeCode = FormulaTranslator.VariantTypeCode(expected);
+                var asWritten = new FormulaTranslationResult
+                {
+                    Status = FormulaTranslationStatus.NeedsManualReview,
+                    TypeCode = typeCode,
+                    SettingsJson = JsonSerializer.Serialize(new Dictionary<string, string?> { ["expression"] = field.FormulaExpression }),
+                };
+                var diagnostics = formulaTranslations.FirstOrDefault(t => t.LogicalRef == field.LogicalRef)?.Diagnostics ?? [];
+                var (formulaTypeCode, formulaSettings) = BuildFormulaSettings(field, asWritten, diagnostics);
+
+                var description = field.Description is { Length: > ImportFieldSanitizer.DESCRIPTION_MAX } d
+                    ? d[..(ImportFieldSanitizer.DESCRIPTION_MAX - 1)] + "…" : field.Description;
+                var label = UniqueLabel((field.Label ?? field.Name).Trim(), usedLabels);
+                items.Add((field, new BulkCreateFieldItem(
+                    formulaTypeCode, label, description, IsRequired: false, IsAuditable: field.IsAuditable == true,
+                    Settings: formulaSettings, Name: field.Name, HelpText: field.HelpText,
+                    IsSearchable: field.IsSearchable, IsReportable: field.IsReportable, Fid: KeptFid(field))));
+            }
+            if (items.Count == 0) continue;
+
+            var (ok, failed) = await CreateFormulaBatchAsync(createdTable, items, ct);
+            saved += ok.Count;
+            foreach (var (field, error) in failed)
+            {
+                formulaTranslations.FirstOrDefault(t => t.LogicalRef == field.LogicalRef)?.Diagnostics.Add($"The formula field could not be saved: {error}");
+                notSaved.Add((table, field));
+            }
+
+            // Compile again now that every field exists: some only failed because they read another formula that was missing then.
+            var current = await _fieldRepo.ListByTableAsync(createdTable.Id, ct);
+            AppTableAliasSchema? aliasSchema = null;
+            foreach (var field in ok)
+            {
+                aliasSchema ??= await AppTableAliasSchema.BuildAsync(_tableRepo, createdTable.AppId, ct);
+                FormulaTranslationResult again;
+                try { again = _formulaTranslator.Translate(field.ResultType, field.FormulaExpression, current, aliasSchema); }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    again = new FormulaTranslationResult { Status = FormulaTranslationStatus.NeedsManualReview, Diagnostics = [$"The formula could not be analysed: {ex.Message}"] };
+                }
+
+                var report = formulaTranslations.FirstOrDefault(t => t.LogicalRef == field.LogicalRef);
+                if (again.Status == FormulaTranslationStatus.Clean)
+                {
+                    if (report is not null) { formulaTranslations.Remove(report); formulaTranslations.Add(new FormulaTranslationReportItem { LogicalRef = field.LogicalRef, Name = field.Name, Status = nameof(FormulaTranslationStatus.Clean) }); }
+                    continue;
+                }
+
+                var problems = again.Status == FormulaTranslationStatus.NeedsManualReview && again.Diagnostics.Count > 0
+                    ? again.Diagnostics.ToList()
+                    : ["It uses Quickbase syntax PowerBase does not accept as written."];
+                report?.Diagnostics.Clear();
+                report?.Diagnostics.AddRange(problems);
+                report?.Diagnostics.Add("The formula was saved as a formula field, as written, so it can be fixed.");
+
+                var friendly = ImportFieldNoteBuilder.FriendlyDiagnostics(problems);
+                var message = $"The formula could not be compiled: {friendly}. It was saved as a formula field exactly as written in Quickbase; its value stays empty until the formula is fixed.";
+                skipped.Add(new ImportSkippedItem { LogicalRef = field.LogicalRef, Name = field.Name, Code = ImportFieldNoteBuilder.BROKEN_FORMULA_CODE, Reason = message });
+                notes.Add(new ImportFieldNoteDraft
+                {
+                    TableName = table.Name, FieldName = field.Name, FieldLabel = field.Label, SourceFid = KeptFid(field),
+                    Severity = ImportNoteSeverities.Warning, Code = ImportFieldNoteBuilder.BROKEN_FORMULA_CODE, Message = message,
+                    RecommendedAction = "Open the field, correct the formula (for example recreate the fields it names), and save.",
+                    SourceLogicalRef = field.LogicalRef, SourceType = field.SourceType,
+                    OriginalDefinition = field.OriginalFormula ?? field.FormulaExpression,
+                    OriginalMetadata = JsonSerializer.Serialize(new
+                    {
+                        kind = "Formula", sourceType = field.SourceType, resultType = field.ResultType, variant = field.FormulaVariant, sourceId = field.SourceId,
+                        settings = field.Settings, savedExpression = field.FormulaExpression, translationDiagnostics = problems,
+                    }, NoteJson),
+                });
+            }
+        }
+
+        return (saved, notSaved);
     }
 
     /// <summary>Creates every relationship via <see cref="CreateRelationshipCommandHandler"/>,
@@ -1358,6 +1885,57 @@ public class ImportAppFromPblCommandHandler
     /// <summary>Fills each table's hidden Default Report Settings record (what the "Default report" page edits) with the source table's
     /// default columns, default dynamic filters, quick search and default sort. A name that did not become a field is reported and left out;
     /// a part the source does not state keeps PowerBase's default.</summary>
+    /// <summary>SingleSelect/MultiSelect fields whose choices come from another field (<see cref="PblField.ChoiceSourceFieldRef"/>)
+    /// need that other field's real TableId/Fid, which only exist once every table's fields are created. Builds one
+    /// LogicalRef → (real table, real field) map across the whole app, then patches each such field's own Settings with the
+    /// resolved ChoiceSource. A target that was never created (unsupported type, failed formula, or this import's best-effort
+    /// guess at where Quickbase names the source field turning out wrong) is reported, never left as a silently empty choice list.</summary>
+    private async Task ApplyChoiceSourcesAsync(
+        PblDocument document, Dictionary<string, AppTable> tableByName, List<ImportSkippedItem> skipped, CancellationToken ct)
+    {
+        var candidates = (document.Tables ?? [])
+            .SelectMany(t => (t.Fields ?? []).Where(f => f.ChoiceSourceFieldRef is not null).Select(f => (Table: t, Field: f)))
+            .ToList();
+        if (candidates.Count == 0) return;
+
+        var realByRef = new Dictionary<string, (AppTable Table, AppField Field)>(StringComparer.Ordinal);
+        foreach (var table in document.Tables ?? [])
+        {
+            if (!tableByName.TryGetValue(table.Name, out var createdTable)) continue;
+            var realFields = await _fieldRepo.ListByTableAsync(createdTable.Id, ct);
+            var byName = realFields.ToDictionary(f => f.Name, StringComparer.OrdinalIgnoreCase);
+            foreach (var field in table.Fields ?? [])
+                if (byName.TryGetValue(field.Name, out var real))
+                    realByRef[field.LogicalRef] = (createdTable, real);
+        }
+
+        foreach (var (table, field) in candidates)
+        {
+            if (!realByRef.TryGetValue(field.LogicalRef, out var source))
+                continue; // the select field itself was never created — nothing to patch
+
+            if (!realByRef.TryGetValue(field.ChoiceSourceFieldRef!, out var target))
+            {
+                skipped.Add(new ImportSkippedItem
+                {
+                    LogicalRef = field.LogicalRef,
+                    Name = field.Name,
+                    Reason = $"Field '{field.Name}' on table '{table.Name}' has choices that come from another field in Quickbase, but that field could not be found in this import. Set up the field's \"choices from another field\" setting manually in PowerBase.",
+                });
+                continue;
+            }
+
+            var settings = new Dictionary<string, object?>(StringComparer.Ordinal);
+            if (!string.IsNullOrEmpty(source.Field.Settings))
+                foreach (var prop in JsonDocument.Parse(source.Field.Settings).RootElement.EnumerateObject())
+                    settings[prop.Name] = prop.Value.Clone();
+            settings.Remove("options");
+            settings["choiceSource"] = new Dictionary<string, object?> { ["tableId"] = target.Table.PublicId, ["fid"] = target.Field.Fid };
+
+            await _fieldRepo.UpdateSettingsAsync(source.Field.Id, JsonSerializer.Serialize(settings), ct);
+        }
+    }
+
     private async Task ApplyDefaultReportSettingsAsync(
         PblDocument document, Dictionary<string, AppTable> tableByName, List<ImportSkippedItem> skipped, CancellationToken ct)
     {
@@ -1438,19 +2016,28 @@ public class ImportAppFromPblCommandHandler
 
     /// <summary>Creates the source report links that are not a relationship's own (they match on an ordinary field, or are a second link
     /// to the same child), each on its source number. A link whose target or source field was not created is reported, not guessed.</summary>
-    private async Task<int> CreateStandaloneReportLinksAsync(
+    /// <param name="onlyRefs">Retry pass: only these links (by logical ref).</param>
+    /// <param name="final">False on the first pass: a link whose target or matching field is not created yet (a formula or lookup, made later) is
+    /// held back for the retry instead of being reported as lost. True on the retry: whatever still cannot be created is reported.</param>
+    /// <returns>How many links were created, and the refs held back for the retry.</returns>
+    private async Task<(int Created, List<string> Deferred)> CreateStandaloneReportLinksAsync(
         PblDocument document,
         Dictionary<string, string> tableNameByRef,
         Dictionary<string, AppTable> tableByName,
         Guid appPublicId,
         List<ImportSkippedItem> skipped,
-        CancellationToken ct)
+        CancellationToken ct,
+        IReadOnlyCollection<string>? onlyRefs = null,
+        bool final = true)
     {
         var created = 0;
+        var deferred = new List<string>();
         foreach (var table in document.Tables ?? [])
         {
             foreach (var link in table.ReportLinks ?? [])
             {
+                if (onlyRefs is not null && !onlyRefs.Contains(link.LogicalRef)) continue;
+
                 if (_reportLinkFactory is null)
                 {
                     skipped.Add(new ImportSkippedItem { LogicalRef = link.LogicalRef, Name = link.Name, Reason = "Report link not created: this import is not set up to create report links." });
@@ -1467,6 +2054,7 @@ public class ImportAppFromPblCommandHandler
                 var targetFids = FidByNameOrLabel(await _fieldRepo.ListByTableAsync(targetTable.Id, ct));
                 if (!targetFids.TryGetValue(link.TargetFieldName, out var targetFid))
                 {
+                    if (!final) { deferred.Add(link.LogicalRef); continue; }
                     skipped.Add(new ImportSkippedItem { LogicalRef = link.LogicalRef, Name = link.Name, Reason = $"Report link not created: its field '{link.TargetFieldName}' on '{targetName}' was not created." });
                     continue;
                 }
@@ -1477,6 +2065,7 @@ public class ImportAppFromPblCommandHandler
                     var ownFids = FidByNameOrLabel(await _fieldRepo.ListByTableAsync(ownTable.Id, ct));
                     if (!ownFids.TryGetValue(sourceName, out var found))
                     {
+                        if (!final) { deferred.Add(link.LogicalRef); continue; }
                         skipped.Add(new ImportSkippedItem { LogicalRef = link.LogicalRef, Name = link.Name, Reason = $"Report link not created: the field '{sourceName}' it matches on was not created." });
                         continue;
                     }
@@ -1503,7 +2092,7 @@ public class ImportAppFromPblCommandHandler
                 }
             }
         }
-        return created;
+        return (created, deferred);
     }
 
     private async Task<int> CreateRelationshipsAsync(
@@ -1663,10 +2252,16 @@ public class ImportAppFromPblCommandHandler
                 deferredLookups.AddRange(pendingLookups.Select(l => new DeferredLookup(createdRel.PublicId, parentTable, l)));
                 deferredSummaries.AddRange(pendingSummaries.Select(sm => new DeferredSummary(createdRel.PublicId, childTable, sm)));
             }
-            catch (DomainException ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                // One relationship PowerBase rejects must not take the whole import down with it.
-                skipped.Add(new ImportSkippedItem { LogicalRef = rel.LogicalRef, Name = rel.ReferenceFieldName, Reason = $"Relationship not fully created: {(ex is ValidationException ve ? string.Join(" ", ve.Errors.SelectMany(e => e.Value)) : ex.Message)}" });
+                // One relationship PowerBase rejects must not take the whole import down with it. Its reference field, lookups and
+                // summaries are reported one by one, so each gets a placeholder field at the end.
+                var why = ex is ValidationException ve ? string.Join(" ", ve.Errors.SelectMany(e => e.Value)) : ex.Message;
+                skipped.Add(new ImportSkippedItem { LogicalRef = rel.LogicalRef, Name = rel.ReferenceFieldName, Code = "REFERENCE_NOT_CREATED", Reason = $"Relationship not fully created: {why}" });
+                foreach (var lookup in rel.Lookups)
+                    skipped.Add(new ImportSkippedItem { LogicalRef = lookup.LogicalRef, Name = lookup.Name, Code = "RELATIONSHIP_NOT_CREATED", Reason = $"Lookup not created: its relationship '{rel.ReferenceFieldName}' could not be created ({why})." });
+                foreach (var summary in rel.Summaries)
+                    skipped.Add(new ImportSkippedItem { LogicalRef = summary.LogicalRef, Name = summary.Name, Code = "RELATIONSHIP_NOT_CREATED", Reason = $"Summary not created: its relationship '{rel.ReferenceFieldName}' could not be created ({why})." });
             }
         }
 
