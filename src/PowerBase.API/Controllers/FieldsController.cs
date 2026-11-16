@@ -342,6 +342,74 @@ public class FieldsController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>Which fields of the table carry unresolved import notes (stand-in fields, rewritten formulas, anything an import could not
+    /// carry over exactly), with the worst severity — what the fields grid marks. Fields without notes are not listed.</summary>
+    [HttpGet("tables/{tableId:guid}/fields/import-notes")]
+    [RequireAppPermission(PermissionCodes.FieldsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiListResponse<FieldImportNoteSummaryResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ImportNoteSummaries(
+        [FromServices] PowerBase.Application.Fields.ImportNotes.FieldImportNotesHandler handler,
+        Guid tableId, CancellationToken ct)
+    {
+        var items = (await handler.SummarizeTableAsync(tableId, ct)).Select(s => new FieldImportNoteSummaryResponse
+        {
+            FieldPublicId = s.FieldPublicId, ActiveCount = s.ActiveCount, WarningCount = s.WarningCount, ErrorCount = s.ErrorCount,
+            HasPlaceholder = s.HasPlaceholder, Severity = s.Severity,
+        }).ToList();
+        return Ok(new ApiListResponse<FieldImportNoteSummaryResponse>(items, items.Count, 1, items.Count));
+    }
+
+    /// <summary>The import notes of one field — why it is a stand-in, the complete original formula/definition, what could not be carried
+    /// over. Separate from the field's own description and help text.</summary>
+    [HttpGet("tables/{tableId:guid}/fields/{publicId:guid}/import-notes")]
+    [RequireAppPermission(PermissionCodes.FieldsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiListResponse<FieldImportNoteResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ImportNotes(
+        [FromServices] PowerBase.Application.Fields.ImportNotes.FieldImportNotesHandler handler,
+        Guid tableId, Guid publicId, CancellationToken ct)
+    {
+        var items = (await handler.ListForFieldAsync(tableId, publicId, ct)).Select(n => new FieldImportNoteResponse
+        {
+            PublicId = n.PublicId, Severity = n.Severity, Code = n.Code, Message = n.Message, RecommendedAction = n.RecommendedAction,
+            SourceType = n.SourceType, SourceFieldId = n.SourceFieldId, IsPlaceholder = n.IsPlaceholder, OriginalDefinition = n.OriginalDefinition,
+            OriginalMetadata = n.OriginalMetadata, CreatedOn = n.CreatedOn, ResolvedOn = n.ResolvedOn,
+        }).ToList();
+        return Ok(new ApiListResponse<FieldImportNoteResponse>(items, items.Count, 1, items.Count));
+    }
+
+    /// <summary>Marks all of the field's unresolved import notes resolved (the field was repaired, or the warning accepted). The notes are kept
+    /// as history; the warning indicator goes away.</summary>
+    [HttpPost("tables/{tableId:guid}/fields/{publicId:guid}/import-notes/resolve")]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ResolveImportNotes(
+        [FromServices] PowerBase.Application.Fields.ImportNotes.FieldImportNotesHandler handler,
+        Guid tableId, Guid publicId, CancellationToken ct)
+    {
+        await handler.ResolveAsync(tableId, publicId, null, ct);
+        return NoContent();
+    }
+
+    /// <summary>Marks one import note resolved.</summary>
+    [HttpPost("tables/{tableId:guid}/fields/{publicId:guid}/import-notes/{noteId:guid}/resolve")]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ResolveImportNote(
+        [FromServices] PowerBase.Application.Fields.ImportNotes.FieldImportNotesHandler handler,
+        Guid tableId, Guid publicId, Guid noteId, CancellationToken ct)
+    {
+        await handler.ResolveAsync(tableId, publicId, noteId, ct);
+        return NoContent();
+    }
+
     /// <summary>Get field usage (where it is referenced in forms, reports, form rules, other fields' formulas and settings, and roles).</summary>
     [HttpGet("tables/{tableId:guid}/fields/{fieldId:guid}/usage")]
     [RequireAppPermission(PermissionCodes.FieldsRead, AppAccessResolver.ByTableId)]

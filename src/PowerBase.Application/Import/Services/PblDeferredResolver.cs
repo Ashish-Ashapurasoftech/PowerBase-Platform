@@ -78,6 +78,11 @@ public class PblDeferredResolver
             {
                 skipped.Add(Skip(item.Lookup.LogicalRef, item.Lookup.Name, $"Lookup not created: {Describe(ex)}"));
             }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Anything else a single lookup throws costs only that lookup (it gets a placeholder field at the end).
+                skipped.Add(Skip(item.Lookup.LogicalRef, item.Lookup.Name, $"Lookup not created: {ex.Message}"));
+            }
         }
         return added;
     }
@@ -144,6 +149,10 @@ public class PblDeferredResolver
             catch (DomainException ex)
             {
                 skipped.Add(Skip(item.Summary.LogicalRef, item.Summary.Name, $"Summary not created: {Describe(ex)}"));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                skipped.Add(Skip(item.Summary.LogicalRef, item.Summary.Name, $"Summary not created: {ex.Message}"));
             }
         }
         return added;

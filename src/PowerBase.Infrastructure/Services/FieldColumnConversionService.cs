@@ -20,7 +20,6 @@ public sealed class FieldColumnConversionService : IFieldColumnConversionService
     private const int BatchSize = 2000;
     private const int CommandTimeoutSeconds = 600;
 
-    private const string AppIsEncryptedSql = "SELECT IsEncrypted FROM meta.App WHERE Id = @appId AND IsDeleted = 0";
 
     // TypeCode is derived from FieldTypeId (ft.Code join), so the type swap is a FieldTypeId update — same as
     // AppFieldRepository.UpdateFieldTypeAsync, plus the settings/default/unique values the new type needs.
@@ -34,19 +33,23 @@ public sealed class FieldColumnConversionService : IFieldColumnConversionService
     private readonly ITenantConnectionFactory _connectionFactory;
     private readonly IQueryContext _queryContext;
     private readonly IMetadataCache _metadataCache;
+    private readonly IEncryptionService _encryptionService;
 
-    public FieldColumnConversionService(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache metadataCache)
+    public FieldColumnConversionService(
+        ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache metadataCache, IEncryptionService encryptionService)
     {
         _connectionFactory = connectionFactory;
         _queryContext = queryContext;
         _metadataCache = metadataCache;
+        _encryptionService = encryptionService;
     }
 
     public async Task<ColumnConversionPreview> PreviewAsync(
         AppTable table, AppField field, Func<object?, ConvertedValue> convert, int sampleSize, CancellationToken ct = default)
     {
         await using var connection = await OpenAsync(ct);
-        await EnsurePlainColumnAsync(connection, table, field, ct);
+        await EnsureColumnExistsAsync(connection, table, field, ct);
+        var decrypt = await DecryptorAsync(connection, table, field, ct);
 
         var column = PhysicalNaming.GetPhysicalColumnName(field);
         int total = 0, nonEmpty = 0, lost = 0;
@@ -54,8 +57,9 @@ public sealed class FieldColumnConversionService : IFieldColumnConversionService
 
         await foreach (var batch in ReadBatchesAsync(connection, null, PhysicalNaming.FullTableName(table.Id), column, ct))
         {
-            foreach (var (rowId, before) in batch)
+            foreach (var (rowId, stored) in batch)
             {
+                var before = decrypt is null ? stored : await decrypt(stored);
                 total++;
                 var after = convert(before);
                 if (IsBlank(before)) continue;
@@ -72,13 +76,24 @@ public sealed class FieldColumnConversionService : IFieldColumnConversionService
         AppTable table, AppField field, FieldTypeMetadata metadata, Func<object?, ConvertedValue> convert, CancellationToken ct = default)
     {
         await using var connection = await OpenAsync(ct);
-        await EnsurePlainColumnAsync(connection, table, field, ct);
-        var sqlDataType = metadata.SqlDataType;
+        await EnsureColumnExistsAsync(connection, table, field, ct);
+
+        // Whether values are stored encrypted depends on the type (an encrypted app encrypts text-like types only), so the old
+        // and the new type are decided separately: decrypt on read when the old type is encrypted, encrypt on write when the new one is.
+        var readEncrypted = await EncryptionForAsync(connection, table, field, field.TypeCode, ct);
+        var writeEncrypted = await EncryptionForAsync(connection, table, field, metadata.TargetTypeCode ?? field.TypeCode, ct);
+        if (readEncrypted is not null && writeEncrypted is not null)
+            return await ConvertEncryptedAsync(connection, readEncrypted, table, field, metadata, convert, ct);
+
+        // Otherwise a new column: ciphertext text when the new type is encrypted, its own SQL type when not.
+        var sqlDataType = writeEncrypted is not null ? "VARCHAR(MAX)" : metadata.SqlDataType;
 
         var physicalTable = PhysicalNaming.FullTableName(table.Id);
         var column = PhysicalNaming.GetPhysicalColumnName(field);
         var oldColumn = FieldColumnConversionSql.OldColumnName(field.Fid!.Value);
-        var updateSql = FieldColumnConversionSql.BatchUpdateSql(physicalTable, column, sqlDataType);
+        var updateSql = writeEncrypted is not null
+            ? FieldColumnConversionSql.EncryptedBatchUpdateSql(physicalTable, column)
+            : FieldColumnConversionSql.BatchUpdateSql(physicalTable, column, sqlDataType);
 
         await using var tx = await connection.BeginTransactionAsync(ct);
         try
@@ -91,15 +106,28 @@ public sealed class FieldColumnConversionService : IFieldColumnConversionService
             await foreach (var batch in ReadBatchesAsync(connection, tx, physicalTable, oldColumn, ct))
             {
                 var converted = new List<KeyValuePair<long, object?>>(batch.Count);
-                foreach (var (rowId, before) in batch)
+                var encrypted = new List<KeyValuePair<long, string?>>(batch.Count);
+                foreach (var (rowId, stored) in batch)
                 {
                     scanned++;
+                    var before = readEncrypted is not null && stored is string cipher ? await readEncrypted.DecryptValueAsync(cipher, ct) : stored;
                     var after = convert(before);
                     if (after.Value is not null) kept++;
                     else if (after.Lost) lost++;
-                    converted.Add(new(rowId, after.Value));
+
+                    if (writeEncrypted is null)
+                    {
+                        converted.Add(new(rowId, after.Value));
+                        continue;
+                    }
+                    var plain = FieldColumnConversionSql.ToEncryptedPlainText(after.Value);
+                    if (!string.IsNullOrEmpty(plain)) encrypted.Add(new(rowId, await writeEncrypted.EncryptValueAsync(field, plain, ct)));
                 }
-                await WriteBatchAsync(connection, tx, updateSql, converted, ct);
+                if (writeEncrypted is null)
+                    await WriteBatchAsync(connection, tx, updateSql, converted, ct);
+                else if (encrypted.Count > 0)
+                    await connection.ExecuteAsync(new CommandDefinition(updateSql,
+                        new { json = FieldColumnConversionSql.EncryptedBatchJson(encrypted) }, tx, CommandTimeoutSeconds, cancellationToken: ct));
             }
 
             await ExecAsync(connection, tx, $"ALTER TABLE {physicalTable} DROP COLUMN {oldColumn};", ct);
@@ -118,14 +146,16 @@ public sealed class FieldColumnConversionService : IFieldColumnConversionService
         AppTable table, AppField field, FieldTypeMetadata metadata, IReadOnlyDictionary<long, object?> valuesByRowId, CancellationToken ct = default)
     {
         await using var connection = await OpenAsync(ct);
-        await EnsureNotEncryptedAsync(connection, table, field, ct);
-        var sqlDataType = metadata.SqlDataType;
-
         var physicalTable = PhysicalNaming.FullTableName(table.Id);
         var column = PhysicalNaming.GetPhysicalColumnName(field);
         if (await ColumnExistsAsync(connection, null, physicalTable, column, ct))
             throw new InvalidOperationException($"{physicalTable}.{column} already exists; a formula field should have no column.");
 
+        // A formula has no stored values; what decides encryption is the NEW type (an encrypted app encrypts text-like types only).
+        if (await EncryptionForAsync(connection, table, field, metadata.TargetTypeCode ?? field.TypeCode, ct) is { } encryption)
+            return await CreateEncryptedFromValuesAsync(connection, encryption, table, field, metadata, valuesByRowId, ct);
+
+        var sqlDataType = metadata.SqlDataType;
         var updateSql = FieldColumnConversionSql.BatchUpdateSql(physicalTable, column, sqlDataType);
         await using var tx = await connection.BeginTransactionAsync(ct);
         try
@@ -182,8 +212,24 @@ public sealed class FieldColumnConversionService : IFieldColumnConversionService
     public async Task<IReadOnlyList<object>> ReadDistinctValuesAsync(AppTable table, AppField field, int max, CancellationToken ct = default)
     {
         await using var connection = await OpenAsync(ct);
-        await EnsurePlainColumnAsync(connection, table, field, ct);
+        await EnsureColumnExistsAsync(connection, table, field, ct);
         var column = PhysicalNaming.GetPhysicalColumnName(field);
+
+        // Encrypted values differ even when the plain values are equal, so DISTINCT has to happen after decrypting.
+        if (await DecryptorAsync(connection, table, field, ct) is { } decrypt)
+        {
+            var distinct = new HashSet<string>(StringComparer.Ordinal);
+            await foreach (var batch in ReadBatchesAsync(connection, null, PhysicalNaming.FullTableName(table.Id), column, ct))
+            {
+                foreach (var (_, stored) in batch)
+                {
+                    if (await decrypt(stored) is string plain && !string.IsNullOrWhiteSpace(plain)) distinct.Add(plain);
+                    if (distinct.Count >= max) return distinct.Cast<object>().ToList();
+                }
+            }
+            return distinct.Cast<object>().ToList();
+        }
+
         // As text: only User ↔ Text/Email reads this, and both store NVARCHAR. (QueryAsync<object> would hand back
         // whole Dapper rows, not the values.)
         var values = await connection.QueryAsync<string>(new CommandDefinition(
@@ -218,26 +264,159 @@ public sealed class FieldColumnConversionService : IFieldColumnConversionService
         return connection;
     }
 
-    /// <summary>The column must exist and hold plain values — ciphertext (encrypted app/field) can't be converted in
-    /// SQL; the same restriction the Percent Display-As switch has ("turn encryption off first").</summary>
-    private static async Task EnsurePlainColumnAsync(DbConnection connection, AppTable table, AppField field, CancellationToken ct)
+
+    private static async Task EnsureColumnExistsAsync(DbConnection connection, AppTable table, AppField field, CancellationToken ct)
     {
-        await EnsureNotEncryptedAsync(connection, table, field, ct);
         var physicalTable = PhysicalNaming.FullTableName(table.Id);
         var column = PhysicalNaming.GetPhysicalColumnName(field);
         if (!await ColumnExistsAsync(connection, null, physicalTable, column, ct))
             throw new InvalidOperationException($"Physical column {physicalTable}.{column} does not exist.");
     }
 
-    private static async Task EnsureNotEncryptedAsync(DbConnection connection, AppTable table, AppField field, CancellationToken ct)
+    /// <summary>
+    /// Null when the field's column holds plain values. Otherwise a function that turns one stored value into its plain
+    /// text, using the app's own key exactly as record reads do (FieldEncryptionContext). Same rule as everywhere else
+    /// for which columns hold ciphertext (FieldEncryptionContext.StoresCiphertext). Tenants on SQL Always Encrypted
+    /// (secure enclaves) are not supported yet and are refused with a clear message.
+    /// </summary>
+    private async Task<Func<object?, Task<object?>>?> DecryptorAsync(DbConnection connection, AppTable table, AppField field, CancellationToken ct)
     {
-        var appIsEncrypted = await connection.ExecuteScalarAsync<bool>(
-            new CommandDefinition(AppIsEncryptedSql, new { appId = table.AppId }, cancellationToken: ct));
-        if (appIsEncrypted || field.IsEncrypted)
-            throw new ValidationException(new Dictionary<string, string[]>
+        // Reads never refuse: on an Always Encrypted tenant the change is stopped up front (GetEncryptionBlockerAsync).
+        var encryption = await EncryptionForAsync(connection, table, field, field.TypeCode, ct, forWrite: false);
+        if (encryption is null) return null;
+        return async stored => stored is string text ? await encryption.DecryptValueAsync(text, ct) : stored;
+    }
+
+    public const string AlwaysEncryptedBlocker =
+        "This workspace uses SQL Always Encrypted, so the type of an encrypted field can't be changed here yet.";
+
+    public async Task<string?> GetEncryptionBlockerAsync(AppTable table, AppField field, string targetTypeCode, CancellationToken ct = default)
+    {
+        await using var connection = await OpenAsync(ct);
+        if (!UsesAlwaysEncrypted(connection)) return null;
+        var encryption = await FieldEncryptionContext.ResolveAsync(connection, table.AppId, _queryContext.TenantId, _encryptionService, ct: ct);
+        return StoresCiphertext(encryption, field, field.TypeCode) || StoresCiphertext(encryption, field, targetTypeCode)
+            ? AlwaysEncryptedBlocker
+            : null;
+    }
+
+    /// <summary>The app's encryption context when <paramref name="field"/>, as a field of type <paramref name="typeCode"/>, stores
+    /// ciphertext — the same rule record reads and saves use (FieldEncryptionContext.StoresCiphertext: encrypted app or the field's
+    /// own Encrypted setting, and a type that isn't exempt, PhysicalNaming.IsEncryptionExemptTypeCode) — otherwise null.
+    /// Always Encrypted tenants use a different scheme: writes are refused outright (safety net behind the preview blocker),
+    /// reads return null so nothing is decrypted with the app key.</summary>
+    private async Task<FieldEncryptionContext?> EncryptionForAsync(
+        DbConnection connection, AppTable table, AppField field, string typeCode, CancellationToken ct, bool forWrite = true)
+    {
+        var encryption = await FieldEncryptionContext.ResolveAsync(connection, table.AppId, _queryContext.TenantId, _encryptionService, ct: ct);
+        if (!StoresCiphertext(encryption, field, typeCode)) return null;
+
+        if (UsesAlwaysEncrypted(connection))
+        {
+            if (!forWrite) return null;
+            throw new ValidationException(new Dictionary<string, string[]> { ["targetTypeCode"] = [AlwaysEncryptedBlocker] });
+        }
+        return encryption;
+    }
+
+    private static bool StoresCiphertext(FieldEncryptionContext encryption, AppField field, string typeCode) =>
+        FieldEncryptionContext.StoresCiphertext(
+            new AppField { IsSystem = field.IsSystem, IsEncrypted = field.IsEncrypted, TypeCode = typeCode }, encryption.IsAppEncrypted);
+
+    private static bool UsesAlwaysEncrypted(DbConnection connection) =>
+        new SqlConnectionStringBuilder(connection.ConnectionString).ColumnEncryptionSetting == SqlConnectionColumnEncryptionSetting.Enabled;
+
+    /// <summary>
+    /// Formula → stored on an encrypted field: the new column is ciphertext text (VARCHAR(MAX)), exactly what the schema
+    /// engine creates for an encrypted field, and each evaluated value is stored as the plain text a record save would
+    /// write, encrypted with the app's key. One transaction with the field's new type.
+    /// </summary>
+    private async Task<ColumnConversionResult> CreateEncryptedFromValuesAsync(
+        DbConnection connection, FieldEncryptionContext encryption, AppTable table, AppField field, FieldTypeMetadata metadata,
+        IReadOnlyDictionary<long, object?> valuesByRowId, CancellationToken ct)
+    {
+        var physicalTable = PhysicalNaming.FullTableName(table.Id);
+        var column = PhysicalNaming.GetPhysicalColumnName(field);
+        var updateSql = FieldColumnConversionSql.EncryptedBatchUpdateSql(physicalTable, column);
+
+        await using var tx = await connection.BeginTransactionAsync(ct);
+        try
+        {
+            await ExecAsync(connection, tx, $"ALTER TABLE {physicalTable} ADD {column} VARCHAR(MAX) NULL;", ct);
+            var kept = 0;
+            foreach (var chunk in valuesByRowId.Where(p => p.Value is not null).Chunk(BatchSize))
             {
-                ["targetTypeCode"] = ["An encrypted field can't change type. Turn encryption off first."],
-            });
+                var encrypted = new List<KeyValuePair<long, string?>>(chunk.Length);
+                foreach (var (rowId, value) in chunk)
+                {
+                    var plain = FieldColumnConversionSql.ToEncryptedPlainText(value);
+                    if (string.IsNullOrEmpty(plain)) continue;
+                    encrypted.Add(new(rowId, await encryption.EncryptValueAsync(field, plain, ct)));
+                    kept++;
+                }
+                await connection.ExecuteAsync(new CommandDefinition(updateSql,
+                    new { json = FieldColumnConversionSql.EncryptedBatchJson(encrypted) }, tx, CommandTimeoutSeconds, cancellationToken: ct));
+            }
+            await UpdateMetadataAsync(connection, tx, field, metadata, ct);
+            await tx.CommitAsync(ct);
+            return new ColumnConversionResult(valuesByRowId.Count, kept, 0, []);
+        }
+        catch (SqlException ex)
+        {
+            await tx.RollbackAsync(ct);
+            throw ConversionFailed(physicalTable, column, ex);
+        }
+    }
+
+    /// <summary>
+    /// Encrypted column: it is ciphertext text (VARCHAR) whatever the field's type, so the column itself never changes.
+    /// Each value is decrypted, converted, written as the plain text a record save would store, re-encrypted with the
+    /// app's key and put back on the same row; values that can't be converted are cleared. One transaction, together
+    /// with the field's new type, so data and type always agree.
+    /// </summary>
+    private async Task<ColumnConversionResult> ConvertEncryptedAsync(
+        DbConnection connection, FieldEncryptionContext encryption, AppTable table, AppField field, FieldTypeMetadata metadata,
+        Func<object?, ConvertedValue> convert, CancellationToken ct)
+    {
+        var physicalTable = PhysicalNaming.FullTableName(table.Id);
+        var column = PhysicalNaming.GetPhysicalColumnName(field);
+        var updateSql = FieldColumnConversionSql.EncryptedBatchUpdateSql(physicalTable, column);
+
+        await using var tx = await connection.BeginTransactionAsync(ct);
+        try
+        {
+            int scanned = 0, kept = 0, lost = 0;
+            await foreach (var batch in ReadBatchesAsync(connection, tx, physicalTable, column, ct))
+            {
+                var encrypted = new List<KeyValuePair<long, string?>>(batch.Count);
+                foreach (var (rowId, stored) in batch)
+                {
+                    scanned++;
+                    var before = stored is string cipher ? await encryption.DecryptValueAsync(cipher, ct) : stored;
+                    var after = convert(before);
+                    if (after.Value is not null) kept++;
+                    else if (after.Lost) lost++;
+
+                    var plain = FieldColumnConversionSql.ToEncryptedPlainText(after.Value);
+                    encrypted.Add(new(rowId, string.IsNullOrEmpty(plain) ? null : await encryption.EncryptValueAsync(field, plain, ct)));
+                }
+                await connection.ExecuteAsync(new CommandDefinition(updateSql,
+                    new { json = FieldColumnConversionSql.EncryptedBatchJson(encrypted) }, tx, CommandTimeoutSeconds, cancellationToken: ct));
+            }
+
+            // Unique turned off by the change: drop its index too (on ciphertext it can't reject anything, but it shouldn't linger).
+            var dropped = field.IsUnique && !metadata.IsUnique
+                ? await DropIndexesOnColumnAsync(connection, tx, physicalTable, field, ct)
+                : [];
+            await UpdateMetadataAsync(connection, tx, field, metadata, ct);
+            await tx.CommitAsync(ct);
+            return new ColumnConversionResult(scanned, kept, lost, dropped);
+        }
+        catch (SqlException ex)
+        {
+            await tx.RollbackAsync(ct);
+            throw ConversionFailed(physicalTable, column, ex);
+        }
     }
 
     private static async Task<bool> ColumnExistsAsync(DbConnection connection, DbTransaction? tx, string physicalTable, string column, CancellationToken ct) =>

@@ -19,6 +19,8 @@ public static class UploadFileStepContract
     public static string ResolveDownloadSource(string? value)
     {
         var candidate = ExtractUrl(value);
+        // A browser url this app gave out for a stored file is read from storage, like a File Transfer Handle.
+        if (PipelineFileFieldParts.StoredPathOfDownloadUrl(candidate) is { } storedPath) return storedPath;
         if (candidate.StartsWith("/files/", StringComparison.OrdinalIgnoreCase)) return candidate;
         if (Uri.TryCreate(candidate, UriKind.Absolute, out var uri) &&
             (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))

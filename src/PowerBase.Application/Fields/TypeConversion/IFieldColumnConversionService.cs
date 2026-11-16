@@ -35,10 +35,17 @@ public interface IFieldColumnConversionService
 
     /// <summary>Formula → Formula: no column exists; only the field's metadata changes.</summary>
     Task ApplyMetadataAsync(AppField field, FieldTypeMetadata metadata, CancellationToken ct = default);
+
+    /// <summary>Why this change can't be made because of how the data is encrypted, or null when it can: a tenant on SQL
+    /// Always Encrypted (secure enclaves) where the old or the new type stores encrypted values.</summary>
+    Task<string?> GetEncryptionBlockerAsync(AppTable table, AppField field, string targetTypeCode, CancellationToken ct = default);
 }
 
 /// <summary>What meta.AppField looks like after the change. The physical SQL type comes from the target FieldType.</summary>
-public sealed record FieldTypeMetadata(int FieldTypeId, string SqlDataType, string? Settings, string? DefaultValue, bool IsUnique, bool IsRequired);
+/// <param name="TargetTypeCode">The new type's code — decides whether the new values are stored encrypted (an encrypted app
+/// encrypts text-like types only, see PhysicalNaming.IsEncryptionExemptTypeCode).</param>
+public sealed record FieldTypeMetadata(
+    int FieldTypeId, string SqlDataType, string? Settings, string? DefaultValue, bool IsUnique, bool IsRequired, string? TargetTypeCode = null);
 
 public sealed record ColumnConversionSample(long RowId, object? Before, object? After);
 

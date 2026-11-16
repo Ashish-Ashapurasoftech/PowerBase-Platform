@@ -3,6 +3,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Import.Commands.ImportAppFromPbl;
 using PowerBase.Application.Import.Pbl;
 using PowerBase.Application.Import.Qbl;
+using PowerBase.Application.Import.Reporting;
 using YamlDotNet.Core;
 
 namespace PowerBase.Application.Import.Queries.ImportPreview;
@@ -12,14 +13,21 @@ public class ImportPreviewQueryHandler
     private readonly PblValidator _validator;
     private readonly IAppRepository _appRepo;
 
-    public ImportPreviewQueryHandler(PblValidator validator, IAppRepository appRepo)
+    private readonly PowerBase.Application.Import.Services.PipelineOnlyImportService? _pipelineOnly;
+
+    public ImportPreviewQueryHandler(PblValidator validator, IAppRepository appRepo,
+        PowerBase.Application.Import.Services.PipelineOnlyImportService? pipelineOnly = null)
     {
+        _pipelineOnly = pipelineOnly;
         _validator = validator;
         _appRepo = appRepo;
     }
 
     public async Task<ImportPreviewResult> HandleAsync(ImportPreviewQuery query, CancellationToken ct = default)
     {
+        if (_pipelineOnly is not null && query.Mode == ImportMode.CreateNewApp && QblPipelineOnlyBinder.IsPipelinesOnly(query.PblJson))
+            return await PipelinesOnlyAsync(query.PblJson, ct);
+
         IReadOnlyList<ParsedApp> parsed;
         try
         {
@@ -36,12 +44,16 @@ public class ImportPreviewQueryHandler
 
         // Update works on exactly one application; nothing in the file is worth reviewing when it has several.
         if (query.Mode == ImportMode.UpdateExistingApp && parsed.Count > 1)
+        {
+            var multiAppErrors = new List<PblIssueDto> { new() { Code = ImportDocumentParser.MULTIPLE_APPS_NOT_ALLOWED_FOR_UPDATE, Message = ImportDocumentParser.MultipleAppsMessage(parsed) } };
             return new ImportPreviewResult
             {
                 IsValid = false,
                 AppCount = parsed.Count,
-                Errors = [new PblIssueDto { Code = ImportDocumentParser.MULTIPLE_APPS_NOT_ALLOWED_FOR_UPDATE, Message = ImportDocumentParser.MultipleAppsMessage(parsed) }],
+                Errors = multiAppErrors,
+                Issues = ImportIssueReportBuilder.BuildFromPreview("", multiAppErrors, [], document: null),
             };
+        }
 
         var apps = new List<ImportPreviewAppItem>();
         foreach (var app in parsed)
@@ -51,6 +63,10 @@ public class ImportPreviewQueryHandler
         foreach (var group in apps.Where(a => a.IsValid).GroupBy(a => a.AppName.Trim(), StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
             foreach (var dup in group.Skip(1))
                 dup.Warnings.Add(new PblIssueDto { Code = "APP_NAME_DUPLICATED_IN_FILE", Message = $"Another application in this file is also named '{dup.AppName}'. Rename one of them to import both.", ElementRef = dup.AppRef });
+
+        // Built last, once every per-app warning (including the cross-app duplicate-name one above) is final.
+        for (var i = 0; i < apps.Count; i++)
+            apps[i].Issues = ImportIssueReportBuilder.BuildFromPreview(apps[i].AppName, apps[i].Errors, apps[i].Warnings, parsed[i].Document);
 
         return new ImportPreviewResult
         {
@@ -153,11 +169,53 @@ public class ImportPreviewQueryHandler
         }).ToList(),
     };
 
-    private static ImportPreviewResult FileError(string code, string message) => new()
+    /// <summary>A file of pipelines only: one entry per existing app its pipelines go into.</summary>
+    private async Task<ImportPreviewResult> PipelinesOnlyAsync(string content, CancellationToken ct)
     {
-        IsValid = false,
-        Errors = [new PblIssueDto { Code = code, Message = message }],
-    };
+        PowerBase.Application.Import.Services.PipelineOnlyImportService.Prepared prepared;
+        try { prepared = await _pipelineOnly!.PrepareAsync(content, ct); }
+        catch (YamlException ex) { return FileError("INVALID_YAML", $"Could not parse QBL document: {ex.Message}"); }
+        if (prepared.Apps.Count == 0)
+            return FileError("PIPELINE_ONLY_NO_APP", PowerBase.Application.Import.Services.PipelineOnlyImportService.NoAppMessage(prepared.Binding));
+
+        var apps = prepared.Apps.Select((app, i) =>
+        {
+            var target = prepared.Binding.Apps.First(a => a.AppRef == app.AppRef).App;
+            var item = new ImportPreviewAppItem
+            {
+                AppRef = app.AppRef,
+                AppName = target.Name,
+                IsValid = true,
+                IsPipelinesOnly = true,
+                TargetAppPublicId = target.PublicId,
+                TableMatches = prepared.Binding.Matches.Where(m => m.AppPublicId == target.PublicId)
+                    .Select(m => $"{m.QbTableId} → {m.TableName}").Distinct().ToList(),
+                Pipelines = (app.Pipelines ?? []).Select(ToPipelineItem).ToList(),
+            };
+            if (i == 0)
+            {
+                item.Warnings.AddRange(prepared.Binding.Notes.Select(n => new PblIssueDto { Code = "PIPELINE_ONLY_NOTE", Message = n }));
+                item.Warnings.AddRange(prepared.Binding.UnmatchedTables.Select(t => new PblIssueDto
+                {
+                    Code = "PIPELINE_ONLY_TABLE_NOT_FOUND",
+                    Message = $"No existing table matches Quickbase table '{t}'; its steps are imported without a table.",
+                }));
+            }
+            return item;
+        }).ToList();
+        return new ImportPreviewResult { IsValid = true, AppCount = apps.Count, Apps = apps };
+    }
+
+    private static ImportPreviewResult FileError(string code, string message)
+    {
+        var errors = new List<PblIssueDto> { new() { Code = code, Message = message } };
+        return new ImportPreviewResult
+        {
+            IsValid = false,
+            Errors = errors,
+            Issues = ImportIssueReportBuilder.BuildFromPreview("", errors, [], document: null),
+        };
+    }
 
     private static PblIssueDto ToDto(PblIssue issue) => new()
     {

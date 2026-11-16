@@ -167,3 +167,14 @@ public interface IConnectedAppTokenReader
 {
     Task<bool> IsValidAsync(long appId, string tokenHash, CancellationToken ct = default);
 }
+
+/// <summary>QBL import's deferred connected-table queue (tenant DB, connected.PendingImportConnection).</summary>
+public interface IConnectedPendingImportRepository
+{
+    /// <summary>Inserts a new pending row, or updates the existing one for the same destination table (a re-import of the
+    /// same app replaces the stale attempt rather than piling up duplicates).</summary>
+    Task UpsertAsync(ConnectedPendingImportConnection pending, CancellationToken ct = default);
+    Task<IReadOnlyList<ConnectedPendingImportConnection>> ListPendingAsync(CancellationToken ct = default);
+    Task MarkResolvedAsync(long id, Guid connectedTablePublicId, CancellationToken ct = default);
+    Task RecordAttemptAsync(long id, string reason, CancellationToken ct = default);
+}

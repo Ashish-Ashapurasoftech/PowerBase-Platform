@@ -742,16 +742,27 @@ public class PipelinesController : ControllerBase
         return Ok(new ApiListResponse<PowerBase.Application.Pipelines.CopyFailedRecord>(result.Items, (int)Math.Min(result.Total, int.MaxValue), result.Page, result.PageSize));
     }
 
-    /// <summary>Get list of all tenants accessible to the logged-in user for pipeline connection setup.</summary>
+    /// <summary>Tenants for the pipeline Connection picker: the logged-in tenant only (powerflowextraRd), or all accessible with scope=all.</summary>
     [HttpGet("pipelines/available-tenants")]
     [RequireAuth]
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<PowerBase.API.Models.Auth.TenantListItem>>), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetAvailableTenants(
         [FromServices] ITenantRepository tenantRepo,
         [FromServices] IQueryContext queryContext,
-        CancellationToken ct)
+        CancellationToken ct,
+        [FromQuery] string? scope = null,
+        [FromQuery] Guid[]? include = null)
     {
-        var tenants = await tenantRepo.ListTenantsForUserAsync(queryContext.UserId, ct);
+        IReadOnlyList<PowerBase.Application.Tenants.TenantItem> tenants = await tenantRepo.ListTenantsForUserAsync(queryContext.UserId, ct);
+        // powerflowextraRd: show only the logged-in tenant (+ tenants a saved step already references via `include`).
+        // scope=all keeps the full list for the "Authenticate with my user" subdomain lookup in the connect-account form.
+        if (!string.Equals(scope, "all", StringComparison.OrdinalIgnoreCase))
+        {
+            Guid? currentTenantPublicId = null;
+            if (queryContext.TenantId > 0)
+                currentTenantPublicId = (await tenantRepo.GetByIdAsync(queryContext.TenantId, ct))?.PublicId;
+            tenants = PowerBase.Application.Pipelines.PipelineConnectionTenantFilter.Filter(tenants, currentTenantPublicId, include);
+        }
         var response = tenants.Select(t => new PowerBase.API.Models.Auth.TenantListItem
         {
             PublicId = t.PublicId,

@@ -63,6 +63,19 @@ public class FieldVersionRepository : TenantRepositoryBase, IFieldVersionReposit
         await connection.ExecuteAsync(new CommandDefinition(InsertChangeSql, changeRows, transaction, cancellationToken: ct));
     }
 
+    public async Task<int> InsertStandaloneVersionAsync(AppFieldVersion version, IReadOnlyList<FieldChangeEntry> changes, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        if (connection.State != ConnectionState.Open)
+            await connection.OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        version.Version = await GetNextVersionNumberAsync(version.AppFieldId, transaction, ct);
+        await InsertVersionAsync(version, changes, transaction, ct);
+        await transaction.CommitAsync(ct);
+        return version.Version;
+    }
+
     private const string ListByFieldSql = """
         SELECT v.Version, v.ChangeType, v.RestoredFromVersion, v.CommitMessage, v.ChangedOn,
                v.ChangedByName,

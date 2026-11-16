@@ -1,6 +1,8 @@
 using System.Text.RegularExpressions;
 using PowerBase.Application.Apps.Commands;
+using PowerBase.Application.Common.Services;
 using PowerBase.Application.Import.Pbl;
+using PowerBase.Application.Reports;
 
 namespace PowerBase.Application.Import.Qbl;
 
@@ -151,7 +153,7 @@ public static class QblToPblConverter
 
             foreach (var (fieldRef, fieldNode) in tableNode.ChildMap("Fields"))
             {
-                CollectRelationshipField(fieldRef, fieldNode, relFields, issues);
+                CollectRelationshipField(tableRef, fieldRef, fieldNode, relFields, issues);
 
                 // System fields (Record ID#, Date Created, etc.) never become a standalone
                 // PblField - PowerBase's own seeder already creates one per table - but real
@@ -163,6 +165,16 @@ public static class QblToPblConverter
                 if (QblFieldTypeMap.SystemFieldNames.TryGetValue(fieldNode.Type, out var systemFieldName))
                 {
                     fieldNameByRef[fieldRef] = systemFieldName;
+                    // powerflowextraRd: keep the source's label for the built-in field (Quickbase lets an app rename
+                    // "Last Modified By" to e.g. "LastModifiedBy"), so the import can label the seeded system field the
+                    // same way and a custom field holding the default label is not numbered "(2)".
+                    var systemLabel = NullIfBlank(ResolveScalar(fieldNode, "Label"))?.Trim();
+                    if (systemLabel is not null)
+                    {
+                        seenFieldLabels.Add(systemLabel);
+                        if (!string.Equals(systemLabel, systemFieldName, StringComparison.Ordinal))
+                            (table.SystemFieldLabels ??= new(StringComparer.Ordinal))[systemFieldName] = systemLabel;
+                    }
                     continue;
                 }
 
@@ -215,7 +227,11 @@ public static class QblToPblConverter
             {
                 if (relNode.Type is "QB::Relationship::CrossAppChild" or "QB::Relationship::CrossAppParent")
                 {
-                    issues.Add(Warning("QBL_UNSUPPORTED_CROSS_APP_RELATIONSHIP", $"Cross-app relationship '{relRef}' is out of scope (Master/Child App mode not yet supported).", relRef));
+                    const string crossAppReason = "Its relationship is a cross-app (master/child application) relationship, which is not supported yet";
+                    if (relFieldsPerTable.TryGetValue(childTableRef, out var crossAppFields) && crossAppFields.References.TryGetValue(relRef, out var crossAppReference))
+                        crossAppFields.Reasons[crossAppReference.FieldRef] = ("QBL_UNSUPPORTED_CROSS_APP_RELATIONSHIP", crossAppReason);
+                    var crossAppTableLabel = tables.FirstOrDefault(t => t.LogicalRef == childTableRef)?.Name ?? InferFieldName(childTableRef, null);
+                    issues.Add(Warning("QBL_UNSUPPORTED_CROSS_APP_RELATIONSHIP", $"Table '{crossAppTableLabel}' has a relationship to a table in a different application. Linking tables across separate applications (Master/Child App mode) isn't supported by this import yet, so placeholder fields were created in its place. Please set up this relationship manually in PowerBase after import.", relRef));
                     continue;
                 }
 
@@ -240,7 +256,9 @@ public static class QblToPblConverter
         var tableNameByRef = tables.ToDictionary(t => t.LogicalRef, t => t.Name, StringComparer.Ordinal);
         ResolveRelationshipLookupsAndSummaries(relationships, relFieldsPerTable, fieldNameByRefPerTable, seenFieldNamesByTableRef, tableNameByRef, addressSubComponentOwnerByTableRef, issues);
 
-        AttachReportLinks(tables, relationships, tableNodeByRef, relFieldsPerTable, fieldNameByRefPerTable, issues);
+        AttachReportLinks(tables, relationships, tableNodeByRef, relFieldsPerTable, fieldNameByRefPerTable, seenFieldNamesByTableRef, issues);
+        // Whatever Reference/Lookup/Summary field never became part of a relationship keeps its place as a plain field.
+        EmitRelationshipPlaceholders(tables, relationships, relFieldsPerTable, fieldNameByRefPerTable, seenFieldNamesByTableRef, issues);
         ApplyTableDefaultReportSettings(tables, relationships, tableNodeByRef, fieldNameByRefPerTable, issues);
 
         // Dependent dropdowns, now that every field of both tables has a name.
@@ -331,6 +349,19 @@ public static class QblToPblConverter
             var tableNode = tableNodeByRef[table.LogicalRef];
             var fieldNameByRef = fieldNameByRefPerTable[table.LogicalRef];
 
+            // A report can show a report link as a column (it is a computed field with its own number); the link is not in the field-name map
+            // because forms treat it specially, so the reports get a copy that knows the links by their labels.
+            var reportFieldNameByRef = new Dictionary<string, string>(fieldNameByRef, StringComparer.Ordinal);
+            foreach (var (linkRef, _) in tableNode.ChildMap("Fields").Where(x => x.Value.Type == "QB::Field::ReportLink"))
+            {
+                if (reportFieldNameByRef.ContainsKey(linkRef)) continue; // a stand-in field already carries its name
+                var qualifiedLink = Qualify(table.LogicalRef, linkRef);
+                var standalone = table.ReportLinks.FirstOrDefault(l => l.LogicalRef == qualifiedLink);
+                var linkLabel = relationships.FirstOrDefault(r => r.ReportLink?.LogicalRef == qualifiedLink)?.ReportLink?.Label
+                    ?? (standalone is null ? null : standalone.Label ?? standalone.Name);
+                if (!string.IsNullOrWhiteSpace(linkLabel)) reportFieldNameByRef[linkRef] = linkLabel;
+            }
+
             // Confirmed real data: Quickbase can carry multiple auto-generated "Embedded for X"
             // reports with the IDENTICAL name on the same table (one per relationship, with no
             // dedup on Quickbase's side) - PowerBase requires report names unique per table, so
@@ -339,9 +370,16 @@ public static class QblToPblConverter
             // the repeat instead, same as any other unsupported-construct gap.
             var seenReportNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             // Pie / stacked-bar / gauge charts sit under the table's own "Charts" key, beside "Reports".
-            foreach (var (reportRef, reportNode) in tableNode.ChildMap("Reports").Concat(tableNode.ChildMap("Charts")))
+            var tableReportsAndCharts = tableNode.ChildMap("Reports").Concat(tableNode.ChildMap("Charts"))
+                .ToDictionary(x => x.Key, x => x.Value, StringComparer.Ordinal);
+            foreach (var (reportRef, reportNode) in tableReportsAndCharts)
             {
-                var report = ConvertReport(table.LogicalRef, reportRef, reportNode, fieldNameByRef, fieldNameBySourceId.GetValueOrDefault(table.LogicalRef) ?? [], issues);
+                // A report-level formula column's own definition (Report::Formula::Text/Numeric/...) — not a report
+                // itself; it is only ever reached by a !Ref from inside the report that uses it (see ResolveReportColumns).
+                if (reportNode.Type.StartsWith("QB::Report::Formula::", StringComparison.Ordinal))
+                    continue;
+
+                var report = ConvertReport(table.LogicalRef, reportRef, reportNode, reportFieldNameByRef, fieldNameBySourceId.GetValueOrDefault(table.LogicalRef) ?? [], tableReportsAndCharts, issues);
                 if (report is null)
                     continue;
 
@@ -412,9 +450,16 @@ public static class QblToPblConverter
                 DisableAccess = roleNode.PropertyBool("DisableAccess"),
                 RestrictAccessToNewTables = roleNode.PropertyBool("RestrictAccessToNewTablesForThisRole"),
             });
+
+            foreach (var message in QblUnmappedSettings.ForRole(roleNode))
+                issues.Add(Warning("QBL_ROLE_SETTING_NOT_CARRIED", $"Role '{ResolveScalar(roleNode, "Name") ?? roleRef}': {message}", roleRef));
         }
 
+        if (appNode.Properties.ContainsKey("RoleOrder") && roles.Count > 1)
+            issues.Add(Warning("QBL_ROLE_ORDER_NOT_CARRIED", "Quickbase keeps the roles in a set order; PowerBase orders roles itself, so the order was not carried.", appRef));
+
         var tablePermissionsByRoleRef = new Dictionary<string, List<PblTablePermission>>(StringComparer.Ordinal);
+        var refreshTablesByRoleRef = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         foreach (var table in tables)
         {
             var tableNode = tableNodeByRef[table.LogicalRef];
@@ -425,6 +470,12 @@ public static class QblToPblConverter
             {
                 if (permsRaw is not Dictionary<string, object?> perms)
                     continue;
+
+                if (GetBool(perms, "CanRefreshConnectedData"))
+                {
+                    if (!refreshTablesByRoleRef.TryGetValue(roleRefKey, out var refreshTables)) refreshTablesByRoleRef[roleRefKey] = refreshTables = [];
+                    refreshTables.Add(table.Name);
+                }
 
                 var permission = ConvertTablePermission(table.LogicalRef, table.Name, roleRefKey, perms, fieldNameBySourceId.GetValueOrDefault(table.LogicalRef) ?? [], issues);
                 if (!tablePermissionsByRoleRef.TryGetValue(roleRefKey, out var list))
@@ -437,6 +488,11 @@ public static class QblToPblConverter
         {
             if (tablePermissionsByRoleRef.TryGetValue(role.LogicalRef, out var perms))
                 role.TablePermissions = perms;
+
+            if (refreshTablesByRoleRef.TryGetValue(role.LogicalRef, out var refreshTables))
+                issues.Add(Warning("QBL_ROLE_SETTING_NOT_CARRIED",
+                    $"Role '{role.Name}': Quickbase lets this role refresh connected data on {string.Join(", ", refreshTables.Select(t => $"'{t}'"))}. PowerBase has no per-role setting for refreshing connected data.",
+                    role.LogicalRef));
         }
 
         ApplyFieldPermissions(tables, tableNodeByRef, fieldNameByRefPerTable, roles, issues);
@@ -524,7 +580,7 @@ public static class QblToPblConverter
 
             if (string.IsNullOrEmpty(name))
             {
-                issues.Add(Warning("QBL_VARIABLE_NO_NAME", $"Variable '{varRef}' has no name; skipped.", varRef));
+                issues.Add(Warning("QBL_VARIABLE_NO_NAME", $"An application variable (identified only as '{InferFieldName(varRef, null)}' — no name is recorded for it) was skipped. Please check this variable in Quickbase and give it a name if you need it in PowerBase.", varRef));
                 continue;
             }
             if (name.Length > MAX_VARIABLE_NAME_LENGTH)
@@ -569,7 +625,8 @@ public static class QblToPblConverter
 
             if (pageNode.Type != "QB::CodePage")
             {
-                issues.Add(Warning("QBL_UNSUPPORTED_PAGE_TYPE", $"Page '{pageRef}' of type '{pageNode.Type}' has no PowerBase equivalent; skipped.", pageRef));
+                var unsupportedPageLabel = NullIfBlank(ResolveScalar(pageNode, "Name")) ?? InferFieldName(pageRef, null);
+                issues.Add(Warning("QBL_UNSUPPORTED_PAGE_TYPE", $"Page '{unsupportedPageLabel}' is a '{pageNode.Type}' page, which has no equivalent in PowerBase, so it was not imported. Recreate this page manually in PowerBase if you need it.", pageRef));
                 continue;
             }
 
@@ -618,7 +675,8 @@ public static class QblToPblConverter
                     var widget = ConvertDashboardWidget(widgetNode);
                     if (widget is null)
                     {
-                        issues.Add(Warning("QBL_UNSUPPORTED_DASHBOARD_WIDGET", $"Dashboard '{unique}': widget '{widgetRef}' of type '{widgetNode.Type}' has no PowerBase widget; skipped.", pageRef));
+                        var widgetLabel = NullIfBlank(ResolveScalar(widgetNode, "Name")) ?? InferFieldName(widgetRef, null);
+                        issues.Add(Warning("QBL_UNSUPPORTED_DASHBOARD_WIDGET", $"Dashboard '{unique}' has a widget ('{widgetLabel}', type '{widgetNode.Type}') with no equivalent in PowerBase, so it was not imported. Recreate this widget manually on the dashboard if you need it.", pageRef));
                         continue;
                     }
                     tab.Widgets.Add(widget);
@@ -1001,9 +1059,10 @@ public static class QblToPblConverter
                 foreach (var (roleRef, accessRaw) in byRole)
                 {
                     var access = accessRaw?.ToString();
+                    var roleLabel = roleByRef.GetValueOrDefault(roleRef)?.Name ?? InferFieldName(roleRef, null);
                     if (access is not ("View" or "Modify" or "None"))
                     {
-                        issues.Add(Warning("QBL_FIELD_PERMISSION_UNKNOWN", $"Field '{fieldName}' role '{roleRef}': access '{access}' is not View/Modify/None; not applied.", fieldRef));
+                        issues.Add(Warning("QBL_FIELD_PERMISSION_UNKNOWN", $"Field '{fieldName}' has a permission entry for role '{roleLabel}' with access level '{access}', which PowerBase does not support (only View, Modify or None). That permission was not applied — please set this field's access for role '{roleLabel}' manually in PowerBase after import.", fieldRef));
                         continue;
                     }
                     if (access == "Modify")
@@ -1012,7 +1071,7 @@ public static class QblToPblConverter
                     var permission = roleByRef.GetValueOrDefault(roleRef)?.TablePermissions.FirstOrDefault(p => p.TableRef == table.LogicalRef);
                     if (permission is null)
                     {
-                        issues.Add(Warning("QBL_FIELD_PERMISSION_ROLE_UNRESOLVED", $"Field '{fieldName}': role '{roleRef}' has no permission entry for table '{table.Name}'; field restriction not applied.", fieldRef));
+                        issues.Add(Warning("QBL_FIELD_PERMISSION_ROLE_UNRESOLVED", $"Field '{fieldName}' restricts access for role '{roleLabel}', but that role has no permission entry for table '{table.Name}'. This field restriction was not applied — please check that role's permissions on table '{table.Name}' after import.", fieldRef));
                         continue;
                     }
 
@@ -1053,11 +1112,26 @@ public static class QblToPblConverter
 
         /// <summary>Keyed by the Reference field's own ref, from Summary.ReferenceField.</summary>
         public Dictionary<string, List<SummaryFieldInfo>> SummariesByReferenceFieldRef { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>Every Reference/Lookup/Summary field of the table, whether or not it could be turned into part of a relationship.</summary>
+        public List<RelFieldRecord> Registered { get; } = [];
+
+        /// <summary>Field refs that did become part of a relationship (so need no stand-in).</summary>
+        public HashSet<string> Materialized { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>Why a field could not become part of a relationship, where the converter already knows.</summary>
+        public Dictionary<string, (string Code, string Reason)> Reasons { get; } = new(StringComparer.Ordinal);
     }
 
-    private sealed record ReferenceFieldInfo(string FieldRef, string Name, string? Label, bool IsRequired, int? SourceId = null, string? FilterFieldRef = null, string? MatchFieldRef = null, string? Description = null);
-    private sealed record LookupFieldInfo(string FieldRef, string Name, string? Label, string? TargetFieldRef, int? SourceId = null, string? Description = null);
-    private sealed record SummaryFieldInfo(string FieldRef, string Name, string? Label, string Function, string? TargetFieldRef, string? Query = null, int? SourceId = null, string? Description = null);
+    /// <summary>What the converter needs to keep a Reference/Lookup/Summary field that could not become part of a relationship: the
+    /// source's own identity and a readable definition, plus a lossless snapshot of the node.</summary>
+    private sealed record RelFieldRecord(
+        string Kind, string FieldRef, string Name, string? Label, int? SourceId, string? Description, string? HelpText,
+        string QblType, string PlaceholderType, string Definition, string MetadataJson);
+
+    private sealed record ReferenceFieldInfo(string FieldRef, string Name, string? Label, bool IsRequired, int? SourceId = null, string? FilterFieldRef = null, string? MatchFieldRef = null, string? Description = null, bool LinkToParent = false, PblFieldFlags? Flags = null);
+    private sealed record LookupFieldInfo(string FieldRef, string Name, string? Label, string? TargetFieldRef, int? SourceId = null, string? Description = null, bool LinkToParent = false, PblFieldFlags? Flags = null);
+    private sealed record SummaryFieldInfo(string FieldRef, string Name, string? Label, string Function, string? TargetFieldRef, string? Query = null, int? SourceId = null, string? Description = null, PblFieldFlags? Flags = null);
 
     /// <summary>If the raw target ref is one of <paramref name="tableRef"/>'s Address shadow
     /// sub-component fields (see the per-table maps built in <see cref="Convert"/>), redirects it
@@ -1078,19 +1152,34 @@ public static class QblToPblConverter
         return (rawTargetFieldRef, null);
     }
 
-    private static void CollectRelationshipField(string fieldRef, QblResourceNode fieldNode, RelationshipFieldCollector collector, List<PblIssue> issues)
+    private static void CollectRelationshipField(string tableRef, string fieldRef, QblResourceNode fieldNode, RelationshipFieldCollector collector, List<PblIssue> issues)
     {
         var label = ResolveScalar(fieldNode, "Label");
         var name = InferFieldName(fieldRef, label);
+
+        // Every relationship field is registered first: if it never becomes part of a relationship, a stand-in field keeps its place.
+        void Register(string kind, string placeholderType, string definition) =>
+            collector.Registered.Add(new RelFieldRecord(kind, fieldRef, name, NullIfBlank(label), fieldNode.SourceId,
+                NullIfBlank(ResolveScalar(fieldNode, "Comments")), NullIfBlank(ResolveScalar(fieldNode, "HelpText")),
+                fieldNode.Type, placeholderType, definition, QblPlaceholders.SnapshotJson(fieldNode)));
+
+        void Fail(string code, string reason, string placeholderType)
+        {
+            collector.Reasons[fieldRef] = (code, reason);
+            issues.Add(Warning(code, $"{reason}; a placeholder {placeholderType} field was created in its place.", fieldRef));
+        }
 
         switch (fieldNode.Type)
         {
             case "QB::Field::Reference":
             {
                 var relRef = NestedRef(fieldNode, "Reference", "Relationship")?["Relationship"];
+                Register("Reference", "Number", $"Reference field; relationship '{relRef ?? "(none)"}'");
+                foreach (var message in QblUnmappedSettings.ForField(fieldNode))
+                    issues.Add(Warning("QBL_FIELD_SETTING_NOT_CARRIED", $"Field '{name}': {message}", Qualify(tableRef, relRef ?? fieldRef)));
                 if (relRef is null)
                 {
-                    issues.Add(Warning("QBL_REFERENCE_MISSING_RELATIONSHIP", $"Reference field '{name}' has no resolvable relationship; skipped.", fieldRef));
+                    Fail("QBL_REFERENCE_MISSING_RELATIONSHIP", $"Reference field '{name}' has no resolvable relationship", "Number");
                     return;
                 }
                 // "Conditional values": only parent records whose MatchField equals this record's FilterField are offered.
@@ -1101,21 +1190,24 @@ public static class QblToPblConverter
                     filterFieldRef = (conditionalMap.GetValueOrDefault("FilterField") as QblRef)?["Field"];
                     matchFieldRef = (conditionalMap.GetValueOrDefault("MatchField") as QblRef)?["Field"];
                 }
-                collector.References[relRef] = new ReferenceFieldInfo(fieldRef, name, NullIfBlank(label), fieldNode.PropertyBool("IsRequired"), fieldNode.SourceId, filterFieldRef, matchFieldRef, NullIfBlank(ResolveScalar(fieldNode, "Comments")));
+                collector.References[relRef] = new ReferenceFieldInfo(fieldRef, name, NullIfBlank(label), fieldNode.PropertyBool("IsRequired"), fieldNode.SourceId, filterFieldRef, matchFieldRef, NullIfBlank(ResolveScalar(fieldNode, "Comments")), NestedBool(fieldNode, "Reference", "DisplayAsLinkToParent"), FlagsOf(fieldNode));
                 return;
             }
             case "QB::Field::Lookup":
             {
                 var relRef = NestedRef(fieldNode, "Lookup", "Relationship")?["Relationship"];
+                var targetFieldRef = NestedRef(fieldNode, "Lookup", "TargetField")?["Field"];
+                foreach (var message in QblUnmappedSettings.ForField(fieldNode))
+                    issues.Add(Warning("QBL_FIELD_SETTING_NOT_CARRIED", $"Field '{name}': {message}", Qualify(tableRef, fieldRef)));
+                Register("Lookup", QblPlaceholders.TEXT, $"Lookup of field '{targetFieldRef ?? "(none)"}' through relationship '{relRef ?? "(none)"}'");
                 if (relRef is null)
                 {
-                    issues.Add(Warning("QBL_LOOKUP_MISSING_RELATIONSHIP", $"Lookup field '{name}' has no resolvable relationship; skipped.", fieldRef));
+                    Fail("QBL_LOOKUP_MISSING_RELATIONSHIP", $"Lookup field '{name}' has no resolvable relationship", QblPlaceholders.TEXT);
                     return;
                 }
-                var targetFieldRef = NestedRef(fieldNode, "Lookup", "TargetField")?["Field"];
                 if (!collector.Lookups.TryGetValue(relRef, out var list))
                     collector.Lookups[relRef] = list = [];
-                list.Add(new LookupFieldInfo(fieldRef, name, NullIfBlank(label), targetFieldRef, fieldNode.SourceId, NullIfBlank(ResolveScalar(fieldNode, "Comments"))));
+                list.Add(new LookupFieldInfo(fieldRef, name, NullIfBlank(label), targetFieldRef, fieldNode.SourceId, NullIfBlank(ResolveScalar(fieldNode, "Comments")), NestedBool(fieldNode, "Lookup", "DisplayAsLinkToParent"), FlagsOf(fieldNode)));
                 return;
             }
             case "QB::Field::Summary":
@@ -1134,32 +1226,43 @@ public static class QblToPblConverter
                 var referenceFieldRef = referenceField?["Field"];
                 var summaryProps = fieldNode.Properties.TryGetValue("Summary", out var s) ? s as Dictionary<string, object?> : null;
                 var qblFunction = summaryProps?.TryGetValue("Function", out var fn) == true ? fn?.ToString() : null;
+                var query = summaryProps?.TryGetValue("Query", out var q) == true ? NullIfBlank(q?.ToString()) : null;
+                var summarized = NestedRef(fieldNode, "Summary", "FieldToSummarize")?["Field"];
+
+                foreach (var message in QblUnmappedSettings.ForField(fieldNode))
+                    issues.Add(Warning("QBL_FIELD_SETTING_NOT_CARRIED", $"Field '{name}': {message}", Qualify(tableRef, fieldRef)));
+                var summaryPlaceholderType = QblPlaceholders.TypeForSummaryFunction(qblFunction);
+                Register("Summary", summaryPlaceholderType,
+                    $"Summary: {qblFunction ?? "(no function)"}{(summarized is null ? "" : $" of field '{summarized}'")} through reference field '{referenceFieldTableRef ?? "(none)"}::{referenceFieldRef ?? "(none)"}'"
+                    + (query is null ? "" : $" where {query}"));
 
                 if (referenceFieldTableRef is null || referenceFieldRef is null || qblFunction is null)
                 {
-                    issues.Add(Warning("QBL_SUMMARY_UNRESOLVED_REFERENCE", $"Summary field '{name}' has a broken relationship/function reference; skipped.", fieldRef));
+                    Fail("QBL_SUMMARY_UNRESOLVED_REFERENCE", $"Summary field '{name}' has a broken relationship/function reference", summaryPlaceholderType);
                     return;
                 }
 
                 var function = MapSummaryFunction(qblFunction);
                 if (function is null)
                 {
-                    issues.Add(Warning("QBL_UNSUPPORTED_SUMMARY_FUNCTION", $"Summary field '{name}' uses function '{qblFunction}', which has no PowerBase equivalent.", fieldRef));
+                    Fail("QBL_UNSUPPORTED_SUMMARY_FUNCTION", $"Summary field '{name}' uses function '{qblFunction}', which has no PowerBase equivalent", summaryPlaceholderType);
                     return;
                 }
 
-                var targetFieldRef = NestedRef(fieldNode, "Summary", "FieldToSummarize")?["Field"];
+                var targetFieldRef = summarized;
                 var referenceFieldKey = Qualify(referenceFieldTableRef, referenceFieldRef);
                 if (!collector.SummariesByReferenceFieldRef.TryGetValue(referenceFieldKey, out var slist))
                     collector.SummariesByReferenceFieldRef[referenceFieldKey] = slist = [];
-                var query = summaryProps?.TryGetValue("Query", out var q) == true ? NullIfBlank(q?.ToString()) : null;
-                slist.Add(new SummaryFieldInfo(fieldRef, name, NullIfBlank(label), function, targetFieldRef, query, fieldNode.SourceId, NullIfBlank(ResolveScalar(fieldNode, "Comments"))));
+                slist.Add(new SummaryFieldInfo(fieldRef, name, NullIfBlank(label), function, targetFieldRef, query, fieldNode.SourceId, NullIfBlank(ResolveScalar(fieldNode, "Comments")), FlagsOf(fieldNode)));
                 return;
             }
+            case "QB::Field::ReferenceProxy":
+                // PowerBase derives a relationship's proxy from its first lookup (see ReferenceProxyRules); the proxy is not a separate field.
+                issues.Add(Warning("QBL_REFERENCE_PROXY_NOT_SEPARATE",
+                    $"Reference proxy field '{name}' is represented by the relationship's proxy field in PowerBase; no separate field is created.", fieldRef));
+                return;
             default:
-                // QB::Field::ReportLink (auto-created by CreateRelationshipCommandHandler) and
-                // QB::Field::ReferenceProxy (auto-derived from the first Lookup) need nothing
-                // collected here.
+                // QB::Field::ReportLink is handled by AttachReportLinks (a relationship's own link, a standalone link, or a stand-in field).
                 return;
         }
     }
@@ -1224,13 +1327,15 @@ public static class QblToPblConverter
         var parentTableRef = relNode.PropertyRef("Parent")?["Table"];
         if (parentTableRef is null)
         {
-            issues.Add(Warning("QBL_RELATIONSHIP_MISSING_PARENT", $"Relationship '{relRef}' has no resolvable parent table; skipped.", relRef));
+            if (relFieldsPerTable.TryGetValue(childTableRef, out var orphanFields) && orphanFields.References.TryGetValue(relRef, out var orphanReference))
+                orphanFields.Reasons[orphanReference.FieldRef] = ("QBL_RELATIONSHIP_MISSING_PARENT", $"Its relationship '{relRef}' has no resolvable parent table");
+            issues.Add(Warning("QBL_RELATIONSHIP_MISSING_PARENT", $"A relationship on table '{InferFieldName(childTableRef, null)}' does not point to a parent table that exists in the source file, so it could not be created. Its fields were created as placeholders — please verify the relationship in Quickbase and recreate it manually in PowerBase if needed.", relRef));
             return null;
         }
 
         if (!relFieldsPerTable.TryGetValue(childTableRef, out var childRelFields) || !childRelFields.References.TryGetValue(relRef, out var referenceInfo))
         {
-            issues.Add(Warning("QBL_RELATIONSHIP_MISSING_REFERENCE_FIELD", $"Relationship '{relRef}' has no matching Reference field; skipped.", relRef));
+            issues.Add(Warning("QBL_RELATIONSHIP_MISSING_REFERENCE_FIELD", $"A relationship on table '{InferFieldName(childTableRef, null)}' is missing its reference field in the source file, so it could not be created. Its fields were created as placeholders — please verify the relationship in Quickbase and recreate it manually in PowerBase if needed.", relRef));
             return null;
         }
 
@@ -1243,12 +1348,15 @@ public static class QblToPblConverter
             ReferenceFieldLabel = referenceInfo.Label,
             IsReferenceRequired = referenceInfo.IsRequired,
             ReferenceFieldSourceId = referenceInfo.SourceId,
+            ReferenceDisplayAsLinkToParent = referenceInfo.LinkToParent,
+            ReferenceFlags = referenceInfo.Flags,
         };
 
         // Enrich Pass A's field-name maps so Pass C (Reports) — and other relationships'
         // chained Lookups/Summaries — can resolve against this relationship's Reference field,
         // which doesn't exist as a standalone PblField.
         fieldNameByRefPerTable[childTableRef][referenceInfo.FieldRef] = referenceInfo.Name;
+        childRelFields.Materialized.Add(referenceInfo.FieldRef);
 
         return relationship;
     }
@@ -1323,8 +1431,9 @@ public static class QblToPblConverter
                     }
                 }
 
-                rel.Lookups.Add(new PblLookupField { LogicalRef = lookup.FieldRef, Name = lookup.Name, Label = lookup.Label, SourceFieldName = sourceFieldName, SourceSubField = lookupTargetSubField, SourceId = lookup.SourceId, Description = lookup.Description });
+                rel.Lookups.Add(new PblLookupField { LogicalRef = lookup.FieldRef, Name = lookup.Name, Label = lookup.Label, DisplayAsLinkToParent = lookup.LinkToParent, Flags = lookup.Flags, SourceFieldName = sourceFieldName, SourceSubField = lookupTargetSubField, SourceId = lookup.SourceId, Description = lookup.Description });
                 fieldNameByRefPerTable[rel.ChildTableRef][lookup.FieldRef] = lookup.Name;
+                if (relFieldsPerTable.TryGetValue(rel.ChildTableRef, out var lookupOwner)) lookupOwner.Materialized.Add(lookup.FieldRef);
                 pendingLookups.RemoveAt(i);
                 progress = true;
             }
@@ -1337,7 +1446,10 @@ public static class QblToPblConverter
 
                 if (summaryTargetSubField is not null && summary.Function is "Sum" or "Avg")
                 {
-                    issues.Add(Warning("QBL_UNSUPPORTED_SUMMARY_ADDRESS_SUBFIELD", $"Summary field '{summary.Name}' uses function '{summary.Function}' over an address sub-component, which PowerBase can't aggregate numerically; skipped.", summary.FieldRef));
+                    const string subFieldReason = "uses a total/average over an address sub-component, which PowerBase can't aggregate numerically";
+                    if (relFieldsPerTable.TryGetValue(rel.ParentTableRef, out var subFieldOwner))
+                        subFieldOwner.Reasons[summary.FieldRef] = ("QBL_UNSUPPORTED_SUMMARY_ADDRESS_SUBFIELD", $"Summary field '{summary.Name}' {subFieldReason}");
+                    issues.Add(Warning("QBL_UNSUPPORTED_SUMMARY_ADDRESS_SUBFIELD", $"Summary field '{summary.Name}' {subFieldReason}; a placeholder field was created in its place.", summary.FieldRef));
                     pendingSummaries.RemoveAt(i);
                     progress = true;
                     continue;
@@ -1358,18 +1470,27 @@ public static class QblToPblConverter
                     }
                 }
 
-                rel.Summaries.Add(new PblSummaryField { LogicalRef = summary.FieldRef, Name = summary.Name, Label = summary.Label, Function = summary.Function, TargetFieldName = targetFieldName, TargetSubField = summaryTargetSubField, QueryCriteria = summary.Query, SourceId = summary.SourceId, Description = summary.Description });
+                rel.Summaries.Add(new PblSummaryField { LogicalRef = summary.FieldRef, Name = summary.Name, Label = summary.Label, Function = summary.Function, TargetFieldName = targetFieldName, TargetSubField = summaryTargetSubField, QueryCriteria = summary.Query, SourceId = summary.SourceId, Description = summary.Description, Flags = summary.Flags });
                 fieldNameByRefPerTable[rel.ParentTableRef][summary.FieldRef] = summary.Name;
+                if (relFieldsPerTable.TryGetValue(rel.ParentTableRef, out var summaryOwner)) summaryOwner.Materialized.Add(summary.FieldRef);
                 pendingSummaries.RemoveAt(i);
                 progress = true;
             }
         }
 
-        foreach (var (_, lookup) in pendingLookups)
-            issues.Add(Warning("QBL_LOOKUP_FIELD_UNRESOLVED", $"Lookup field '{lookup.Name}' references a parent field not available in this import phase; skipped.", lookup.FieldRef));
+        foreach (var (rel, lookup) in pendingLookups)
+        {
+            var reason = $"Lookup field '{lookup.Name}' references a parent field that does not exist in the source (deleted or a broken reference)";
+            if (relFieldsPerTable.TryGetValue(rel.ChildTableRef, out var owner)) owner.Reasons[lookup.FieldRef] = ("QBL_LOOKUP_FIELD_UNRESOLVED", reason);
+            issues.Add(Warning("QBL_LOOKUP_FIELD_UNRESOLVED", $"{reason}; a placeholder field was created in its place.", lookup.FieldRef));
+        }
 
-        foreach (var (_, summary, _) in pendingSummaries)
-            issues.Add(Warning("QBL_SUMMARY_FIELD_UNRESOLVED", $"Summary field '{summary.Name}' references a child field not available in this import phase; skipped.", summary.FieldRef));
+        foreach (var (rel, summary, _) in pendingSummaries)
+        {
+            var reason = $"Summary field '{summary.Name}' references a child field that does not exist in the source (deleted or a broken reference)";
+            if (relFieldsPerTable.TryGetValue(rel.ParentTableRef, out var owner)) owner.Reasons[summary.FieldRef] = ("QBL_SUMMARY_FIELD_UNRESOLVED", reason);
+            issues.Add(Warning("QBL_SUMMARY_FIELD_UNRESOLVED", $"{reason}; a placeholder field was created in its place.", summary.FieldRef));
+        }
     }
 
     /// <summary>Quickbase lists a table's report links as fields of their own, numbered like any other field. A link that opens a child
@@ -1382,6 +1503,7 @@ public static class QblToPblConverter
         Dictionary<string, QblResourceNode> tableNodeByRef,
         Dictionary<string, RelationshipFieldCollector> relFieldsPerTable,
         Dictionary<string, Dictionary<string, string>> fieldNameByRefPerTable,
+        Dictionary<string, HashSet<string>> seenFieldNamesByTableRef,
         List<PblIssue> issues)
     {
         foreach (var rel in relationships)
@@ -1394,15 +1516,18 @@ public static class QblToPblConverter
             {
                 var label = NullIfBlank(ResolveScalar(linkNode, "Label"));
                 var name = InferFieldName(linkRef, label);
+                foreach (var message in QblUnmappedSettings.ForField(linkNode))
+                    issues.Add(Warning("QBL_FIELD_SETTING_NOT_CARRIED", $"Field '{name}': {message}", Qualify(table.LogicalRef, linkRef)));
 
                 var target = NestedRef(linkNode, "FieldRelationship", "Target");
                 if (target?["Table"] is not { } targetTableRef || target["Field"] is not { } targetFieldRef
                     || !fieldNameByRefPerTable.TryGetValue(targetTableRef, out var targetNames) || !targetNames.TryGetValue(targetFieldRef, out var targetFieldName))
                 {
-                    issues.Add(Warning("QBL_REPORT_LINK_TARGET_UNAVAILABLE",
-                        target?["Field"] is null
-                            ? $"Report link '{name}' on '{table.Name}' has no target: the field it opened no longer exists in the source; skipped."
-                            : $"Report link '{name}' on '{table.Name}' opens a field that was not converted; skipped.", linkRef));
+                    var reason = target?["Field"] is null
+                        ? $"Report link '{name}' on '{table.Name}' has no target: the field it opened no longer exists in the source"
+                        : $"Report link '{name}' on '{table.Name}' opens a field that was not converted";
+                    AddReportLinkPlaceholder(table, relationships, seenFieldNamesByTableRef, fieldNameByRefPerTable, linkRef, linkNode, name, label,
+                        "QBL_REPORT_LINK_TARGET_UNAVAILABLE", reason, target, NestedRef(linkNode, "FieldRelationship", "Source"), issues);
                     continue;
                 }
 
@@ -1425,6 +1550,7 @@ public static class QblToPblConverter
                         LinkText = linkText,
                         SourceId = linkNode.SourceId,
                         Description = description,
+                        Flags = FlagsOf(linkNode),
                     };
                     continue;
                 }
@@ -1432,7 +1558,8 @@ public static class QblToPblConverter
                 string? sourceFieldName = null;
                 if (!matchesOnRecordId && (!fieldNameByRefPerTable.TryGetValue(table.LogicalRef, out var ownNames) || !ownNames.TryGetValue(sourceRef!, out sourceFieldName)))
                 {
-                    issues.Add(Warning("QBL_REPORT_LINK_SOURCE_UNAVAILABLE", $"Report link '{name}' matches on a field that was not converted; skipped.", linkRef));
+                    AddReportLinkPlaceholder(table, relationships, seenFieldNamesByTableRef, fieldNameByRefPerTable, linkRef, linkNode, name, label,
+                        "QBL_REPORT_LINK_SOURCE_UNAVAILABLE", $"Report link '{name}' matches on a field that was not converted", target, NestedRef(linkNode, "FieldRelationship", "Source"), issues);
                     continue;
                 }
 
@@ -1444,10 +1571,98 @@ public static class QblToPblConverter
                     LinkText = linkText,
                     SourceId = linkNode.SourceId,
                     Description = description,
+                    Flags = FlagsOf(linkNode),
                     TargetTableRef = targetTableRef,
                     TargetFieldName = targetFieldName,
                     SourceFieldName = sourceFieldName,
                 });
+            }
+        }
+    }
+
+    /// <summary>Every label a table already uses (its fields, relationship fields, report links and the seeded system fields).</summary>
+    private static HashSet<string> UsedLabels(PblTable table, List<PblRelationship> relationships)
+    {
+        var used = new HashSet<string>(AppSeeder.SystemFieldLabels, StringComparer.OrdinalIgnoreCase);
+        foreach (var f in table.Fields) used.Add((f.Label ?? f.Name).Trim());
+        foreach (var l in table.ReportLinks) used.Add((l.Label ?? l.Name).Trim());
+        foreach (var rel in relationships)
+        {
+            if (rel.ChildTableRef == table.LogicalRef)
+            {
+                used.Add((rel.ReferenceFieldLabel ?? rel.ReferenceFieldName).Trim());
+                foreach (var lookup in rel.Lookups) used.Add((lookup.Label ?? lookup.Name).Trim());
+            }
+            if (rel.ParentTableRef == table.LogicalRef)
+            {
+                foreach (var summary in rel.Summaries) used.Add((summary.Label ?? summary.Name).Trim());
+                if (rel.ReportLink?.Label is { } linkLabel) used.Add(linkLabel.Trim());
+            }
+        }
+        return used;
+    }
+
+    /// <summary>Adds a stand-in field to the table under a name and label no other field of the table uses (a repeat is numbered, as for
+    /// any other field), and returns it.</summary>
+    private static PblField AddPlaceholderField(PblTable table, List<PblRelationship> relationships, HashSet<string> seenNames, PblField field)
+    {
+        var wantedName = field.Name;
+        field.Name = NumberedName(seenNames, wantedName);
+        var wantedLabel = (field.Label ?? wantedName).Trim();
+        if (!string.Equals(field.Name, wantedName, StringComparison.Ordinal))
+            wantedLabel += field.Name[wantedName.Length..];
+
+        var used = UsedLabels(table, relationships);
+        var label = wantedLabel;
+        for (var n = 2; !used.Add(label); n++)
+            label = $"{wantedLabel} ({n})";
+        field.Label = label;
+
+        table.Fields.Add(field);
+        return field;
+    }
+
+    private static void AddReportLinkPlaceholder(
+        PblTable table, List<PblRelationship> relationships, Dictionary<string, HashSet<string>> seenFieldNamesByTableRef,
+        Dictionary<string, Dictionary<string, string>> fieldNameByRefPerTable, string linkRef, QblResourceNode linkNode, string name, string? label,
+        string code, string reason, QblRef? target, QblRef? source, List<PblIssue> issues)
+    {
+        var definition = $"Report link; opens field '{target?["Field"] ?? "(none)"}' of table '{target?["Table"] ?? "(none)"}'"
+            + (source?["Field"] is { } sourceField ? $", matching on field '{sourceField}'" : "")
+            + (NullIfBlank(ResolveScalar(linkNode, "LinkText")) is { } linkText ? $"; link text '{linkText}'" : "");
+        var field = BuildPlaceholder(table.LogicalRef, linkRef, name, label, linkNode.SourceId, QblPlaceholders.TEXT, linkNode.Type, code, reason, definition,
+            QblPlaceholders.SnapshotJson(linkNode), NullIfBlank(ResolveScalar(linkNode, "Comments")), NullIfBlank(ResolveScalar(linkNode, "HelpText")), null);
+        AddPlaceholderField(table, relationships, seenFieldNamesByTableRef[table.LogicalRef], field);
+        fieldNameByRefPerTable[table.LogicalRef][linkRef] = field.Name;
+        issues.Add(Warning(code, $"{reason}; a placeholder Text field was created in its place.", field.LogicalRef));
+    }
+
+    /// <summary>For every Reference/Lookup/Summary field that never became part of a relationship (broken or cross-app relationship, a
+    /// target that no longer exists, a function PowerBase lacks…): a plain field with the same name, label and number, typed after the
+    /// source's result type where that is certain. The name is registered so forms, reports and rules that point at it resolve.</summary>
+    private static void EmitRelationshipPlaceholders(
+        List<PblTable> tables, List<PblRelationship> relationships, Dictionary<string, RelationshipFieldCollector> relFieldsPerTable,
+        Dictionary<string, Dictionary<string, string>> fieldNameByRefPerTable, Dictionary<string, HashSet<string>> seenFieldNamesByTableRef,
+        List<PblIssue> issues)
+    {
+        foreach (var table in tables)
+        {
+            if (!relFieldsPerTable.TryGetValue(table.LogicalRef, out var collector)) continue;
+
+            foreach (var record in collector.Registered.Where(r => !collector.Materialized.Contains(r.FieldRef)).ToList())
+            {
+                var known = collector.Reasons.TryGetValue(record.FieldRef, out var r);
+                var code = known ? r.Code : "QBL_RELATIONSHIP_FIELD_NOT_CREATED";
+                var reason = known ? r.Reason : $"{record.Kind} field '{record.Name}' could not be created because its relationship was not created";
+
+                var field = BuildPlaceholder(table.LogicalRef, record.FieldRef, record.Name, record.Label, record.SourceId, record.PlaceholderType, record.QblType,
+                    code, reason, record.Definition, record.MetadataJson, record.Description, record.HelpText, null);
+                AddPlaceholderField(table, relationships, seenFieldNamesByTableRef[table.LogicalRef], field);
+                fieldNameByRefPerTable[table.LogicalRef][record.FieldRef] = field.Name;
+
+                // The sites that already warned said so; anything else gets its own warning so no field is placed silently.
+                if (!known)
+                    issues.Add(Warning(code, $"{reason}; a placeholder {record.PlaceholderType} field was created in its place.", field.LogicalRef));
             }
         }
     }
@@ -1551,6 +1766,26 @@ public static class QblToPblConverter
         return candidate;
     }
 
+    /// <summary>A boolean inside a nested property block (e.g. <c>Reference.DisplayAsLinkToParent</c>); false when absent.</summary>
+    private static bool NestedBool(QblResourceNode node, string propertyName, string innerName) =>
+        node.Properties.TryGetValue(propertyName, out var raw) && raw is IDictionary<string, object?> nested
+        && nested.TryGetValue(innerName, out var v) && (v is true || (v is string s && bool.TryParse(s, out var b) && b));
+
+    /// <summary>The searchable / allowed-in-reports / unique choices a relationship field (reference, lookup, summary) carries, kept only when they
+    /// differ from PowerBase's defaults (searchable and reportable on, unique off); null when the source left all of them at the default.</summary>
+    private static PblFieldFlags? FlagsOf(QblResourceNode node)
+    {
+        static bool? Read(QblResourceNode n, string key) =>
+            n.Properties.TryGetValue(key, out var v) ? (v is bool b ? b : v is string s && bool.TryParse(s, out var parsed) ? parsed : null) : null;
+        var flags = new PblFieldFlags
+        {
+            IsSearchable = Read(node, "IsSearchable") == false ? false : null,
+            IsReportable = Read(node, "AllowedInReports") == false ? false : null,
+            IsUnique = Read(node, "IsUnique") == true ? true : null,
+        };
+        return flags.IsSearchable is null && flags.IsReportable is null && flags.IsUnique is null ? null : flags;
+    }
+
     private static QblRef? NestedRef(QblResourceNode node, string propertyName, string refPropertyName)
     {
         if (node.Properties.TryGetValue(propertyName, out var raw) && raw is Dictionary<string, object?> nested)
@@ -1583,6 +1818,8 @@ public static class QblToPblConverter
             var mapped = QblFieldMapper.Map(fieldNode, scalarTypeCode);
             foreach (var note in mapped.Notes)
                 issues.Add(Warning("QBL_FIELD_SETTING_NOT_CARRIED", $"Field '{name}': {note}", fieldRef));
+            foreach (var message in QblUnmappedSettings.ForField(fieldNode))
+                issues.Add(Warning("QBL_FIELD_SETTING_NOT_CARRIED", $"Field '{name}': {message}", Qualify(tableRef, fieldRef)));
 
             return new PblField
             {
@@ -1590,6 +1827,7 @@ public static class QblToPblConverter
                 Name = name,
                 Label = NullIfBlank(label),
                 TypeCode = scalarTypeCode,
+                SourceType = type,
                 SourceId = fieldNode.SourceId,
                 IsRequired = mapped.IsRequired,
                 Settings = mapped.SettingsJson,
@@ -1600,12 +1838,16 @@ public static class QblToPblConverter
                 IsAuditable = mapped.IsAuditable,
                 IsSearchable = mapped.IsSearchable,
                 IsReportable = mapped.IsReportable,
+                ChoiceSourceFieldRef = mapped.ChoiceSourceFieldRef is null
+                    ? null
+                    : Qualify(mapped.ChoiceSourceTableRef ?? tableRef, mapped.ChoiceSourceFieldRef),
             };
         }
 
         if (QblFieldTypeMap.TryMapFormulaResultType(type, out var resultType))
         {
             var formula = ResolveScalar(fieldNode, "Formula");
+            var originalFormula = NullIfBlank(formula);
             if (string.IsNullOrWhiteSpace(formula) || HasNoResultLine(formula))
             {
                 // PowerBase will not save a blank expression; a typed constant that evaluates to blank gives the same result as
@@ -1613,8 +1855,9 @@ public static class QblToPblConverter
                 formula = BlankFormulaFor(resultType);
                 if (formula is null)
                 {
-                    issues.Add(Warning("QBL_EMPTY_FORMULA", $"Formula field '{name}' has no expression; skipped.", fieldRef));
-                    return null;
+                    // No blank constant exists for this result type: the field is kept as a plain field of the same type.
+                    return PlaceholderFromNode(tableRef, fieldRef, fieldNode, name, label, QblPlaceholders.TypeForFormula(type), type,
+                        "QBL_EMPTY_FORMULA", $"Formula field '{name}' has no expression in the source", originalFormula, issues);
                 }
                 issues.Add(Warning("QBL_EMPTY_FORMULA", $"Formula field '{name}' has no expression in the source; imported with a blank result ({formula}).", fieldRef));
             }
@@ -1632,6 +1875,8 @@ public static class QblToPblConverter
             var mappedFormula = QblFieldMapper.Map(fieldNode, "Formula_" + mapperVariant);
             foreach (var note in mappedFormula.Notes)
                 issues.Add(Warning("QBL_FIELD_SETTING_NOT_CARRIED", $"Field '{name}': {note}", fieldRef));
+            foreach (var message in QblUnmappedSettings.ForField(fieldNode))
+                issues.Add(Warning("QBL_FIELD_SETTING_NOT_CARRIED", $"Field '{name}': {message}", Qualify(tableRef, fieldRef)));
 
             return new PblField
             {
@@ -1642,6 +1887,8 @@ public static class QblToPblConverter
                 ResultType = resultType,
                 FormulaExpression = formula,
                 FormulaVariant = variant,
+                SourceType = type,
+                OriginalFormula = originalFormula,
                 SourceId = fieldNode.SourceId,
                 Settings = mappedFormula.SettingsJson,
                 Description = mappedFormula.Description,
@@ -1652,27 +1899,69 @@ public static class QblToPblConverter
             };
         }
 
+        // Everything below has no PowerBase field of its own: a plain field keeps its place (same name, label and number), and the
+        // import note keeps everything the source said about it.
         if (QblFieldTypeMap.Unsupported.Contains(type))
         {
             var explanation = ResolveScalar(fieldNode, "Explanation");
-            issues.Add(Warning(
-                "QBL_UNSUPPORTED_FIELD_TYPE",
-                string.IsNullOrWhiteSpace(explanation) ? $"QBL field type '{type}' has no PowerBase equivalent." : explanation,
-                fieldRef));
-            return null;
+            return PlaceholderFromNode(tableRef, fieldRef, fieldNode, name, label, QblPlaceholders.TEXT, type, "QBL_UNSUPPORTED_FIELD_TYPE",
+                string.IsNullOrWhiteSpace(explanation) ? $"QBL field type '{type}' has no PowerBase equivalent" : explanation.TrimEnd('.', ' '),
+                NullIfBlank(ResolveScalar(fieldNode, "Formula")), issues);
         }
 
         if (QblFieldTypeMap.UnsupportedFormulaTypes.Contains(type))
         {
-            issues.Add(Warning(
-                "QBL_UNSUPPORTED_FORMULA_RESULT_TYPE",
-                $"Formula field '{name}' has no PowerBase formula result type equivalent for '{type}'.",
-                fieldRef));
-            return null;
+            return PlaceholderFromNode(tableRef, fieldRef, fieldNode, name, label, QblPlaceholders.TEXT, type, "QBL_UNSUPPORTED_FORMULA_RESULT_TYPE",
+                $"Formula field '{name}' has no PowerBase formula result type equivalent for '{type}'",
+                NullIfBlank(ResolveScalar(fieldNode, "Formula")), issues);
         }
 
-        issues.Add(Warning("QBL_UNKNOWN_FIELD_TYPE", $"QBL field type '{type}' is not recognized by this import phase.", fieldRef));
-        return null;
+        return PlaceholderFromNode(tableRef, fieldRef, fieldNode, name, label, QblPlaceholders.TEXT, type, "QBL_UNKNOWN_FIELD_TYPE",
+            $"QBL field type '{type}' is not recognized by this import phase", NullIfBlank(ResolveScalar(fieldNode, "Formula")), issues);
+    }
+
+    private const int FIELD_DESCRIPTION_MAX = 500;
+
+    /// <summary>A stand-in field for a source field node PowerBase cannot create as itself. Same name, label and number as the source;
+    /// the plain type chosen to hold its place; never required (there is no data to satisfy it). The source description is kept
+    /// (cut to what a field description holds — the full text travels with the placeholder), and so is everything else the source
+    /// said, in <see cref="PblPlaceholderInfo"/>.</summary>
+    private static PblField PlaceholderFromNode(
+        string tableRef, string fieldRef, QblResourceNode node, string name, string? label, string typeCode, string qblType,
+        string code, string reason, string? originalDefinition, List<PblIssue> issues)
+    {
+        var mapped = QblFieldTypeMap.ScalarTypes.Values.Contains(typeCode) ? QblFieldMapper.Map(node, typeCode) : null;
+        var field = BuildPlaceholder(tableRef, fieldRef, name, label, node.SourceId, typeCode, qblType, code, reason, originalDefinition,
+            QblPlaceholders.SnapshotJson(node), NullIfBlank(ResolveScalar(node, "Comments")), NullIfBlank(ResolveScalar(node, "HelpText")), mapped?.SettingsJson);
+        issues.Add(Warning(code, $"{reason}; a placeholder {typeCode} field was created in its place.", fieldRef));
+        return field;
+    }
+
+    private static PblField BuildPlaceholder(
+        string tableRef, string fieldRef, string name, string? label, int? sourceId, string typeCode, string qblType, string code, string reason,
+        string? originalDefinition, string metadataJson, string? description, string? helpText, string? settingsJson)
+    {
+        var trimmedDescription = description is { Length: > FIELD_DESCRIPTION_MAX } ? description[..(FIELD_DESCRIPTION_MAX - 1)] + "…" : description;
+        return new PblField
+        {
+            LogicalRef = Qualify(tableRef, fieldRef),
+            Name = name,
+            Label = NullIfBlank(label),
+            TypeCode = typeCode,
+            SourceId = sourceId,
+            SourceType = qblType,
+            Description = trimmedDescription,
+            HelpText = helpText,
+            Settings = settingsJson,
+            Placeholder = new PblPlaceholderInfo
+            {
+                Code = code,
+                Reason = reason,
+                OriginalDefinition = originalDefinition,
+                OriginalMetadataJson = metadataJson,
+                FullDescription = description is { Length: > FIELD_DESCRIPTION_MAX } ? description : null,
+            },
+        };
     }
 
     // ── Reports (Pass C) ─────────────────────────────────────────────────────
@@ -1683,6 +1972,7 @@ public static class QblToPblConverter
         QblResourceNode reportNode,
         Dictionary<string, string> fieldNameByRef,
         Dictionary<int, string> fieldNameBySourceId,
+        IReadOnlyDictionary<string, QblResourceNode> tableReportsAndCharts,
         List<PblIssue> issues)
     {
         var reportType = reportNode.Type switch
@@ -1693,7 +1983,7 @@ public static class QblToPblConverter
             // client-side view toggle on Table reports) — a QuickBase grid-edit report imports
             // as a plain Table report.
             "QB::Report::GridEdit" => "Table",
-            "QB::Chart::Pie" or "QB::Chart::StackedBar" or "QB::Chart::Gauge" => "Chart",
+            "QB::Chart::Pie" or "QB::Chart::StackedBar" or "QB::Chart::Bar" or "QB::Chart::Gauge" => "Chart",
             _ => null,
         };
 
@@ -1705,7 +1995,9 @@ public static class QblToPblConverter
             {
                 issues.Add(Warning(
                     "QBL_UNSUPPORTED_REPORT_TYPE",
-                    $"Report type '{reportNode.Type}' has no PowerBase equivalent.",
+                    reportNode.Type == "QB::Chart::LineBar"
+                        ? $"Report '{ResolveScalar(reportNode, "Name") ?? reportRef}' is a line-and-bar combination chart (two data axes); PowerBase's combination chart needs a different setup, so it was not created."
+                        : $"Report type '{reportNode.Type}' has no PowerBase equivalent.",
                     reportRef));
             }
             return null;
@@ -1722,7 +2014,7 @@ public static class QblToPblConverter
         else if (reportType == "Summary")
             ApplySummaryReport(report, reportNode, fieldNameByRef, issues, reportRef);
         else
-            report.Columns.AddRange(ResolveReportColumns(reportNode, fieldNameByRef, reportRef, issues));
+            report.Columns.AddRange(ResolveReportColumns(reportNode, fieldNameByRef, reportRef, name, tableReportsAndCharts, report.ReportFormulas, issues));
 
         var sortKey = reportNode.Properties.ContainsKey("SortAndGroup") ? "SortAndGroup" : "Sort";
         if (reportNode.Properties.TryGetValue(sortKey, out var sortRaw) && sortRaw is List<object?> sortList)
@@ -1745,6 +2037,8 @@ public static class QblToPblConverter
         }
 
         ApplyReportOptions(report, reportNode, fieldNameByRef, fieldNameBySourceId, issues, reportRef);
+        foreach (var message in QblUnmappedSettings.ForReport(reportNode))
+            issues.Add(Warning("QBL_REPORT_SETTING_NOT_CARRIED", $"Report '{name}': {message}", report.LogicalRef));
         return report;
     }
 
@@ -1843,14 +2137,25 @@ public static class QblToPblConverter
 
         foreach (var (_, column) in node.ChildMap("Columns"))
         {
-            if (!string.Equals(column.Type, "QB::Report::Summary::Column", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!string.Equals(column.Type, "QB::Report::Summary::Column", StringComparison.OrdinalIgnoreCase))
+            {
+                // A summarize/crosstab column backed by a report formula or a summary-formula variable
+                // (QB::Report::SummaryFormula::*, QB::Report::SummaryVariable) — PowerBase's summary
+                // reports have no equivalent for a formula-based aggregate yet. Previously this case was
+                // silently skipped (never reported); it is always reported now, same as every other
+                // unsupported construct.
+                issues.Add(Warning("QBL_SUMMARY_FORMULA_COLUMN_NOT_CARRIED",
+                    $"Summary report '{report.Name}' has a summarize column based on a formula or variable ('{column.Type}'), which PowerBase summary reports cannot hold, so that column was left out. Add the calculation as a formula field on the table and summarize that instead.",
+                    reportRef));
+                continue;
+            }
 
             // "CountOfRecords" is the record count PowerBase always shows; anything else is a field reference.
             var fieldRef = column.PropertyRef("Source")?["Field"];
             if (fieldRef is null) continue;
             if (!fieldNameByRef.TryGetValue(fieldRef, out var fieldName))
             {
-                issues.Add(Warning("QBL_REPORT_FIELD_UNAVAILABLE", $"Summary report '{report.Name}': a summarize column uses a field not available in this import phase; skipped.", reportRef));
+                issues.Add(Warning("QBL_REPORT_FIELD_UNAVAILABLE", $"Summary report '{report.Name}' has a summarize column for field '{InferFieldName(fieldRef, null)}', which could not be found during import. Please verify that field still exists in the source data; this column was skipped.", reportRef));
                 continue;
             }
 
@@ -1874,7 +2179,7 @@ public static class QblToPblConverter
     private static IReadOnlyDictionary<string, object?>? Prop(QblResourceNode node, string name) =>
         node.Properties.TryGetValue(name, out var v) ? AsMap(v) : null;
 
-    /// <summary>Pie, StackedBar and Gauge charts → a PowerBase chart report. Returns false (with the reason reported) when the chart cannot be
+    /// <summary>Pie, Bar, StackedBar and Gauge charts → a PowerBase chart report. Returns false (with the reason reported) when the chart cannot be
     /// expressed: it is grouped by a report formula, or it is a gauge that counts records (PowerBase's gauge measures a field).</summary>
     private static bool ApplyChartReport(PblReport report, QblResourceNode node, Dictionary<string, string> fieldNameByRef, List<PblIssue> issues, string reportRef)
     {
@@ -1894,7 +2199,7 @@ public static class QblToPblConverter
             }
             if (!fieldNameByRef.TryGetValue(fieldRef, out var fieldName))
             {
-                issues.Add(Warning("QBL_REPORT_FIELD_UNAVAILABLE", $"Chart '{report.Name}': its {what} uses a field not available in this import phase; chart skipped.", reportRef));
+                issues.Add(Warning("QBL_REPORT_FIELD_UNAVAILABLE", $"Chart '{report.Name}' uses field '{InferFieldName(fieldRef, null)}' for its {what}, which could not be found during import. Please verify that field still exists in the source data; this chart was skipped.", reportRef));
                 return new PblSummaryGroup { FieldName = "" };
             }
             var groupBy = item.TryGetValue("GroupBy", out var gb) ? gb?.ToString() : null;
@@ -1925,8 +2230,9 @@ public static class QblToPblConverter
                 break;
             }
             case "QB::Chart::StackedBar":
+            case "QB::Chart::Bar":
             {
-                chart.ChartType = "StackedBar";
+                chart.ChartType = node.Type == "QB::Chart::Bar" ? "Bar" : "StackedBar";
                 chart.Category = Group(AsMap(details?.GetValueOrDefault("CategoryAxis")), "category axis");
                 chart.Series = Group(AsMap(details?.GetValueOrDefault("Series")), "series");
                 var dataAxis = AsMap(details?.GetValueOrDefault("DataAxis"));
@@ -1957,7 +2263,7 @@ public static class QblToPblConverter
                 }
                 if (!fieldNameByRef.TryGetValue(fieldRef, out var gaugeField))
                 {
-                    issues.Add(Warning("QBL_REPORT_FIELD_UNAVAILABLE", $"Gauge '{report.Name}' measures a field not available in this import phase; skipped.", reportRef));
+                    issues.Add(Warning("QBL_REPORT_FIELD_UNAVAILABLE", $"Gauge '{report.Name}' measures field '{InferFieldName(fieldRef, null)}', which could not be found during import. Please verify that field still exists in the source data; this gauge was skipped.", reportRef));
                     return false;
                 }
                 chart.GaugeFieldName = gaugeField;
@@ -1987,7 +2293,7 @@ public static class QblToPblConverter
         if (fieldRef is null) return null; // "None" crosstab, or a count source
         if (!fieldNameByRef.TryGetValue(fieldRef, out var fieldName))
         {
-            issues.Add(Warning("QBL_REPORT_FIELD_UNAVAILABLE", $"Summary report '{reportName}': a group uses a field not available in this import phase; skipped.", reportRef));
+            issues.Add(Warning("QBL_REPORT_FIELD_UNAVAILABLE", $"Summary report '{reportName}' groups by field '{InferFieldName(fieldRef, null)}', which could not be found during import. Please verify that field still exists in the source data; this group was skipped.", reportRef));
             return null;
         }
 
@@ -1999,6 +2305,9 @@ public static class QblToPblConverter
         QblResourceNode reportNode,
         Dictionary<string, string> fieldNameByRef,
         string reportRef,
+        string reportName,
+        IReadOnlyDictionary<string, QblResourceNode> tableReportsAndCharts,
+        List<PblReportFormula> reportFormulas,
         List<PblIssue> issues)
     {
         var columns = new List<string>();
@@ -2014,20 +2323,85 @@ public static class QblToPblConverter
                 if (fieldRefValue is null)
                 {
                     if (item is QblBadRef)
-                        issues.Add(Warning("QBL_BAD_REF", $"Report '{reportRef}' has a broken column reference.", reportRef));
+                    {
+                        issues.Add(Warning("QBL_BAD_REF", $"Report '{reportName}' has a broken column reference and could not include that column. Please check the column's source field in Quickbase and re-import.", reportRef));
+                    }
+                    else if (item is QblRef { } formulaColumn && formulaColumn.Scopes.TryGetValue("ReportFormula", out var formulaRef))
+                    {
+                        var formula = ResolveReportFormulaDefinition(formulaRef, reportNode, tableReportsAndCharts);
+                        if (formula is null)
+                        {
+                            issues.Add(Warning("QBL_REPORT_FORMULA_COLUMN_NOT_CARRIED",
+                                $"Report '{reportName}' has a report-level formula column ('{InferFieldName(formulaRef, null)}') that PowerBase reports cannot hold, so that column was left out. Add the calculation as a formula field on the table to show it in the report.",
+                                reportRef));
+                        }
+                        else if (reportFormulas.Count >= ReportFormulaFields.MaxFormulas)
+                        {
+                            issues.Add(Warning("QBL_REPORT_FORMULA_COLUMN_NOT_CARRIED",
+                                $"Report '{reportName}' already has {ReportFormulaFields.MaxFormulas} formula columns (PowerBase's maximum per report); formula column '{formula.Value.Name}' was left out. Add the calculation as a formula field on the table to show it in the report.",
+                                reportRef));
+                        }
+                        else
+                        {
+                            reportFormulas.Add(new PblReportFormula
+                            {
+                                Name = formula.Value.Name,
+                                ResultType = formula.Value.ResultType,
+                                DisplayAs = formula.Value.DisplayAs,
+                                Expression = formula.Value.Expression,
+                            });
+                            columns.Add(formula.Value.Name);
+                        }
+                    }
                     continue;
                 }
 
                 if (fieldNameByRef.TryGetValue(fieldRefValue, out var fieldName))
                     columns.Add(fieldName);
                 else
-                    issues.Add(Warning("QBL_REPORT_FIELD_UNAVAILABLE", $"Report '{reportRef}' references a field not available in this import phase.", reportRef));
+                    issues.Add(Warning("QBL_REPORT_FIELD_UNAVAILABLE", $"Report '{reportName}' includes a column for field '{InferFieldName(fieldRefValue, null)}', which could not be found during import. Please verify that field still exists in the source data and re-import.", reportRef));
             }
             return columns;
         }
 
         // "Default" → leave columns empty; see the summary above.
         return columns;
+    }
+
+    /// <summary>A report-level formula column's own definition (<c>QB::Report::Formula::Text/Numeric/NumericPercent/Date/Checkbox/
+    /// TimeOfDay</c>) — referenced by a bare ref from the report's Columns list (see <see cref="ResolveReportColumns"/>), never
+    /// inline. Tried in two places, since which one real Quickbase exports use is not yet confirmed against a sample file: first
+    /// as a child of the report itself (a "Formulas" map, the same convention a Summary report's Columns or a Form's Rules use for
+    /// their own per-parent children), then as a sibling resource under the table's own Reports map (the same convention every
+    /// other QBL ref in this converter resolves through). Returns null — never guesses — when neither holds a matching, usable
+    /// definition, so the caller falls back to the existing "not carried" warning exactly as before this was attempted.</summary>
+    private static (string Name, string ResultType, string? DisplayAs, string Expression)? ResolveReportFormulaDefinition(
+        string formulaRef, QblResourceNode reportNode, IReadOnlyDictionary<string, QblResourceNode> tableReportsAndCharts)
+    {
+        if (!reportNode.ChildMap("Formulas").TryGetValue(formulaRef, out var formulaNode) &&
+            !tableReportsAndCharts.TryGetValue(formulaRef, out formulaNode))
+            return null;
+
+        if (!formulaNode.Type.StartsWith("QB::Report::Formula::", StringComparison.Ordinal))
+            return null;
+
+        var name = NullIfBlank(ResolveScalar(formulaNode, "Name"));
+        var expression = NullIfBlank(ResolveScalar(formulaNode, "Formula")) ?? NullIfBlank(ResolveScalar(formulaNode, "Expression"));
+        if (name is null || expression is null)
+            return null;
+
+        var qblResultType = formulaNode.Type["QB::Report::Formula::".Length..];
+        var (resultType, displayAs) = qblResultType switch
+        {
+            "Checkbox" => ("Bool", (string?)null),
+            "Date" => ("Date", null),
+            "TimeOfDay" => ("Time", null),
+            "NumericPercent" => ("Number", "Percent"),
+            "Numeric" => ("Number", null),
+            _ => ("Text", (string?)null),
+        };
+
+        return (name, resultType, displayAs, expression);
     }
 
     // ── Forms (Pass C) ───────────────────────────────────────────────────────
@@ -2380,7 +2754,8 @@ public static class QblToPblConverter
                 var fieldRef = elementNode.PropertyRef("Field")?["Field"];
                 if (fieldRef is null || !fieldNameByRef.TryGetValue(fieldRef, out var fieldName))
                 {
-                    issues.Add(Warning("QBL_FORM_ELEMENT_FIELD_UNAVAILABLE", $"Form element '{elementRef}' references a field ('{fieldRef}') that has no PowerBase field (unsupported, deleted or not convertible); skipped.", elementRef));
+                    var missingFieldLabel = fieldRef is null ? "no field reference at all" : $"field '{InferFieldName(fieldRef, null)}'";
+                    issues.Add(Warning("QBL_FORM_ELEMENT_FIELD_UNAVAILABLE", $"A field element on this form points to {missingFieldLabel}, which could not be found during import (it may be unsupported, deleted, or not converted). This form element was skipped — please verify the field exists and re-add it to the form after import if needed.", elementRef));
                     return result;
                 }
 
@@ -2433,7 +2808,7 @@ public static class QblToPblConverter
                 var reportRef = reportRefNode?["Report"];
                 if (reportTableRef is null || reportRef is null)
                 {
-                    issues.Add(Warning("QBL_FORM_REPORT_ELEMENT_UNRESOLVED", $"Embedded report element '{elementRef}' has no resolvable report; skipped.", elementRef));
+                    issues.Add(Warning("QBL_FORM_REPORT_ELEMENT_UNRESOLVED", "An embedded report element on this form could not be matched to any report in the source file; it was skipped. Please verify the report still exists in Quickbase and re-add it to the form after import if needed.", elementRef));
                     return result;
                 }
 
@@ -3020,7 +3395,8 @@ public static class QblToPblConverter
         var fieldRef = conditionNode.PropertyRef("Field")?["Field"];
         if (fieldRef is null || !fieldNameByRef.TryGetValue(fieldRef, out var fieldName))
         {
-            issues.Add(Warning("QBL_FORM_RULE_CONDITION_FIELD_UNAVAILABLE", $"Form rule '{ruleName}' condition references a field not available in this import phase.", ruleRef));
+            var missingConditionField = fieldRef is null ? "no field reference at all" : $"field '{InferFieldName(fieldRef, null)}'";
+            issues.Add(Warning("QBL_FORM_RULE_CONDITION_FIELD_UNAVAILABLE", $"Form rule '{ruleName}' has a condition that checks {missingConditionField}, which could not be found during import. Please verify that field exists in the source data; this rule was skipped.", ruleRef));
             return null;
         }
 

@@ -1,3 +1,5 @@
+using PowerBase.Application.Import.Reporting;
+
 namespace PowerBase.Application.Import.Queries.ImportPreview;
 
 public sealed class PblIssueDto
@@ -88,6 +90,11 @@ public sealed class ImportPreviewAppItem
     public bool IsValid { get; init; }
     /// <summary>True when an app with this name already exists in the tenant; the user must rename it to import.</summary>
     public bool NameExists { get; init; }
+    /// <summary>The file holds only pipelines: they are added to this existing app (<see cref="TargetAppPublicId"/>); no app is created.</summary>
+    public bool IsPipelinesOnly { get; init; }
+    public Guid? TargetAppPublicId { get; init; }
+    /// <summary>Pipelines only: which existing table each Quickbase table id of the file was matched to ("bwcrtu9k5 → Employee").</summary>
+    public List<string> TableMatches { get; init; } = [];
     public List<ImportPreviewTableItem> Tables { get; init; } = [];
     public List<ImportPreviewRelationshipItem> Relationships { get; init; } = [];
     public List<ImportPreviewFormItem> Forms { get; init; } = [];
@@ -98,6 +105,12 @@ public sealed class ImportPreviewAppItem
     public List<PblIssueDto> Warnings { get; init; } = [];
     /// <summary>Quickbase pipelines imported with this app (New App mode only).</summary>
     public List<ImportPreviewPipelineItem> Pipelines { get; init; } = [];
+
+    /// <summary><see cref="Errors"/>/<see cref="Warnings"/> restated for the UI: grouped by table/field,
+    /// with severity and a recommended action, instead of a flat technical list. Set after every
+    /// warning (including the cross-app "duplicate name" one) is known — see
+    /// <see cref="ImportPreviewQueryHandler"/>.</summary>
+    public ImportIssueReport Issues { get; set; } = new();
 }
 
 public sealed class ImportPreviewResult
@@ -109,4 +122,7 @@ public sealed class ImportPreviewResult
     /// <summary>File-level problems (unreadable file, several applications in Update mode). Per-application problems are on the app.</summary>
     public List<PblIssueDto> Errors { get; init; } = [];
     public List<PblIssueDto> Warnings { get; init; } = [];
+
+    /// <summary><see cref="Errors"/>/<see cref="Warnings"/> restated for the UI (see <see cref="ImportPreviewAppItem.Issues"/>).</summary>
+    public ImportIssueReport Issues { get; init; } = new();
 }

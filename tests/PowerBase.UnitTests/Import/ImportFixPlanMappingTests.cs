@@ -94,9 +94,13 @@ public class ImportFixPlanMappingTests
 
         files.Fields.Single(f => f.Label == "Blank Text").FormulaExpression.Should().Be("\"\"");
         files.Fields.Single(f => f.Label == "Blank Number").FormulaExpression.Should().Be("ToNumber(\"\")");
-        files.Fields.Should().NotContain(f => f.Label == "Blank Duration"); // no blank constant for a duration: reported, as before
+        // No blank constant exists for a duration: the field is kept as a plain Duration field (never dropped), and says so.
+        var duration = files.Fields.Single(f => f.Label == "Blank Duration");
+        duration.TypeCode.Should().Be("Duration");
+        duration.Placeholder.Should().NotBeNull();
+        duration.Placeholder!.Code.Should().Be("QBL_EMPTY_FORMULA");
         result.Issues.Should().Contain(i => i.Code == "QBL_EMPTY_FORMULA" && i.Message.Contains("blank result"));
-        result.Issues.Should().Contain(i => i.Code == "QBL_EMPTY_FORMULA" && i.Message.Contains("skipped"));
+        result.Issues.Should().Contain(i => i.Code == "QBL_EMPTY_FORMULA" && i.Message.Contains("placeholder Duration field"));
     }
 
     [Theory]

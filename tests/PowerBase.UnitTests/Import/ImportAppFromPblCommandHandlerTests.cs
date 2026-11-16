@@ -78,7 +78,7 @@ public class ImportAppFromPblCommandHandlerTests
     private int _nextFid = 6;
     private int _nextFieldId = 100;
 
-    private ImportAppFromPblCommandHandler CreateSut(PblPipelinesImporter? pipelinesImporter = null)
+    private ImportAppFromPblCommandHandler CreateSut(PblPipelinesImporter? pipelinesImporter = null, ImportFieldNoteRecorder? fieldNoteRecorder = null)
     {
         var bulkCreateHandler = new BulkCreateFieldsCommandHandler(
             _tableRepo, _fieldRepo, _fieldTypeRepo, _schemaEngine, _queryContext, _auditRepo, _formRepo,
@@ -134,7 +134,8 @@ public class ImportAppFromPblCommandHandlerTests
             Substitute.For<PblSettingsApplier>(new object?[] { null, null, null, null, null, null, null, null, null, null }),
             Substitute.For<PblPermissionsApplier>(new object?[] { null, null, null, null, null, null, null }),
             connectedTablesApplier: null,
-            pipelinesImporter: pipelinesImporter);
+            pipelinesImporter: pipelinesImporter,
+            fieldNoteRecorder: fieldNoteRecorder);
     }
 
     private const string QblWithPipeline = """
@@ -318,8 +319,8 @@ public class ImportAppFromPblCommandHandlerTests
 
         report.AppName.Should().Be("Imported App");
         report.TablesCreated.Should().Be(1);
-        report.FieldsCreated.Should().Be(2);
-        report.Skipped.Should().ContainSingle(s => s.Name == "Legacy Score" && s.LogicalRef == "$Field_Clients_Legacy");
+        report.FieldsCreated.Should().Be(3); // the unsupported type is kept as a plain Text field, never dropped
+        report.Skipped.Should().ContainSingle(s => s.Name == "Legacy Score" && s.LogicalRef == "$Field_Clients_Legacy" && s.Reason.Contains("placeholder Text field"));
     }
 
     [Fact]
@@ -333,7 +334,7 @@ public class ImportAppFromPblCommandHandlerTests
             Arg.Is<App>(a => a.Name == "Imported App"),
             Arg.Any<System.Data.IDbTransaction?>(),
             Arg.Any<CancellationToken>());
-        await _fieldRepo.Received(2).CreateAsync(Arg.Any<AppField>(), Arg.Any<CancellationToken>());
+        await _fieldRepo.Received(3).CreateAsync(Arg.Any<AppField>(), Arg.Any<CancellationToken>());
     }
 
     private const string LabelClashPbl = """
@@ -362,6 +363,38 @@ public class ImportAppFromPblCommandHandlerTests
 
         report.FieldsCreated.Should().Be(2);
         report.Skipped.Should().Contain(s => s.LogicalRef == "$Field_Logs_Created" && s.Reason.Contains("Date Created (2)"));
+    }
+
+    // powerflowextraRd: the source renamed its built-in "Last Modified By" to "LastModifiedBy" and has its own field labelled
+    // "Last Modified By" (Quickbase FID 112) — that field keeps its label instead of becoming "Last Modified By (2)".
+    private const string RenamedSystemFieldPbl = """
+    {
+      "version": "1.0",
+      "app": { "logicalRef": "$App_Test", "name": "Imported App" },
+      "tables": [
+        {
+          "logicalRef": "$Table_QA",
+          "name": "QA Records",
+          "systemFieldLabels": { "Last Modified By": "LastModifiedBy" },
+          "fields": [
+            { "logicalRef": "$Field_QA_LMB", "name": "Last Modified By", "typeCode": "Text" },
+            { "logicalRef": "$Field_QA_Title", "name": "Title", "typeCode": "Text" }
+          ]
+        }
+      ]
+    }
+    """;
+
+    [Fact]
+    public async Task HandleAsync_SourceRenamedItsSystemField_FieldWithTheDefaultLabelKeepsIt()
+    {
+        var sut = CreateSut();
+
+        var report = await sut.HandleAsync(new ImportAppFromPblCommand(RenamedSystemFieldPbl));
+
+        report.FieldsCreated.Should().Be(2);
+        report.Skipped.Should().NotContain(s => s.Reason.Contains("Last Modified By (2)"));
+        await _fieldRepo.Received().CreateAsync(Arg.Is<AppField>(f => f.Label == "Last Modified By"), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -535,12 +568,225 @@ public class ImportAppFromPblCommandHandlerTests
 
         var report = await sut.HandleAsync(new ImportAppFromPblCommand(PblWithFormulaReferencingUnknownField));
 
-        report.FieldsCreated.Should().Be(2); // Qty, plus a repairable Text placeholder for Total (no real formula field)
-        report.Skipped.Should().ContainSingle(s => s.Name == "Total" && s.Reason.Contains("manual review") && s.Reason.Contains("placeholder"));
+        // The formula does not compile, but it is still a formula field (as written, like Quickbase) - never a Text stand-in.
+        report.FieldsCreated.Should().Be(2);
+        var total = AllFields.Single(f => f.Name == "Total");
+        total.TypeCode.Should().Be("Formula_Number");
+        total.Settings.Should().Contain("[Missing]");
+        report.Skipped.Should().ContainSingle(s => s.Name == "Total" && s.Reason.Contains("could not be compiled") && s.Reason.Contains("'Missing' does not exist on this table") && !s.Reason.Contains("placeholder"));
         report.FormulaTranslations.Should().ContainSingle(f => f.Name == "Total" && f.Status == "NeedsManualReview");
+    }
 
-        await _fieldRepo.DidNotReceive().CreateAsync(
-            Arg.Is<AppField>(f => f.TypeCode == "Formula"),
-            Arg.Any<CancellationToken>());
+    // ── Import notes: no field is lost, the original is kept whole, one failure never fails the app ──
+
+    private (ImportFieldNoteRecorder Recorder, List<AppFieldImportNote> Stored) NoteRecorder()
+    {
+        var noteRepo = Substitute.For<IAppFieldImportNoteRepository>();
+        var stored = new List<AppFieldImportNote>();
+        noteRepo.AddManyAsync(Arg.Do<IReadOnlyList<AppFieldImportNote>>(n => stored.AddRange(n)), Arg.Any<CancellationToken>()).Returns(Task.CompletedTask);
+
+        var versionRepo = Substitute.For<IFieldVersionRepository>();
+        versionRepo.InsertStandaloneVersionAsync(Arg.Any<AppFieldVersion>(), Arg.Any<IReadOnlyList<PowerBase.Application.Fields.Versioning.FieldChangeEntry>>(), Arg.Any<CancellationToken>())
+            .Returns(ci =>
+            {
+                _versions.Add((ci.Arg<AppFieldVersion>(), ci.Arg<IReadOnlyList<PowerBase.Application.Fields.Versioning.FieldChangeEntry>>()));
+                return Task.FromResult(_versions.Count);
+            });
+        var versionService = new PowerBase.Application.Fields.Versioning.FieldVersionService(versionRepo, _queryContext);
+        return (new ImportFieldNoteRecorder(_appRepo, _tableRepo, _fieldRepo, noteRepo, versionService), stored);
+    }
+
+    /// <summary>The Import entries written to the fields' audit history.</summary>
+    private readonly List<(AppFieldVersion Version, IReadOnlyList<PowerBase.Application.Fields.Versioning.FieldChangeEntry> Changes)> _versions = [];
+
+    private IEnumerable<AppField> AllFields => _fieldsByTable.Values.SelectMany(f => f);
+
+    // A formula far longer than a field description may hold (500), referencing a field that does not exist.
+    private static readonly string LongBrokenFormula = "[Qty] * [Missing]" + string.Concat(Enumerable.Repeat(" + [Qty]", 120));
+
+    private static string MixedPbl(string extraFields = "") => $$"""
+    {
+      "version": "1.0",
+      "app": { "logicalRef": "$App_Test", "name": "Imported App" },
+      "tables": [
+        {
+          "logicalRef": "$Table_Clients",
+          "name": "Clients",
+          "fields": [
+            { "logicalRef": "$Field_Qty", "name": "Qty", "typeCode": "Number" },
+            { "logicalRef": "$Field_Legacy", "name": "Legacy Score", "typeCode": "SomeUnsupportedType", "description": "Old score" },
+            { "logicalRef": "$Field_Double", "name": "Double", "typeCode": "Formula", "resultType": "Number", "formulaExpression": "[Qty] * 2" },
+            { "logicalRef": "$Field_Total", "name": "Total", "typeCode": "Formula", "resultType": "Number", "formulaExpression": "{{LongBrokenFormula}}", "description": "Grand total" }
+            {{extraFields}}
+          ]
+        }
+      ]
+    }
+    """;
+
+    [Fact]
+    public async Task HandleAsync_MixedSupportedAndUnsupportedFields_EveryFieldExistsAndTheOriginalIsKeptWhole()
+    {
+        var (recorder, stored) = NoteRecorder();
+        var sut = CreateSut(fieldNoteRecorder: recorder);
+
+        var report = await sut.HandleAsync(new ImportAppFromPblCommand(MixedPbl()));
+
+        // Every source field is in the app: Qty, the unsupported one (as Text), the good formula, and the broken formula (typed after its result).
+        report.FieldsCreated.Should().Be(4);
+        AllFields.Single(f => f.Name == "Qty").TypeCode.Should().Be("Number");
+        AllFields.Single(f => f.Name == "Legacy Score").TypeCode.Should().Be("Text");
+        AllFields.Single(f => f.Name == "Double").TypeCode.Should().StartWith("Formula");
+        var total = AllFields.Single(f => f.Name == "Total");
+        total.TypeCode.Should().Be("Formula_Number", "a formula that does not compile is still saved as a formula field, as written");
+        total.Settings.Should().Contain("[Missing]");
+
+        // The field's own description stays the user's; the warning is in the audit history.
+        total.Description.Should().Be("Grand total");
+        AllFields.Single(f => f.Name == "Legacy Score").Description.Should().Be("Old score");
+
+        var totalNote = stored.Should().ContainSingle(n => n.AppFieldId == total.Id).Subject;
+        totalNote.IsPlaceholder.Should().BeFalse("it is a real formula field, not a stand-in");
+        totalNote.Code.Should().Be("FORMULA_SAVED_BROKEN");
+        totalNote.OriginalDefinition.Should().Be(LongBrokenFormula, "the complete formula is kept, never truncated");
+        totalNote.OriginalDefinition!.Length.Should().BeGreaterThan(500);
+        totalNote.Severity.Should().Be(ImportNoteSeverities.Warning);
+        totalNote.Message.Should().Contain("could not be compiled").And.Contain("'Missing' does not exist on this table");
+        totalNote.RecommendedAction.Should().NotBeNullOrWhiteSpace();
+
+        // The audit history of the field says it in plain words, with the complete formula in the change details.
+        var history = _versions.Should().ContainSingle(v => v.Version.AppFieldId == total.Id).Subject;
+        history.Version.ChangeType.Should().Be(FieldVersionChangeType.Import);
+        history.Version.CommitMessage.Should().StartWith("Imported from Quickbase.").And.Contain("'Missing' does not exist on this table");
+        history.Version.CommitMessage.Length.Should().BeLessThanOrEqualTo(500);
+        history.Changes.Should().Contain(c => c.PropertyName == "Original Quickbase definition" && c.NewValue == LongBrokenFormula);
+
+        var legacyNote = stored.Should().ContainSingle(n => n.AppFieldId == AllFields.Single(f => f.Name == "Legacy Score").Id && n.IsPlaceholder).Subject;
+        legacyNote.SourceType.Should().Be("SomeUnsupportedType");
+
+        // The good formula needs no stand-in and no note.
+        stored.Should().NotContain(n => n.AppFieldId == AllFields.Single(f => f.Name == "Double").Id);
+    }
+
+    [Fact]
+    public async Task HandleAsync_OneFormulaFieldCannotBeSaved_TheOtherFieldsAndTheAppSurvive()
+    {
+        var (recorder, stored) = NoteRecorder();
+        var sut = CreateSut(fieldNoteRecorder: recorder);
+        // "Bad" compiles, but PowerBase refuses to save it as a formula field.
+        _fieldRepo.CreateAsync(Arg.Is<AppField>(f => f.Name == "Bad" && f.TypeCode.StartsWith("Formula")), Arg.Any<CancellationToken>())
+            .Returns(_ => Task.FromException<(long, Guid)>(new InvalidOperationException("boom")));
+
+        var report = await sut.HandleAsync(new ImportAppFromPblCommand(MixedPbl(
+            ", { \"logicalRef\": \"$Field_Bad\", \"name\": \"Bad\", \"typeCode\": \"Formula\", \"resultType\": \"Number\", \"formulaExpression\": \"[Qty] + 1\" }")));
+
+        await _appRepo.DidNotReceiveWithAnyArgs().DeleteAsync(default, default);
+        AllFields.Should().Contain(f => f.Name == "Double" && f.TypeCode.StartsWith("Formula")); // the other formula is untouched
+        var bad = AllFields.Single(f => f.Name == "Bad");
+        bad.TypeCode.Should().Be("Number"); // kept as a stand-in
+        stored.Should().Contain(n => n.AppFieldId == bad.Id && n.IsPlaceholder && n.OriginalDefinition == "[Qty] + 1");
+        report.Skipped.Should().Contain(s => s.Name == "Bad" && s.Reason.Contains("boom"));
+    }
+
+    private const string QblWithEverythingUnsupported = """
+        Version: '0.12'
+        Resources:
+          $App_Ops:
+            Type: QB::Application
+            Properties:
+              Name: Ops
+            Tables:
+              $Table_Tasks:
+                Type: QB::Table
+                Properties:
+                  Name: Tasks
+                Fields:
+                  $Field_Title:
+                    Type: QB::Field::Text
+                    Id: 6
+                    Properties:
+                      Label: Title
+                  $Field_Legacy:
+                    Type: QB::Field::Unsupported
+                    Id: 30
+                    Properties:
+                      Label: Legacy Link
+                      Explanation: Refers to a deleted field.
+                  $Field_Choice_Calc:
+                    Type: QB::Field::TextMultipleChoice::Formula
+                    Id: 31
+                    Properties:
+                      Label: Choice Calc
+                      Formula: If([Title] = "a", "Long", "Short")
+                  $Field_Orphan_Reference:
+                    Type: QB::Field::Reference
+                    Id: 34
+                    Properties:
+                      Label: Orphan Reference
+                  $Field_Dead_Link:
+                    Type: QB::Field::ReportLink
+                    Id: 36
+                    Properties:
+                      Label: Dead Link
+        """;
+
+    [Fact]
+    public async Task HandleBatchAsync_QblWithUnsupportedFields_ImportsEveryFieldAndStoresANoteForEachStandIn()
+    {
+        var (recorder, stored) = NoteRecorder();
+        var sut = CreateSut(fieldNoteRecorder: recorder);
+
+        var batch = await sut.HandleBatchAsync(new ImportAppFromPblCommand(QblWithEverythingUnsupported));
+
+        batch.Failed.Should().BeEmpty();
+        var names = AllFields.Select(f => f.Name).ToList();
+        names.Should().Contain(["Title", "Legacy Link", "Choice Calc", "Orphan Reference", "Dead Link"]);
+
+        foreach (var (name, fieldRef) in new[] { ("Legacy Link", "$Field_Legacy"), ("Choice Calc", "$Field_Choice_Calc"), ("Orphan Reference", "$Field_Orphan_Reference"), ("Dead Link", "$Field_Dead_Link") })
+        {
+            var field = AllFields.Single(f => f.Name == name);
+            stored.Should().Contain(n => n.AppFieldId == field.Id && n.IsPlaceholder, $"'{name}' must carry an import note");
+            batch.Apps[0].Skipped.Should().Contain(s => s.LogicalRef.EndsWith(fieldRef), $"'{name}' must be in the report");
+        }
+
+        var choice = stored.Single(n => n.AppFieldId == AllFields.Single(f => f.Name == "Choice Calc").Id);
+        choice.OriginalDefinition.Should().Be("If([Title] = \"a\", \"Long\", \"Short\")");
+        choice.OriginalMetadata.Should().Contain("QB::Field::TextMultipleChoice::Formula");
+        batch.Apps[0].Issues.Summary.AffectedFieldCount.Should().BeGreaterThanOrEqualTo(4);
+    }
+
+    [Fact]
+    public async Task HandleAsync_DescriptionLongerThanAFieldHolds_IsCutKeptWholeInOneInformationNote()
+    {
+        var (recorder, stored) = NoteRecorder();
+        var sut = CreateSut(fieldNoteRecorder: recorder);
+        var longDescription = new string('d', 700);
+        var pbl = $$"""
+        { "version": "1.0", "app": { "logicalRef": "$App_Test", "name": "Imported App" },
+          "tables": [ { "logicalRef": "$Table_T", "name": "T", "fields": [
+            { "logicalRef": "$Field_A", "name": "Alpha", "typeCode": "Text", "description": "{{longDescription}}" } ] } ] }
+        """;
+
+        await sut.HandleAsync(new ImportAppFromPblCommand(pbl));
+
+        var alpha = AllFields.Single(f => f.Name == "Alpha");
+        alpha.Description!.Length.Should().BeLessThanOrEqualTo(500);
+        var note = stored.Should().ContainSingle(n => n.AppFieldId == alpha.Id, "the cut text is one note, not the note plus a duplicate warning").Subject;
+        note.Severity.Should().Be(ImportNoteSeverities.Information);
+        note.OriginalDefinition.Should().Contain(longDescription);
+    }
+
+    [Fact]
+    public async Task HandleAsync_NoteStorageFails_TheImportStillSucceedsAndSaysSo()
+    {
+        var noteRepo = Substitute.For<IAppFieldImportNoteRepository>();
+        noteRepo.AddManyAsync(default!, default).ReturnsForAnyArgs(Task.FromException(new InvalidOperationException("no table")));
+        var sut = CreateSut(fieldNoteRecorder: new ImportFieldNoteRecorder(_appRepo, _tableRepo, _fieldRepo, noteRepo));
+
+        var report = await sut.HandleAsync(new ImportAppFromPblCommand(MixedPbl()));
+
+        await _appRepo.DidNotReceiveWithAnyArgs().DeleteAsync(default, default);
+        report.FieldsCreated.Should().Be(4);
+        report.Skipped.Should().Contain(s => s.Code == "FIELD_NOTES_NOT_STORED" && s.Reason.Contains("no table"));
     }
 }

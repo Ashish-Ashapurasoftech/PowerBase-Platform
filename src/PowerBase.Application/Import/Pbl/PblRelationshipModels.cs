@@ -41,6 +41,12 @@ public sealed class PblRelationship
     /// <summary>The source Reference field's comment (Quickbase "Comments"). Applied to the field once it exists.</summary>
     public string? ReferenceFieldDescription { get; set; }
 
+    /// <summary>Quickbase "display as link to the parent record" on the Reference field: its value opens the parent record.</summary>
+    public bool ReferenceDisplayAsLinkToParent { get; set; }
+
+    /// <summary>The Reference field's "searchable", "allowed in reports" and "unique" choices when the source set them away from the defaults.</summary>
+    public PblFieldFlags? ReferenceFlags { get; set; }
+
     /// <summary>True when the document says exactly which link fields the parent table has (a Quickbase file does): PowerBase then creates the
     /// parent's report link only when <see cref="ReportLink"/> is set, on its own number, and never adds its own "Add {child}" link — the file's
     /// own "Add …" formula is imported as a normal field. False (a PowerBase export, the wizard): both links are generated as before.</summary>
@@ -63,6 +69,9 @@ public sealed class PblReportLinkField
     public int? SourceId { get; set; }
 
     public string? Description { get; set; }
+
+    /// <summary>"Searchable" / "allowed in reports" when the source set them away from the defaults.</summary>
+    public PblFieldFlags? Flags { get; set; }
 }
 
 /// <summary>A source report link that is not a relationship's own: it opens a filtered view of <see cref="TargetTableRef"/> by matching
@@ -75,6 +84,9 @@ public sealed class PblStandaloneReportLink
     public string? LinkText { get; set; }
     public int? SourceId { get; set; }
     public string? Description { get; set; }
+
+    /// <summary>"Searchable" / "allowed in reports" when the source set them away from the defaults.</summary>
+    public PblFieldFlags? Flags { get; set; }
 
     /// <summary>A <see cref="PblTable.LogicalRef"/>.</summary>
     public string TargetTableRef { get; set; } = string.Empty;
@@ -106,6 +118,20 @@ public sealed class PblLookupField
 
     /// <summary>The source field's numeric <c>Id:</c>; kept as the PowerBase Fid on a new app.</summary>
     public int? SourceId { get; set; }
+
+    /// <summary>Quickbase "display as link to the parent record": the looked-up value opens the parent record.</summary>
+    public bool DisplayAsLinkToParent { get; set; }
+
+    /// <summary>"Searchable" / "allowed in reports" when the source turned them off.</summary>
+    public PblFieldFlags? Flags { get; set; }
+}
+
+/// <summary>Field switches a relationship field carries from the source when they are not at PowerBase's defaults. A null member = leave the default.</summary>
+public sealed class PblFieldFlags
+{
+    public bool? IsSearchable { get; set; }
+    public bool? IsReportable { get; set; }
+    public bool? IsUnique { get; set; }
 }
 
 /// <summary>A child-table aggregate rolled up onto the parent table.</summary>
@@ -141,4 +167,7 @@ public sealed class PblSummaryField
 
     /// <summary>The source field's numeric <c>Id:</c>; kept as the PowerBase Fid on a new app.</summary>
     public int? SourceId { get; set; }
+
+    /// <summary>"Searchable" / "allowed in reports" when the source set them away from the defaults.</summary>
+    public PblFieldFlags? Flags { get; set; }
 }
