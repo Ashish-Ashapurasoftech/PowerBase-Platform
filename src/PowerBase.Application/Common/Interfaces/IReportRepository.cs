@@ -24,6 +24,8 @@ public interface IReportRepository
     Task<IReadOnlyList<Report>> ListByAppAsync(long appId, CancellationToken ct = default);
     Task<IReadOnlyList<Report>> ListAllByAppAsync(long appId, CancellationToken ct = default);
     Task<IReadOnlyList<Report>> ListByTableAsync(Guid tablePublicId, CancellationToken ct = default);
+    /// <summary>Every report row of a table — deleted ones too — oldest first (Quickbase-compatible query numbers stay stable).</summary>
+    Task<IReadOnlyList<Report>> ListByTableIncludingDeletedAsync(long appTableId, CancellationToken ct = default);
     /// <summary>Slim, paged, searchable (by Name), sortable listing for the reports grid — same
     /// role-based Visibility filtering as <see cref="ListByTableAsync"/>, just paginated.</summary>
     Task<IReadOnlyList<ReportListItemDto>> ListByTablePagedAsync(

@@ -44,7 +44,28 @@ public static class QblAppTableMapper
         }
 
         f.DateFormat = DateFormat(Str(app, "DateFormat"), issues, appRef);
+        f.TimeZone = TimeZoneId(Str(app, "TimeZone"));
         return f;
+    }
+
+    /// <summary>
+    /// Quickbase's app time zone ("(UTC-05:00) Eastern Time (US &amp; Canada)", a Windows id or an IANA id) → an IANA id;
+    /// null when missing or not a known zone.
+    /// </summary>
+    public static string? TimeZoneId(string? qbTimeZone)
+    {
+        if (string.IsNullOrWhiteSpace(qbTimeZone)) return null;
+        var name = qbTimeZone.Trim();
+        var label = name.StartsWith('(') && name.IndexOf(')') is var close and > 0 ? name[(close + 1)..].Trim() : name;
+        TimeZoneInfo? zone = null;
+        if (TimeZoneInfo.TryFindSystemTimeZoneById(name, out var byId)) zone = byId;
+        else
+            zone = TimeZoneInfo.GetSystemTimeZones().FirstOrDefault(z =>
+                string.Equals(z.DisplayName.IndexOf(')') is var c and > 0 ? z.DisplayName[(c + 1)..].Trim() : z.DisplayName, label, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(z.StandardName, label, StringComparison.OrdinalIgnoreCase));
+        if (zone is null) return label.Equals("Eastern Time (US & Canada)", StringComparison.OrdinalIgnoreCase) ? "America/New_York" : null;
+        if (zone.Id == "UTC" || zone.HasIanaId) return zone.Id;
+        return TimeZoneInfo.TryConvertWindowsIdToIanaId(zone.Id, out var iana) ? iana : zone.Id;
     }
 
     /// <summary>"MM-DD-YYYY", "DD-MM-YY", "YYYY-MM-DD" … → the same tokens in the same order, "-" separated; null/unknown → "MM-DD-YYYY".</summary>
