@@ -5,7 +5,7 @@ namespace PowerBase.Application.Import.Reporting;
 /// <summary>Where one <see cref="PblDocument"/> element (by its LogicalRef) sits in the app: which
 /// table and field it belongs to, and what kind of element it is. Used to turn a bare element
 /// reference on an issue into the Table/Field names the structured report shows.</summary>
-public sealed record ImportRefInfo(string? TableName, string? FieldName, string ElementType);
+public sealed record ImportRefInfo(string? TableName, string? FieldName, string ElementType, string? InternalName = null, int? SourceFid = null);
 
 /// <summary>Builds a LogicalRef → (table, field, element type) lookup from a <see cref="PblDocument"/>,
 /// so an issue carrying only an element reference (as every <c>PblIssue</c>/<c>ImportSkippedItem</c>
@@ -35,13 +35,13 @@ public sealed class ImportRefResolver
             Add(table.LogicalRef, table.Name, null, "Table");
 
             foreach (var field in table.Fields ?? [])
-                Add(field.LogicalRef, table.Name, field.Label ?? field.Name, "Field");
+                Add(field.LogicalRef, table.Name, field.Label ?? field.Name, "Field", field.Name, field.SourceId);
 
             foreach (var report in table.Reports ?? [])
                 Add(report.LogicalRef, table.Name, report.Name, "Report");
 
             foreach (var link in table.ReportLinks ?? [])
-                Add(link.LogicalRef, table.Name, link.Label ?? link.Name, "Report Link");
+                Add(link.LogicalRef, table.Name, link.Label ?? link.Name, "Report Link", link.Name, link.SourceId);
         }
 
         foreach (var rel in document.Relationships ?? [])
@@ -49,13 +49,15 @@ public sealed class ImportRefResolver
             tableNameByRef.TryGetValue(rel.ParentTableRef, out var parentName);
             tableNameByRef.TryGetValue(rel.ChildTableRef, out var childName);
 
-            Add(rel.LogicalRef, childName, rel.ReferenceFieldLabel ?? rel.ReferenceFieldName, "Relationship");
+            Add(rel.LogicalRef, childName, rel.ReferenceFieldLabel ?? rel.ReferenceFieldName, "Relationship", rel.ReferenceFieldName, rel.ReferenceFieldSourceId);
+            if (rel.ReportLink is { } ownLink)
+                Add(ownLink.LogicalRef, parentName, ownLink.Label, "Report Link", null, ownLink.SourceId);
 
             foreach (var lookup in rel.Lookups)
-                Add(lookup.LogicalRef, childName, lookup.Label ?? lookup.Name, "Lookup Field");
+                Add(lookup.LogicalRef, childName, lookup.Label ?? lookup.Name, "Lookup Field", lookup.Name, lookup.SourceId);
 
             foreach (var summary in rel.Summaries)
-                Add(summary.LogicalRef, parentName, summary.Label ?? summary.Name, "Summary Field");
+                Add(summary.LogicalRef, parentName, summary.Label ?? summary.Name, "Summary Field", summary.Name, summary.SourceId);
         }
 
         foreach (var form in document.Forms ?? [])
@@ -83,10 +85,10 @@ public sealed class ImportRefResolver
             Add(connected.TableRef, connected.TableName, null, "Connected Table");
     }
 
-    private void Add(string? logicalRef, string? tableName, string? fieldName, string elementType)
+    private void Add(string? logicalRef, string? tableName, string? fieldName, string elementType, string? internalName = null, int? sourceFid = null)
     {
         if (string.IsNullOrEmpty(logicalRef)) return;
-        var info = new ImportRefInfo(tableName, fieldName, elementType);
+        var info = new ImportRefInfo(tableName, fieldName, elementType, internalName, sourceFid);
         _byRef[logicalRef] = info;
 
         var local = LocalPart(logicalRef);

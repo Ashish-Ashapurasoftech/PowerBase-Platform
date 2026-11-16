@@ -27,4 +27,7 @@ public enum FieldVersionChangeType
 {
     Update = 1,
     Restore = 2,
+    /// <summary>Written by a QBL/PBL import: what the import could not carry over exactly (or had to keep as a stand-in), with the
+    /// complete original definition in its change rows. Not a settings change, so it has no before/after diff.</summary>
+    Import = 3,
 }
