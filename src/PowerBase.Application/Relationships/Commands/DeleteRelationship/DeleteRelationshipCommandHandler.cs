@@ -157,6 +157,7 @@ public class DeleteRelationshipCommandHandler
         }
 
         await _relRepo.SoftDeleteAsync(rel.PublicId, ct);
+        await _refIndexer.RemoveSourceAsync(FieldReferenceSourceTypes.Relationship, rel.PublicId, ct);
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, rel.Id.ToString(),

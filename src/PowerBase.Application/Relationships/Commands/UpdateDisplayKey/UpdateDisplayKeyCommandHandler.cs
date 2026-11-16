@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Relationships.Queries;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
@@ -16,6 +17,7 @@ public class UpdateDisplayKeyCommandHandler
     private readonly RelationshipKeyCarryOverService _carryOver;
     private readonly RelationshipQueriesHandler _queries;
     private readonly IAuditRepository _auditRepo;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public UpdateDisplayKeyCommandHandler(
         IRelationshipRepository relRepo,
@@ -23,8 +25,10 @@ public class UpdateDisplayKeyCommandHandler
         IAppFieldRepository fieldRepo,
         RelationshipKeyCarryOverService carryOver,
         RelationshipQueriesHandler queries,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _relRepo = relRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -64,6 +68,7 @@ public class UpdateDisplayKeyCommandHandler
 
         await _relRepo.UpdateDisplayKeyFieldAsync(rel.Id, displayKeyFieldId, ct);
         rel.DisplayKeyFieldId = displayKeyFieldId; // keep rel in sync so ResolveDisplayKey reflects the new state
+        await _refIndexer.ReindexRelationshipAsync(rel.PublicId, ct); // Usage tab: the relationship's key field changed
 
         var newKeyField = KeyFieldResolver.ResolveDisplayKey(rel, parent, parentFields)
             ?? parentFields.FirstOrDefault(f => f.IsSystem && f.Fid == 3)

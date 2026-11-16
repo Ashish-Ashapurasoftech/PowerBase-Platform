@@ -16,7 +16,7 @@ namespace PowerBase.API.QuickbaseApi.V1.Services;
 /// Quickbase upsert / deleteRecords on top of our existing record commands (called, never modified), so validation,
 /// role permissions, encryption, formulas, audit and PowerFlow triggers behave exactly as for the app's own writes.
 /// </summary>
-public sealed class QbRecordService
+public sealed partial class QbRecordService
 {
     /// <summary>Records deleted per BulkDeleteRecordsCommand call (its own limit is 500).</summary>
     public const int DELETE_CHUNK = 500;
@@ -678,9 +678,10 @@ public sealed class QbRecordService
 
     private async Task<IDictionary<string, QbCell>> ReadFieldsAsync(Guid tableId, long rid, Guid publicId, IReadOnlyList<int> fids,
         IReadOnlyDictionary<long, AppField> byFid, IReadOnlyDictionary<long, object?>? users, string fileBase,
-        IReadOnlyDictionary<long, QbFieldType> refTypes, CancellationToken ct)
+        IReadOnlyDictionary<long, QbFieldType> refTypes, CancellationToken ct, Action<long, Application.Records.RecordResult>? onRecord = null)
     {
         var record = await _get.HandleAsync(new GetRecordQuery(tableId, publicId), ct);
+        onRecord?.Invoke(rid, record);
         var cells = new Dictionary<string, QbCell>();
         foreach (var fid in fids)
         {
@@ -713,7 +714,13 @@ public sealed class QbRecordService
         var knownFids = fields.Where(f => f.Fid.HasValue).Select(f => f.Fid!.Value).ToHashSet();
         // Quickbase answers a query it cannot use with "numberDeleted": 0 rather than an error (measured on a live realm).
         FilterGroup where;
-        try { where = QbWhereParser.Parse(request.Where, knownFids); }
+        var byFidDel = fields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+        var appRow = await _apps.GetByIdAsync(table.AppId, ct);
+        try
+        {
+            where = QbWhereParser.Parse(request.Where, knownFids,
+                fid => byFidDel.TryGetValue(fid, out var tf) ? QbFieldPropertiesBuilder.TypeOf(tf).FieldType : null, QbTimeZone.OfApp(appRow.Formatting));
+        }
         catch (QbApiException) { return new QbDeleteRecordsResponse(0); }
         var filter = new FilterGroup { Logic = "AND" };
         filter.Nodes.Add(new FilterNode { Group = where });
@@ -724,7 +731,10 @@ public sealed class QbRecordService
         if (!_appEncrypted.TryGetValue(table.AppId, out var appEncrypted))
             _appEncrypted[table.AppId] = appEncrypted = (await _apps.GetByIdAsync(table.AppId, ct)).IsEncrypted;
         List<long>? encryptedMatches = null;
-        if (Application.Relationships.EncryptedRowFilter.TouchesEncrypted(filter, fields, appEncrypted))
+        // Phone conditions compare digits only (Quickbase) — judged in memory like encrypted ones.
+        var phoneFids = FilterFids(where).Where(f => byFidDel.TryGetValue(f, out var pf) && QbFieldPropertiesBuilder.TypeOf(pf).FieldType == "phone")
+            .Distinct().ToList();
+        if (Application.Relationships.EncryptedRowFilter.TouchesEncrypted(filter, fields, appEncrypted) || phoneFids.Count > 0)
         {
             encryptedMatches = new List<long>();
             const int pageSize = 5000;
@@ -732,7 +742,13 @@ public sealed class QbRecordService
             {
                 var rows = await _records.ListAsync(table, fields, page, pageSize, filterTree: null,
                     restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
-                encryptedMatches.AddRange(Application.Relationships.EncryptedRowFilter.MatchingIds(rows, fields, filter));
+                var digits = rows.Select(r =>
+                {
+                    var stored = Application.Relationships.EncryptedRowFilter.ValuesByFid(r, fields);
+                    return (IReadOnlyDictionary<long, object?>)phoneFids.ToDictionary(f => f,
+                        f => stored.GetValueOrDefault(f) is { } v && QbWhereParser.PhoneDigits(v.ToString()) is { Length: > 0 } d ? (object?)d : null);
+                }).ToList();
+                encryptedMatches.AddRange(Application.Relationships.EncryptedRowFilter.MatchingIds(rows, fields, filter, digits));
                 if (rows.Count < pageSize) break;
             }
         }

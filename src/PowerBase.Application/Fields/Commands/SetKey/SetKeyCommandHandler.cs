@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -28,12 +29,15 @@ public class SetKeyCommandHandler
     private readonly IRelationshipRepository _relRepo;
     private readonly RelationshipKeyCarryOverService _carryOver;
     private readonly IAuditRepository _auditRepo;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public SetKeyCommandHandler(
         IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo,
         ISchemaEngineService schemaEngine, IRelationshipRepository relRepo,
-        RelationshipKeyCarryOverService carryOver, IAuditRepository auditRepo)
+        RelationshipKeyCarryOverService carryOver, IAuditRepository auditRepo,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
@@ -124,6 +128,10 @@ public class SetKeyCommandHandler
                     updatedRelationshipCount++;
             }
         }
+
+        // Usage tab: a relationship without a display key of its own matches on this table's key, so its key-field row moved.
+        foreach (var parentRel in await _relRepo.ListByParentTableAsync(table.Id, ct))
+            await _refIndexer.ReindexRelationshipAsync(parentRel.PublicId, ct);
 
         var auditMessage = newKeyField is not null
             ? $"Key field for '{table.Name}' changed to '{newKeyField.Name}'"

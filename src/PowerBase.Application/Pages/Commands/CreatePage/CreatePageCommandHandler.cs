@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Enums;
@@ -16,11 +17,14 @@ public class CreatePageCommandHandler
     private readonly IAuditRepository _auditRepo;
     private readonly ITenantRepository _tenantRepo;
     private readonly CreatePageCommandValidator _validator;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public CreatePageCommandHandler(
         IAppRepository appRepo, IAppRoleRepository appRoleRepo, IAppUserRepository appUserRepo, IPageRepository pageRepo,
-        IQueryContext queryContext, IAuditRepository auditRepo, ITenantRepository tenantRepo)
+        IQueryContext queryContext, IAuditRepository auditRepo, ITenantRepository tenantRepo,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _appRepo = appRepo;
         _appRoleRepo = appRoleRepo;
         _appUserRepo = appUserRepo;
@@ -81,6 +85,8 @@ public class CreatePageCommandHandler
         };
 
         var (pageId, publicId, pageNumber) = await _pageRepo.CreateAsync(page, ct);
+        if (page.PageType == PageTypes.Dashboard)
+            await _refIndexer.ReindexDashboardAsync(publicId, ct);
 
         var rolesToSave = await ResolvePageRoleIdsAsync(command.Visibility, command.VisibleToRoleIds, appId, _queryContext.UserId, ct);
         if (rolesToSave.Count > 0)

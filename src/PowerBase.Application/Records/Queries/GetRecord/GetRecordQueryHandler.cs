@@ -34,6 +34,19 @@ public class GetRecordQueryHandler
         _relationalProjector = relationalProjector;
     }
 
+    /// <summary>
+    /// Maps the numeric Record ID# used in record URLs (/rid/{n}) to the record's PublicId. Only
+    /// resolves the id — the caller must then go through <see cref="HandleAsync"/>, which applies
+    /// every view-scope / filter check, so a number the user cannot see behaves like one that does
+    /// not exist.
+    /// </summary>
+    public async Task<Guid> ResolveRecordNumberAsync(Guid tablePublicId, long recordNumber, CancellationToken ct = default)
+    {
+        var table = await _tableRepo.GetByPublicIdAsync(tablePublicId, ct);
+        var publicId = await _recordRepo.FindPublicIdByRecordIdAsync(table, recordNumber, ct);
+        return publicId ?? throw new NotFoundException("Record", recordNumber.ToString());
+    }
+
     public async Task<Records.RecordResult> HandleAsync(GetRecordQuery query, CancellationToken ct = default)
     {
         var table = await _tableRepo.GetByPublicIdAsync(query.TablePublicId, ct);
