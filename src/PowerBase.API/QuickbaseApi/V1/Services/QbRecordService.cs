@@ -16,7 +16,7 @@ namespace PowerBase.API.QuickbaseApi.V1.Services;
 /// Quickbase upsert / deleteRecords on top of our existing record commands (called, never modified), so validation,
 /// role permissions, encryption, formulas, audit and PowerFlow triggers behave exactly as for the app's own writes.
 /// </summary>
-public sealed class QbRecordService
+public sealed partial class QbRecordService
 {
     /// <summary>Records deleted per BulkDeleteRecordsCommand call (its own limit is 500).</summary>
     public const int DELETE_CHUNK = 500;

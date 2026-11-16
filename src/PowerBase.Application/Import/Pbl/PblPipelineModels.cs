@@ -101,6 +101,10 @@ public sealed record PblPipelineTableValue(string AppRef, string TableRef);
 /// <paramref name="Part"/> names one part of an Address field (<c>city</c>…), written as <c>fid_N.city</c>.</summary>
 public sealed record PblPipelineFieldValue(string AppRef, string TableRef, string FieldRef, int? SourceId, string Label, bool IsBuiltIn, string? Part = null);
 
+/// <summary>The PowerBase address an imported link or API call is written on: the site (<c>Frontend:BaseUrl</c>) or the API
+/// (<c>PipelineExecution:ApiBaseUrl</c>), without a trailing slash.</summary>
+public sealed record PblPipelineSiteValue(bool Api);
+
 /// <summary>The connection a PowerBase step runs through: the realm the app is imported into.</summary>
 public sealed record PblPipelineConnectionValue;
 

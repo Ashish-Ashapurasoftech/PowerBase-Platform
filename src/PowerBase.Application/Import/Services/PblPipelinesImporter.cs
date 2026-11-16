@@ -31,8 +31,18 @@ public class PblPipelinesImporter(
     IAppFieldRepository fieldRepo,
     ITenantRepository tenantRepo,
     IQueryContext queryContext,
-    UpdatePipelineCommandHandler? updatePipelineHandler = null)
+    UpdatePipelineCommandHandler? updatePipelineHandler = null,
+    Microsoft.Extensions.Configuration.IConfiguration? configuration = null)
 {
+    /// <summary>The PowerBase site / API address imported links are written on (no trailing slash), or null when not configured.</summary>
+    private string? SiteBase(bool api)
+    {
+        var value = api
+            ? configuration?["PipelineExecution:ApiBaseUrl"] is { Length: > 0 } a ? a : configuration?["Api:BaseUrl"]
+            : configuration?["Frontend:BaseUrl"];
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim().TrimEnd('/');
+    }
+
     private const int NAME_MAX = 200;
 
     private IAppRepository AppRepo => appRepo;
@@ -507,6 +517,12 @@ public class PblPipelinesImporter(
             {
                 case PblPipelineConnectionValue:
                     return _connection ??= (await owner.TenantRepo.GetByIdAsync(owner.QueryContext.TenantId, ct)).PublicId.ToString();
+                case PblPipelineSiteValue site:
+                    // Not configured: the link stays relative to the PowerBase site (it works inside PowerBase, not in an email).
+                    if (owner.SiteBase(site.Api) is { } siteBase) return siteBase;
+                    problems.Add(site.Api ? "The PowerBase API address (PipelineExecution:ApiBaseUrl) is not configured; the link was written as a relative path."
+                                          : "The PowerBase site address (Frontend:BaseUrl) is not configured; the link was written as a relative path.");
+                    return string.Empty;
                 case PblPipelineAppValue app:
                     if (Home(app.AppRef) is { } home) return home.Report.AppPublicId.ToString();
                     problems.Add("Its application was not imported.");

@@ -709,6 +709,7 @@ builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbReferenceTyp
 builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbReportService>();
 builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbUserValueResolver>();
 builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbRecordService>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbFileService>();
 builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbXmlDispatcher>();
 builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbXmlRecordActions>();
 builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbXmlUserActions>();
