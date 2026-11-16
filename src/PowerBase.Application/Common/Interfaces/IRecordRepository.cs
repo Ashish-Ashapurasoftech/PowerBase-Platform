@@ -272,6 +272,9 @@ public interface IRecordRepository
     /// </summary>
     Task<(IReadOnlyList<SearchIndexDocument> Documents, long LastId)> GetTableIndexPageAsync(
         long tenantId, long tableId, long afterId, int pageSize, CancellationToken ct = default, int skip = 0);
+    /// <summary>The record id the table's next new record will get: its id counter + 1 (deleted records keep their ids,
+    /// so they still count); 1 for a table that never had a record.</summary>
+    Task<long> GetNextRecordIdAsync(AppTable table, CancellationToken ct = default);
     Task<long> GetRecordIdByPublicIdAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<IReadOnlyDictionary<Guid, long>> GetRecordIdsByPublicIdsAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<long> GetActiveRecordIdByPublicIdAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);

@@ -150,6 +150,14 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
         ORDER BY r.DisplayOrder, r.Name
         """;
 
+    private const string ListByTableIncludingDeletedSql = $"""
+        SELECT {SelectColumns}
+        FROM meta.Report r
+        LEFT JOIN meta.Form f ON f.Id = r.ViewEditFormId
+        WHERE r.AppTableId = @appTableId
+        ORDER BY r.Id
+        """;
+
     private const string ListAllByAppSql = $"""
         SELECT {SelectColumns}
         FROM meta.Report r
@@ -334,6 +342,14 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
         var results = await connection.QueryAsync<Report>(
             new CommandDefinition(ListByAppSql, new { appId, userId = QueryContext.UserId }, cancellationToken: ct));
         return results.AsList();
+    }
+
+    public async Task<IReadOnlyList<Report>> ListByTableIncludingDeletedAsync(long appTableId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var results = await connection.QueryAsync<Report>(
+            new CommandDefinition(ListByTableIncludingDeletedSql, new { appTableId }, cancellationToken: ct));
+        return results.ToList();
     }
 
     public async Task<IReadOnlyList<Report>> ListAllByAppAsync(long appId, CancellationToken ct = default)

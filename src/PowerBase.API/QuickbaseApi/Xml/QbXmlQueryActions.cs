@@ -31,11 +31,13 @@ public sealed class QbXmlQueryActions
     private readonly QbIdResolver _ids;
     private readonly QbReferenceTypes _referenceTypes;
     private readonly IHttpContextAccessor _http;
+    private readonly IRecordRepository _recordRows;
 
     public QbXmlQueryActions(IAppTableRepository tables, IAppFieldRepository fields, IAppRepository apps, IAppVariableRepository variables,
         IReportRepository reports, IAppAccessService access, QbRecordService records, QbReportService reportService, QbIdResolver ids,
-        QbReferenceTypes referenceTypes, IHttpContextAccessor http)
+        QbReferenceTypes referenceTypes, IHttpContextAccessor http, IRecordRepository recordRows)
     {
+        _recordRows = recordRows;
         _tables = tables;
         _fields = fields;
         _apps = apps;
@@ -85,7 +87,7 @@ public sealed class QbXmlQueryActions
     }
 
     private sealed record Plan(AppTable Table, IReadOnlyList<AppField> Fields, List<long> Columns, JsonElement? Sort, string? Where,
-        bool Empty, long Qid, string QName);
+        bool Empty, long Qid, string QName, bool OnlyNewReport = false);
 
     private async Task<(AppTable Table, IReadOnlyList<AppField> Fields)> LoadTableAsync(string dbid, CancellationToken ct)
     {
@@ -97,6 +99,46 @@ public sealed class QbXmlQueryActions
         catch (Domain.Exceptions.NotFoundException) { throw QbXmlErrors.UnknownDbid(); }
         await _access.RequireMembershipByTablePublicIdAsync(tableId, ct);
         return (table, await _fields.ListByTableAsync(table.Id, ct));
+    }
+
+    /// <summary>
+    /// Quickbase's query number for each report of the table (live realm, 98 tables): the table's own List All is 1 and List
+    /// Changes 2, 3 and 4 are never shown, and every other report gets 5, 6, 7… in the order it was made; a deleted report keeps
+    /// its number (it is never reused), so numbers do not move. The internal "Default Report Settings" record has none.
+    /// </summary>
+    private async Task<Dictionary<Guid, long>> QueryNumbersAsync(AppTable table, CancellationToken ct) =>
+        QueryNumbers(await _reports.ListByTableIncludingDeletedAsync(table.Id, ct));
+
+    public static Dictionary<Guid, long> QueryNumbers(IEnumerable<Report> allReportsOfTable)
+    {
+        var rows = allReportsOfTable.Where(r => !r.IsDefaultSettingsRecord).OrderBy(r => r.Id).ToList();
+        var numbers = new Dictionary<Guid, long>();
+        var listAll = rows.FirstOrDefault(r => string.Equals(r.Name, "List All", StringComparison.OrdinalIgnoreCase));
+        var listChanges = rows.FirstOrDefault(r => string.Equals(r.Name, "List Changes", StringComparison.OrdinalIgnoreCase));
+        if (listAll is not null) numbers[listAll.PublicId] = 1;
+        if (listChanges is not null) numbers[listChanges.PublicId] = 2;
+        long next = 5;
+        foreach (var r in rows)
+            if (!numbers.ContainsKey(r.PublicId)) numbers[r.PublicId] = next++;
+        return numbers;
+    }
+
+    /// <summary>The report a Quickbase query number names (deleted reports name nothing).</summary>
+    private async Task<Guid?> ReportByNumberAsync(AppTable table, long number, CancellationToken ct)
+    {
+        var all = await _reports.ListByTableIncludingDeletedAsync(table.Id, ct);
+        var hit = QueryNumbers(all).FirstOrDefault(p => p.Value == number);
+        return hit.Value == number && all.FirstOrDefault(r => r.PublicId == hit.Key) is { IsDeleted: false } r ? r.PublicId : null;
+    }
+
+    /// <summary>Quickbase's <c>&lt;qyopts&gt;</c>: "so-" one letter per sort field, "onlynew." for a report sorted on Date Modified
+    /// newest first (Quickbase's List Changes), then always "nos.qws." (live realm: "nos.qws." / "so-D.onlynew.nos.qws.").</summary>
+    public static string Qyopts(IReadOnlyList<QbSortBy> sort)
+    {
+        var sb = new StringBuilder();
+        if (sort.Count > 0) sb.Append("so-").Append(string.Concat(sort.Select(x => x.Order == "DESC" ? 'D' : 'A'))).Append('.');
+        if (sort.Count > 0 && sort[0].FieldId == QbIds.DATE_MODIFIED_FID && sort[0].Order == "DESC") sb.Append("onlynew.");
+        return sb.Append("nos.qws.").ToString();
     }
 
     private static QbXmlException NoQuery(string what, bool byName = false) => new(NO_SUCH_QUERY, "No such query",
@@ -116,12 +158,18 @@ public sealed class QbXmlQueryActions
         if (!string.IsNullOrWhiteSpace(req.Get("qid")))
         {
             var raw = req.Get("qid")!.Trim();
+            // A number is the table's query number (1, 2, 3…, as in Quickbase); a Guid is the report's own id.
             Guid reportId;
-            try { reportId = await _ids.ReportAsync(raw, table.PublicId, "qid", ct); }
-            catch (QbApiException) { throw NoQuery(raw); }
+            if (long.TryParse(raw, out var n))
+                reportId = await ReportByNumberAsync(table, n, ct) ?? throw NoQuery(raw);
+            else
+            {
+                try { reportId = await _ids.ReportAsync(raw, table.PublicId, "qid", ct); }
+                catch (QbApiException) { throw NoQuery(raw); }
+            }
             try { report = await _reportService.GetReportAsync(reportId, table.PublicId, ct); }
             catch (QbApiException) { throw NoQuery(raw); }
-            qid = long.TryParse(raw, out var n) ? n : (await _reports.GetByPublicIdAsync(reportId, ct)).Id;
+            qid = (await QueryNumbersAsync(table, ct)).GetValueOrDefault(reportId, -1);
             qname = report.Name;
         }
         else if (!string.IsNullOrWhiteSpace(req.Get("qname")))
@@ -130,7 +178,7 @@ public sealed class QbXmlQueryActions
             var match = (await _reports.ListByTableAsync(table.PublicId, ct))
                 .FirstOrDefault(r => string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)) ?? throw NoQuery(name, byName: true);
             report = await _reportService.GetReportAsync(match.PublicId, table.PublicId, ct);
-            qid = match.Id;
+            qid = (await QueryNumbersAsync(table, ct)).GetValueOrDefault(match.PublicId, -1);
             qname = match.Name;
         }
 
@@ -174,13 +222,17 @@ public sealed class QbXmlQueryActions
         var where = report is not null ? report.Query.Filter : req.Get("query");
         if (string.IsNullOrWhiteSpace(where)) where = null;
         // Quickbase answers a query it cannot read with no records instead of an error (live realm).
+        // A report marked "only new or changed records" (Quickbase's List Changes; ours: sorted on Date Modified newest first —
+        // see Qyopts) gives an API caller no records (live realm: qid=2 → none).
         var empty = opts.OnlyNew;
+        // API_DoQueryCount still counts every match of such a report (live realm: qid=2 → numMatches 7).
+        var onlyNewReport = report?.Query.SortBy is { } rs && Qyopts(rs).Contains("onlynew.", StringComparison.Ordinal);
         if (where is not null)
         {
             try { QbWhereParser.Parse(where, known.Select(f => (int)f).ToHashSet()); }
             catch (QbApiException) { empty = true; }
         }
-        return new Plan(table, fields, columns, sortEl, where, empty, qid, qname);
+        return new Plan(table, fields, columns, sortEl, where, empty, qid, qname, onlyNewReport);
     }
 
     // ---------------------------------------------------------------- API_DoQueryCount
@@ -219,7 +271,7 @@ public sealed class QbXmlQueryActions
 
         var rows = new List<Row>();
         var returned = plan.Columns;
-        if (!plan.Empty && plan.Columns.Count > 0)
+        if (!plan.Empty && !plan.OnlyNewReport && plan.Columns.Count > 0)
         {
             var wanted = opts.Num;
             var skip = opts.Skip;
@@ -304,16 +356,12 @@ public sealed class QbXmlQueryActions
 
         // ---- fmt=structured
         var reports = await _reports.ListByTableAsync(plan.Table.PublicId, ct);
+        var queryNumbers = await QueryNumbersAsync(plan.Table, ct);
+        long QueryNumber(Report r) => queryNumbers.GetValueOrDefault(r.PublicId, -1);
         var lastFid = byFid.Keys.DefaultIfEmpty(0).Max();
         var defSort = await DefaultSortAsync(plan.Table, ct) ?? new QbSortBy(QbIds.RECORD_ID_FID, "ASC"); // no default: Record ID# order
-        var last = await _records.QueryAsync(new QbQueryRequest
-        {
-            From = plan.Table.PublicId.ToString(),
-            Select = new List<JsonElement> { JsonSerializer.SerializeToElement(QbIds.RECORD_ID_FID) },
-            SortBy = JsonSerializer.SerializeToElement(new[] { new { fieldId = QbIds.RECORD_ID_FID, order = "DESC" } }),
-            Options = new QbQueryOptions { Top = 1 },
-        }, ct);
-        var nextRid = (last.Data.FirstOrDefault() is { } top ? Convert.ToInt64(top["3"].Value, CultureInfo.InvariantCulture) : 0) + 1;
+        // Quickbase's next record id is its counter: deleted records still count (live realm: 54 after test rows were deleted).
+        var nextRid = await _recordRows.GetNextRecordIdAsync(plan.Table, ct);
         sb.Append("    <qid>").Append(plan.Qid).Append("</qid>").Append(CRLF)
           .Append("    <qname>").Append(Esc(plan.QName)).Append("</qname>").Append(CRLF)
           .Append("    <table>").Append(CRLF)
@@ -326,7 +374,7 @@ public sealed class QbXmlQueryActions
           .Append("        <mod_date>").Append(Ms(plan.Table.ModifiedOn ?? plan.Table.CreatedOn)).Append("</mod_date>").Append(CRLF)
           .Append("        <next_record_id>").Append(nextRid).Append("</next_record_id>").Append(CRLF)
           .Append("        <next_field_id>").Append(lastFid + 1).Append("</next_field_id>").Append(CRLF)
-          .Append("        <next_query_id>").Append(reports.Select(x => x.Id).DefaultIfEmpty(0).Max() + 1).Append("</next_query_id>").Append(CRLF)
+          .Append("        <next_query_id>").Append(queryNumbers.Values.DefaultIfEmpty(4).Max() < 4 ? 5 : queryNumbers.Values.DefaultIfEmpty(4).Max() + 1).Append("</next_query_id>").Append(CRLF)
           .Append("        <def_sort_fid>").Append(defSort.FieldId.ToString(CultureInfo.InvariantCulture)).Append("</def_sort_fid>").Append(CRLF)
           .Append("        <def_sort_order>").Append(defSort.Order == "DESC" ? "0" : "1").Append("</def_sort_order>").Append(CRLF)
           .Append("    <key_fid>").Append(QbRecordService.KeyFid(plan.Table, plan.Fields)).Append("</key_fid>").Append(CRLF)
@@ -339,7 +387,7 @@ public sealed class QbXmlQueryActions
         sb.Append("      </variables>").Append(CRLF).Append("      <queries>").Append(CRLF);
         foreach (var rep in reports)
         {
-            sb.Append("        <query id=\"").Append(rep.Id).Append("\">").Append(CRLF)
+            sb.Append("        <query id=\"").Append(QueryNumber(rep)).Append("\">").Append(CRLF)
               .Append("          <qyname>").Append(Esc(rep.Name)).Append("</qyname>").Append(CRLF)
               .Append("          <qytype>").Append(rep.ReportType.ToLowerInvariant()).Append("</qytype>").Append(CRLF);
             if (!string.IsNullOrWhiteSpace(rep.Description))
@@ -349,10 +397,8 @@ public sealed class QbXmlQueryActions
             try { repSort = (await _reportService.GetReportAsync(rep.PublicId, plan.Table.PublicId, ct)).Query.SortBy ?? repSort; }
             catch (QbApiException) { }
             if (repSort.Count > 0)
-            {
                 sb.Append("          <qyslst>").Append(string.Join(".", repSort.Select(x => x.FieldId))).Append("</qyslst>").Append(CRLF);
-                sb.Append("          <qyopts>so-").Append(string.Concat(repSort.Select(x => x.Order == "DESC" ? 'D' : 'A'))).Append(".</qyopts>").Append(CRLF);
-            }
+            sb.Append("          <qyopts>").Append(Qyopts(repSort)).Append("</qyopts>").Append(CRLF);
             sb.Append("\t\t  <qycalst>0.0</qycalst>").Append(CRLF).Append("        </query>").Append(CRLF);
         }
         sb.Append("      </queries>").Append(CRLF).Append("      <fields>").Append(CRLF);

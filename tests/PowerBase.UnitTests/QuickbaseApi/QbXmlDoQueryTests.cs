@@ -106,4 +106,40 @@ public class QbXmlDoQueryTests
         QbXmlQueryActions.UsesCrlf("api_doquery").Should().BeTrue();
         QbXmlQueryActions.UsesCrlf("API_AddRecord").Should().BeFalse();
     }
+
+    [Fact]
+    public void Qyopts_MatchesQuickbase()
+    {
+        QbXmlQueryActions.Qyopts(Array.Empty<PowerBase.API.QuickbaseApi.V1.Models.QbSortBy>()).Should().Be("nos.qws.");
+        QbXmlQueryActions.Qyopts(new[] { new PowerBase.API.QuickbaseApi.V1.Models.QbSortBy(2, "DESC") }).Should().Be("so-D.onlynew.nos.qws.");
+        QbXmlQueryActions.Qyopts(new[] { new PowerBase.API.QuickbaseApi.V1.Models.QbSortBy(6, "ASC"), new PowerBase.API.QuickbaseApi.V1.Models.QbSortBy(3, "DESC") })
+            .Should().Be("so-AD.nos.qws.");
+        QbXmlQueryActions.Qyopts(new[] { new PowerBase.API.QuickbaseApi.V1.Models.QbSortBy(2, "ASC") }).Should().Be("so-A.nos.qws.");
+    }
+
+    private static PowerBase.Domain.Entities.Report R(long id, string name, bool deleted = false, bool settings = false) =>
+        new() { Id = id, PublicId = Guid.NewGuid(), Name = name, IsDeleted = deleted, IsDefaultSettingsRecord = settings };
+
+    [Fact]
+    public void QueryNumbers_FollowQuickbase()
+    {
+        var listAll = R(10, "List All"); var changes = R(11, "List Changes"); var settings = R(12, "Default Report Settings", settings: true);
+        var a = R(13, "A"); var gone = R(14, "Gone", deleted: true); var b = R(15, "B");
+        var n = QbXmlQueryActions.QueryNumbers(new[] { b, gone, a, settings, changes, listAll });
+        n[listAll.PublicId].Should().Be(1);
+        n[changes.PublicId].Should().Be(2);
+        n[a.PublicId].Should().Be(5);
+        n[gone.PublicId].Should().Be(6);   // a deleted report keeps its number
+        n[b.PublicId].Should().Be(7);
+        n.ContainsKey(settings.PublicId).Should().BeFalse();
+    }
+
+    [Fact]
+    public void QueryNumbers_WithoutDefaultReports_StartAtFive()
+    {
+        var x = R(1, "Admin"); var y = R(2, "Closed");
+        var n = QbXmlQueryActions.QueryNumbers(new[] { x, y });
+        n[x.PublicId].Should().Be(5);
+        n[y.PublicId].Should().Be(6);
+    }
 }
