@@ -41,6 +41,9 @@ public static class QblPipelineConverter
     /// <summary>The user details a token can read after a user field (<c>{{aa.owner.email}}</c>).</summary>
     private static readonly HashSet<string> UserDetails = new(StringComparer.Ordinal) { "id", "name", "first_name", "last_name", "email", "screen_name" };
 
+    /// <summary>The parts a token can read after a file field (<c>{{ad.file_field.file_transfer_handle}}</c>).</summary>
+    private static readonly HashSet<string> FileDetails = new(StringComparer.Ordinal) { "file_transfer_handle", "browser_url", "file_name", "file_size" };
+
     private static readonly HashSet<string> UserFieldTypes = new(StringComparer.Ordinal)
     {
         "QB::Field::User", "QB::Field::User::Formula", "QB::Field::RecordOwner", "QB::Field::LastModifiedBy",
@@ -267,8 +270,16 @@ public static class QblPipelineConverter
         private readonly Dictionary<(string App, string Table, string Field), string> _partKeys = new();
         private readonly HashSet<string> _apps = new(StringComparer.Ordinal);
         private readonly Dictionary<(string App, string Table), QblFieldInfo> _keyFields = new();
+        private readonly Dictionary<string, (string App, string Table)> _tablesByQbId = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, string> _appsByQbId = new(StringComparer.Ordinal);
 
         public IReadOnlyCollection<string> Apps => _apps;
+
+        /// <summary>The table a Quickbase table id stands for. Only a pipeline-only import knows them (QblPipelineOnlyBinder
+        /// writes <c>QbTableIds</c> on the tables it matched); Quickbase application exports carry no table ids.</summary>
+        public (string App, string Table)? TableByQbId(string id) => _tablesByQbId.TryGetValue(id, out var t) ? t : null;
+
+        public string? AppByQbId(string? id) => id is not null && _appsByQbId.TryGetValue(id, out var a) ? a : null;
 
         public static FieldIndex Build(QblDocument qbl)
         {
@@ -276,6 +287,8 @@ public static class QblPipelineConverter
             foreach (var (appRef, appNode) in qbl.Resources.Where(r => r.Value.Type == "QB::Application"))
             {
                 index._apps.Add(appRef);
+                foreach (var qbId in (Scalar(appNode.Properties, "QbAppIds") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    index._appsByQbId.TryAdd(qbId, appRef);
                 foreach (var (tableRef, tableNode) in appNode.ChildMap("Tables"))
                 {
                     var fields = new Dictionary<string, QblFieldInfo>(StringComparer.Ordinal);
@@ -296,6 +309,8 @@ public static class QblPipelineConverter
                                 }
                     }
                     index._fields[(appRef, tableRef)] = fields;
+                    foreach (var qbId in (Scalar(tableNode.Properties, "QbTableIds") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                        index._tablesByQbId.TryAdd(qbId, (appRef, tableRef));
                     index._addressOwner[(appRef, tableRef)] = owners;
                     // Set Key: the field Quickbase looks a record of this table up by (Record ID# when there is none).
                     if (tableNode.PropertyRef("KeyField")?["Field"] is { } keyRef && fields.TryGetValue(keyRef, out var keyField))
@@ -401,7 +416,7 @@ public static class QblPipelineConverter
         IReadOnlyDictionary<string, string> accountAliases)
     {
         private static readonly Regex TokenPattern = new(@"\{\{(.*?)\}\}|\{%.*?%\}", RegexOptions.Singleline | RegexOptions.Compiled);
-        private static readonly Regex PathToken = new(@"^\s*([A-Za-z][A-Za-z0-9_]*)((?:\.[A-Za-z0-9_]+)+)\s*$", RegexOptions.Compiled);
+        private static readonly Regex PathToken = new(@"^\s*([A-Za-z][A-Za-z0-9_]*)((?:\.\$?[A-Za-z0-9_]+)+)\s*$", RegexOptions.Compiled); // powerflowextraRd: "$" allowed ({{a.$prev.name}})
         private static readonly Regex ValidRefId = new(@"^[A-Za-z][A-Za-z0-9_]*$", RegexOptions.Compiled);
 
         private readonly PblPipeline _pipeline = new() { LogicalRef = pipelineRef };
@@ -946,6 +961,21 @@ public static class QblPipelineConverter
                 if (!text.Contains("{{", StringComparison.Ordinal) && !text.Contains("{%", StringComparison.Ordinal))
                     return text;
 
+                // powerflowextraRd: a value using Jinja expressions ({{time.now|date_mdy}}, {{a.name|upper}}, {{CLEAR}} …) becomes a
+                // PowerFlow formula value, checked with the formula engine (QblJinjaFormula); what our formulas have no equivalent
+                // for is cleared and reported below, as before.
+                if (QblJinjaFormula.Translate(text, (string path, out List<object>? refParts, out string? kind) =>
+                    {
+                        var problem = TokenProblem(TokenPattern.Match("{{" + path + "}}"), out refParts);
+                        kind = problem is null ? JinjaKind(_lastFieldType) : null;
+                        return problem;
+                    }) is { } jinja)
+                {
+                    if (jinja.Problem is null) return jinja.Value!;
+                    Incomplete("PIPELINE_REFERENCE_CLEARED", $"{where} '{text}' was cleared: {jinja.Problem}. Set it again before turning the PowerFlow on.");
+                    return string.Empty;
+                }
+
                 var parts = new List<object>();
                 var last = 0;
                 foreach (Match token in TokenPattern.Matches(text))
@@ -967,9 +997,24 @@ public static class QblPipelineConverter
                 return new PblPipelineTextValue(parts);
             }
 
+            /// <summary>powerflowextraRd: the Quickbase type of the field the last token named, so a Jinja expression reads it as Quickbase
+            /// does: a checkbox is a boolean (False when empty), a date or date/time is a UTC datetime.</summary>
+            private string? _lastFieldType;
+
+            private static string? JinjaKind(string? fieldType) => fieldType switch
+            {
+                "QB::Field::Checkbox" or "QB::Field::Checkbox::Formula" => "bool",
+                "QB::Field::Date" or "QB::Field::Date::Formula" => "date",
+                "QB::Field::DateTime" or "QB::Field::DateTime::Formula" or "QB::Field::DateCreated" or "QB::Field::DateModified" => "datetime",
+                "QB::Field::Number" or "QB::Field::Numeric" or "QB::Field::Currency" or "QB::Field::Percent" or "QB::Field::Rating"
+                    or "QB::Field::Numeric::Formula" or "QB::Field::Currency::Formula" or "QB::Field::Percent::Formula" => "number",
+                _ => null,
+            };
+
             private string? TokenProblem(Match token, out List<object>? parts)
             {
                 parts = null;
+                _lastFieldType = null;
                 if (!token.Value.StartsWith("{{", StringComparison.Ordinal))
                     return "Jinja statements are not supported in PowerFlows";
                 var path = PathToken.Match(token.Groups[1].Value);
@@ -994,6 +1039,9 @@ public static class QblPipelineConverter
                 // {{metadata.x.…}}: a step's Metadata, which PowerFlows keeps as {{steps.x._metadata.…}}.
                 if (stepId == "metadata")
                     return MetadataTokenProblem(keys, out parts);
+                // powerflowextraRd: {{x.$prev.field}} is Quickbase's documented form of {{metadata.x.record.previous.field}}.
+                if (key == "$prev")
+                    return MetadataTokenProblem([stepId, "record", "previous", .. keys[1..]], out parts);
 
                 if (!reader._byId.TryGetValue(stepId, out var target))
                     return $"step '{stepId}' is not in the pipeline";
@@ -1065,9 +1113,16 @@ public static class QblPipelineConverter
                 if (keys.Length == 1)
                 {
                     parts = [prefix, Value(field), "}}"];
+                    _lastFieldType = field.Type;
                     return null;
                 }
                 if (keys.Length == 2 && UserFieldTypes.Contains(field.Type) && UserDetails.Contains(keys[1]))
+                {
+                    parts = [prefix, Value(field), $".{keys[1]}}}}}"];
+                    return null;
+                }
+                // A file field's File transfer handle, Browser url, File name or File size: {{steps.ref.fid_N.file_name}}.
+                if (keys.Length == 2 && field.Type == "QB::Field::FileAttachment" && FileDetails.Contains(keys[1]))
                 {
                     parts = [prefix, Value(field), $".{keys[1]}}}}}"];
                     return null;
@@ -1111,6 +1166,18 @@ public static class QblPipelineConverter
                             return $"field '{fieldKey}' of step '{target.Name}' ({target.Label}) was not found";
                         parts = [prefix + "struct.", Value(field), $".{rest[2]}}}}}"];
                         return null;
+                    // powerflowextraRd: Record → Previous record, {{metadata.a.record.previous.name}} (Quickbase's docs write {{a.$prev.name}}):
+                    // the trigger's field before the change, kept by field number — {{steps.a._metadata.record.previous.fid_N}}; a user
+                    // field's person detail as {{…previous.fid_N.email}}.
+                    case "new-event" when rest is ["record", "previous", var fieldKey, ..] && rest.Length <= 4 && target.Table is not null:
+                    {
+                        if (FieldByKey(target.Table.Value, fieldKey, target, "export_fields") is not { } prevField)
+                            return $"field '{fieldKey}' of step '{target.Name}' ({target.Label}) was not found";
+                        if (rest.Length == 4 && !(UserFieldTypes.Contains(prevField.Type) && UserDetails.Contains(rest[3])))
+                            return $"'metadata.{string.Join('.', keys)}' of step '{target.Name}' ({target.Label}) has no PowerFlows equivalent";
+                        parts = [prefix + "record.previous.", Value(prevField), rest.Length == 4 ? $".{rest[3]}}}}}" : "}}"];
+                        return null;
+                    }
                 }
                 return $"'metadata.{string.Join('.', keys)}' of step '{target.Name}' ({target.Label}) has no PowerFlows equivalent";
             }
@@ -1695,7 +1762,7 @@ public static class QblPipelineConverter
             {
                 if (source.Channel == "http")
                     HttpRequest();
-                else if (source.Channel == "webhooks")
+                else if (source.Channel == "webhooks" && !CallsMappableQuickbaseApi())
                     WebhookRequest();
                 else
                     PowerBaseRequest();
@@ -1818,9 +1885,11 @@ public static class QblPipelineConverter
                 var url = Setting("Url")?.ToString();
                 if (url is not null && Uri.TryCreate(url, UriKind.Absolute, out var absolute) && absolute.Host.EndsWith("quickbase.com", StringComparison.OrdinalIgnoreCase))
                 {
+                    if (MapQuickbaseApi(absolute, out var reason))
+                        return;
                     // Kept as in the file so nothing is lost; the PowerBase account rejects other hosts at run time, so it never calls Quickbase.
                     Config["url"] = Text(url, "URL");
-                    Incomplete("PIPELINE_REQUEST_URL_QUICKBASE", $"The request URL '{url}' calls the Quickbase API, which PowerBase's API does not mirror; it was kept as is. Change it to the PowerBase endpoint (for example /tables/TABLE_PUBLIC_ID/records) before turning the PowerFlow on.");
+                    Incomplete("PIPELINE_REQUEST_URL_QUICKBASE", $"The request URL '{url}' calls the Quickbase API and was kept as is: {reason}. Change it to the PowerBase endpoint (for example /tables/TABLE_PUBLIC_ID/records) before turning the PowerFlow on.");
                 }
                 else if (url is not null)
                     Config["url"] = Text(url, "URL");
@@ -1829,6 +1898,64 @@ public static class QblPipelineConverter
                     Config["url"] = string.Empty;
                     Incomplete("PIPELINE_INPUT_MISSING", "The request URL is not in the file; set it before turning the PowerFlow on.");
                 }
+            }
+
+            /// <summary>A Webhooks-channel Make Request whose URL is a Quickbase API call PowerBase has an endpoint for: it becomes a
+            /// PowerBase-account request instead of an HTTP one.</summary>
+            private bool CallsMappableQuickbaseApi()
+            {
+                var url = Setting("Url")?.ToString()?.Trim();
+                if (url is null || !Uri.TryCreate(url, UriKind.Absolute, out var absolute) || !QuickbaseApiUrlMap.IsQuickbaseApi(absolute))
+                    return false;
+                var method = Setting("Method")?.ToString() ?? "GET";
+                var body = Setting("Body")?.ToString();
+                return QuickbaseApiUrlMap.Map(method, absolute, body, out _) is { } mapped && Resolve(mapped) is not null;
+            }
+
+            private List<object>? Resolve(QuickbaseApiUrlMap.Mapped mapped)
+            {
+                var parts = new List<object>();
+                foreach (var part in mapped.Path)
+                    switch (part)
+                    {
+                        case QuickbaseApiUrlMap.Literal literal: parts.Add(literal.Text); break;
+                        case QuickbaseApiUrlMap.TableId table when reader.Index.TableByQbId(table.QbTableId) is { } found:
+                            parts.Add(new PblPipelineTableValue(found.App, found.Table)); break;
+                        case QuickbaseApiUrlMap.AppId app when (reader.Index.AppByQbId(app.QbAppId) ?? (reader.Index.Apps.Count == 1 ? reader.Index.Apps.First() : null)) is { } appRef:
+                            parts.Add(new PblPipelineAppValue(appRef)); break;
+                        default: return null;
+                    }
+                return parts;
+            }
+
+            /// <summary>Quickbase API URL -> the PowerBase endpoint that does the same (relative path, run inside PowerBase by the
+            /// PowerBase account). Quickbase's own auth headers are dropped: the PowerBase account authenticates the call.</summary>
+            private bool MapQuickbaseApi(Uri absolute, out string reason)
+            {
+                var mapped = QuickbaseApiUrlMap.Map(Config["method"]?.ToString() ?? "GET", absolute, Setting("Body")?.ToString(), out reason);
+                if (mapped is null)
+                    return false;
+                if (Resolve(mapped) is not { } parts)
+                {
+                    reason = "the Quickbase table or app id it uses is not one of the imported tables";
+                    return false;
+                }
+                Config["url"] = new PblPipelineTextValue(parts);
+                var originalMethod = Config["method"]?.ToString();
+                Config["method"] = mapped.Method;
+                if (Config["headersList"] is List<object?> headers)
+                {
+                    var kept = headers.OfType<Dictionary<string, object?>>()
+                        .Where(h => h.GetValueOrDefault("name")?.ToString() is not { } n || !(n.Equals("Authorization", StringComparison.OrdinalIgnoreCase)
+                            || n.Equals("QB-Realm-Hostname", StringComparison.OrdinalIgnoreCase) || n.Equals("User-Agent", StringComparison.OrdinalIgnoreCase)))
+                        .Cast<object?>().ToList();
+                    Config["headersList"] = kept.Count > 0 ? kept : new List<object?> { new Dictionary<string, object?>(StringComparer.Ordinal) { ["name"] = "", ["value"] = "" } };
+                }
+                reader.Note(source, "PIPELINE_REQUEST_URL_MAPPED",
+                    $"The Quickbase API call '{originalMethod} {absolute}' was changed to the PowerBase endpoint '{mapped.Endpoint}'.", changesExecution: false);
+                if (mapped.BodyDiffers)
+                    Incomplete("PIPELINE_REQUEST_BODY_FORMAT", $"The request now calls PowerBase '{mapped.Endpoint}', whose request and response format differ from Quickbase's; check the body and the steps that read the response before turning the PowerFlow on.");
+                return true;
             }
 
             /// <summary>Quickbase "Incoming Request" → PowerFlows' webhook trigger. PowerFlows gives it a new URL.</summary>

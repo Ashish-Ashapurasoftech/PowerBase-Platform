@@ -364,6 +364,38 @@ public class ImportAppFromPblCommandHandlerTests
         report.Skipped.Should().Contain(s => s.LogicalRef == "$Field_Logs_Created" && s.Reason.Contains("Date Created (2)"));
     }
 
+    // powerflowextraRd: the source renamed its built-in "Last Modified By" to "LastModifiedBy" and has its own field labelled
+    // "Last Modified By" (Quickbase FID 112) — that field keeps its label instead of becoming "Last Modified By (2)".
+    private const string RenamedSystemFieldPbl = """
+    {
+      "version": "1.0",
+      "app": { "logicalRef": "$App_Test", "name": "Imported App" },
+      "tables": [
+        {
+          "logicalRef": "$Table_QA",
+          "name": "QA Records",
+          "systemFieldLabels": { "Last Modified By": "LastModifiedBy" },
+          "fields": [
+            { "logicalRef": "$Field_QA_LMB", "name": "Last Modified By", "typeCode": "Text" },
+            { "logicalRef": "$Field_QA_Title", "name": "Title", "typeCode": "Text" }
+          ]
+        }
+      ]
+    }
+    """;
+
+    [Fact]
+    public async Task HandleAsync_SourceRenamedItsSystemField_FieldWithTheDefaultLabelKeepsIt()
+    {
+        var sut = CreateSut();
+
+        var report = await sut.HandleAsync(new ImportAppFromPblCommand(RenamedSystemFieldPbl));
+
+        report.FieldsCreated.Should().Be(2);
+        report.Skipped.Should().NotContain(s => s.Reason.Contains("Last Modified By (2)"));
+        await _fieldRepo.Received().CreateAsync(Arg.Is<AppField>(f => f.Label == "Last Modified By"), Arg.Any<CancellationToken>());
+    }
+
     [Fact]
     public async Task HandleAsync_MalformedJson_ThrowsValidationException()
     {
