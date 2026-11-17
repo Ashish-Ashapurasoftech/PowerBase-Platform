@@ -2457,7 +2457,8 @@ public class ImportAppFromPblCommandHandler
                     sectionGuid, Fit(section.Name, FormTextMaxLength), section.IsCollapsed, blockLayouts,
                     PagePublicId: section.PageRef is not null && pageGuidByRef.TryGetValue(section.PageRef, out var pageGuid) ? pageGuid : null,
                     IsPinned: section.IsPinned ? true : null,
-                    ShowDividers: section.ShowDividers));
+                    ShowDividers: section.ShowDividers,
+                    ShowHeading: section.ShowHeading));
             }
 
             if (sectionLayouts.Count == 0)

@@ -2682,6 +2682,8 @@ public static class QblToPblConverter
             LogicalRef = qualifiedSectionRef,
             Name = string.IsNullOrWhiteSpace(title) ? InferFieldName(sectionRef, null) : title,
             IsCollapsed = sectionNode.PropertyBool("IsCollapsedByDefault"),
+            // A section the user never titled gets an inferred name ("Form V2 section 1"); don't display it.
+            ShowHeading = !string.IsNullOrWhiteSpace(title),
             ShowDividers = sectionNode.Properties.ContainsKey("ShowColumnDividers") ? sectionNode.PropertyBool("ShowColumnDividers") : null,
         };
 
