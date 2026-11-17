@@ -15,19 +15,25 @@ public class IsParentAllowedQueryHandler
     private readonly IRelationshipRepository _relRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly IQueryContext _queryContext;
+    private readonly IUserRepository? _userRepo;
+    private readonly IAppUserRepository? _appUserRepo;
 
     public IsParentAllowedQueryHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRelationshipRepository relRepo,
         IRecordRepository recordRepo,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IUserRepository? userRepo = null,
+        IAppUserRepository? appUserRepo = null)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _relRepo = relRepo;
         _recordRepo = recordRepo;
         _queryContext = queryContext;
+        _userRepo = userRepo;
+        _appUserRepo = appUserRepo;
     }
 
     /// <param name="parentRecord">The parent's row Id (Record ID#), its PublicId, or the key text a Reference reads back
@@ -54,7 +60,8 @@ public class IsParentAllowedQueryHandler
         var parentFields = await _fieldRepo.ListByTableAsync(parent.Id, ct);
         var clauses = await ReferenceFilterResolver.BuildAsync(
             settings, childFields, parentFields,
-            filterValues ?? new Dictionary<int, string?>(), _tableRepo, _fieldRepo, ct, _queryContext.UserId, _relRepo, _recordRepo);
+            filterValues ?? new Dictionary<int, string?>(), _tableRepo, _fieldRepo, ct, _queryContext.UserId, _relRepo, _recordRepo,
+            _userRepo is null ? null : new ReferenceFilterUsers(_userRepo, _appUserRepo, _queryContext.UserEmail, _queryContext.UserName));
         if (clauses.Count == 0) return true;   // nothing applicable without form values
 
         return await _recordRepo.MatchesReferenceFilterAsync(parent, parentRowId, clauses, ct);

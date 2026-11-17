@@ -23,6 +23,12 @@ public sealed record ReferenceFilterClause(
     FilterGroup? Tree = null,
     IReadOnlyList<AppField>? TreeFields = null);
 
+/// <summary>What a dropdown filter needs to judge User conditions as a report does (<see cref="Reports.Queries.RunReport.RunReportQueryHandler.ResolveUserFieldValuesAsync"/>):
+/// a picked user (its userPublicId, as the filter builder saves it and the form's user picker sends it) becomes the numeric
+/// id a user column stores, and a typed name or email ("contains emily") becomes the ids of the app's matching users.</summary>
+public sealed record ReferenceFilterUsers(
+    IUserRepository UserRepo, IAppUserRepository? AppUserRepo = null, string? CurrentUserEmail = null, string? CurrentUserName = null);
+
 /// <summary>Builds <see cref="ReferenceFilterClause"/>s from a Reference field's
 /// <see cref="ReferenceSettings.FilterConditions"/> and the current values of the form's other
 /// fields (keyed by Fid). Conditions that point at a since-deleted field/table, or whose
@@ -125,18 +131,20 @@ public static class ReferenceFilterResolver
                 {
                     // Judged against whoever is picking/saving. With no known user (a pipeline write)
                     // there is nobody to compare to, so the condition is left out rather than matching nothing.
+                    // On a list of users "is the current user" means the list holds them (as in a report), not that it
+                    // holds nobody else.
                     if (currentUserId > 0)
-                        nodes.Add(new FilterNode { Condition = new FilterCondition { FieldId = c.FieldId, Operator = "eq", Value = currentUserId.ToString() } });
+                        nodes.Add(new FilterNode { Condition = new FilterCondition
+                        {
+                            FieldId = c.FieldId, Operator = IsUserList(c.FieldId, parentFields, childFields) ? "includes" : "eq", Value = currentUserId.ToString(),
+                        } });
                     continue;
                 }
                 if (string.Equals(c.Operator, "isNotCurrentUser", StringComparison.OrdinalIgnoreCase))
                 {
                     if (currentUserId > 0)
-                    {
-                        var isList = (parentFields.FirstOrDefault(f => f.Fid == (int)c.FieldId) ?? childFields.FirstOrDefault(f => f.Fid == (int)c.FieldId))
-                            ?.TypeCode is "MultiUser" or "Formula_ListUser";
-                        nodes.Add(new FilterNode { Group = Reports.Queries.RunReport.RunReportQueryHandler.NotCurrentUserGroup(c.FieldId, isList, currentUserId) });
-                    }
+                        nodes.Add(new FilterNode { Group = Reports.Queries.RunReport.RunReportQueryHandler.NotCurrentUserGroup(
+                            c.FieldId, IsUserList(c.FieldId, parentFields, childFields), currentUserId) });
                     continue;
                 }
                 if (!ParentFieldScope.IsParentFieldMode(c.ValueMode))
@@ -166,7 +174,7 @@ public static class ReferenceFilterResolver
                     Condition = value is null
                         // Record ID# is never negative: a condition that can't hold.
                         ? new FilterCondition { FieldId = 3, Operator = "eq", Value = "-1" }
-                        : new FilterCondition { FieldId = fieldId, Operator = c.Operator, Value = value, SubField = c.SubField, ValueMode = "literal" },
+                        : new FilterCondition { FieldId = fieldId, Operator = UserInFieldOperator(c.Operator, compared, value), Value = value, SubField = c.SubField, ValueMode = "literal" },
                 });
             }
             else if (node.Group is { } sub)
@@ -176,6 +184,27 @@ public static class ReferenceFilterResolver
             }
         }
         return new FilterGroup { Logic = group.Logic, Nodes = nodes };
+    }
+
+    private static bool IsUserList(long fid, IReadOnlyList<AppField> parentFields, IReadOnlyList<AppField> childFields) =>
+        (parentFields.FirstOrDefault(f => f.Fid == (int)fid) ?? childFields.FirstOrDefault(f => f.Fid == (int)fid))
+            ?.TypeCode is "MultiUser" or "Formula_ListUser";
+
+    /// <summary>"contains / wildcard match the user in the field" (the builder offers it on user fields) where the form field
+    /// holds users — the userPublicId(s) or ids its picker sends, not typed text: the parent's user field holds that user —
+    /// equal to it (a single user) or including it (a list) — as the report's "the user in the field" does. Any other
+    /// operator, or text typed into a Text field, is kept (a typed name or email is matched against the users later).</summary>
+    private static string UserInFieldOperator(string op, AppField? compared, string value)
+    {
+        if (compared?.TypeCode is not ("User" or "MultiUser")) return op;
+        var negate = op is "notContains" or "notWildcard";
+        if (!negate && op is not ("contains" or "wildcard")) return op;
+        var parts = value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length == 0 || !parts.All(p => Guid.TryParse(p, out _) || long.TryParse(p, NumberStyles.Integer, CultureInfo.InvariantCulture, out _)))
+            return op;
+        return compared.TypeCode == "MultiUser"
+            ? (negate ? "notIncludes" : "includes")
+            : (negate ? "ne" : "eq");
     }
 
     /// <summary>A copy of <paramref name="c"/> on the stand-in key of a parent Reference it filters on or — "the value
@@ -264,6 +293,26 @@ public static class ReferenceFilterResolver
         _ => value.ToString(),
     };
 
+    /// <summary>The tree's User conditions as a report reads them: a picked user (userPublicId) → the id the column stores,
+    /// a typed name or email → the matching app users' ids (see <see cref="ReferenceFilterUsers"/>).</summary>
+    private static async Task<FilterGroup> ResolveUsersAsync(
+        FilterGroup tree, IReadOnlyList<AppField> treeFields, ReferenceSettings? settings, long currentUserId,
+        ReferenceFilterUsers users, IAppTableRepository tableRepo, CancellationToken ct)
+    {
+        var fieldLookup = treeFields.Where(f => f.Fid.HasValue)
+            .GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+        // Typed names are matched against the app's users: the app of the parent table (the dropdown's own app).
+        long appId = 0;
+        if (users.AppUserRepo is not null && settings?.ParentTableId is long parentTableId)
+        {
+            try { appId = (await tableRepo.GetByIdAsync(parentTableId, ct)).AppId; }
+            catch (Domain.Exceptions.NotFoundException) { }
+        }
+        return await Reports.Queries.RunReport.RunReportQueryHandler.ResolveUserFieldValuesAsync(
+            tree, fieldLookup, currentUserId, new Dictionary<Guid, long>(), users.UserRepo, ct,
+            users.AppUserRepo, appId, users.CurrentUserEmail, users.CurrentUserName) ?? tree;
+    }
+
     /// <summary>Whether <paramref name="value"/> can be compared with <paramref name="field"/>'s column: a date
     /// column needs a date, a numeric one a number. Other columns take any text.</summary>
     private static bool FitsColumn(AppField? field, string value) => field?.TypeCode switch
@@ -285,7 +334,8 @@ public static class ReferenceFilterResolver
         CancellationToken ct,
         long currentUserId = 0,
         IRelationshipRepository? relRepo = null,
-        IRecordRepository? recordRepo = null)
+        IRecordRepository? recordRepo = null,
+        ReferenceFilterUsers? users = null)
     {
         var clauses = new List<ReferenceFilterClause>();
         // Switched off: every parent record is offered (the configuration is kept for switching back on).
@@ -299,8 +349,14 @@ public static class ReferenceFilterResolver
             var keys = relRepo is null ? null
                 : await LoadKeysAsync(tree, settings, childFields, parentFields, formValues, relRepo, recordRepo, tableRepo, fieldRepo, ct);
             var resolved = ResolveTree(tree, childFields, parentFields, formValues, lookupSources, currentUserId, keys, showAllWhenBlank);
+            var treeFields = keys?.TreeFields ?? parentFields;
+            // Relative dates ("today", "30 days ago", "during the current year") become real dates, as a report run does:
+            // the SQL filter only reads literal dates (the in-memory one for encrypted fields resolves them itself).
+            resolved = Reports.Queries.RunReport.RunReportQueryHandler.ResolveDateValueModeConditions(resolved) ?? resolved;
+            if (users is not null && resolved.Nodes.Count > 0)
+                resolved = await ResolveUsersAsync(resolved, treeFields, settings, currentUserId, users, tableRepo, ct);
             if (resolved.Nodes.Count > 0)
-                clauses.Add(new ReferenceFilterClause(null, null, null, null, null, resolved, keys?.TreeFields ?? parentFields));
+                clauses.Add(new ReferenceFilterClause(null, null, null, null, null, resolved, treeFields));
         }
 
         if (settings?.FilterConditions is not { Count: > 0 } conditions) return clauses;
