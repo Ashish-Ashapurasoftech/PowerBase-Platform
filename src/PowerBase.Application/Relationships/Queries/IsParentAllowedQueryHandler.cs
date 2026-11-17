@@ -30,7 +30,8 @@ public class IsParentAllowedQueryHandler
         _queryContext = queryContext;
     }
 
-    /// <param name="parentRecord">The parent's row Id (Record ID#) or its PublicId.</param>
+    /// <param name="parentRecord">The parent's row Id (Record ID#), its PublicId, or the key text a Reference reads back
+    /// as when its parent shows a key (resolved as the save check resolves it — see <see cref="ReferenceWriteValidator"/>).</param>
     /// <param name="filterValues">Current form values of controlling fields (fid → value); empty when the
     /// check runs outside a form, in which case conditions on form fields can't be judged.</param>
     public async Task<bool> HandleAsync(
@@ -42,12 +43,7 @@ public class IsParentAllowedQueryHandler
 
         var parent = await _tableRepo.GetByIdAsync(rel.ParentTableId, ct);
 
-        long parentRowId;
-        if (long.TryParse(parentRecord, out var rowId)) parentRowId = rowId;
-        else if (Guid.TryParse(parentRecord, out var publicId))
-            parentRowId = await _recordRepo.GetRecordIdByPublicIdAsync(parent, publicId, ct: ct);
-        else return false;
-
+        var parentRowId = await ParentRecordResolver.ResolveRowIdAsync(rel, parent, parentRecord, _recordRepo, _fieldRepo, ct);
         if (parentRowId <= 0 || !await _recordRepo.ExistsAsync(parent, parentRowId, ct)) return false;
 
         var childFields = await _fieldRepo.ListByTableAsync(rel.ChildTableId, ct);

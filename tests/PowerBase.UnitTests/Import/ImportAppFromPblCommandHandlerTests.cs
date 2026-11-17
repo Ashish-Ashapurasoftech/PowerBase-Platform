@@ -175,7 +175,7 @@ public class ImportAppFromPblCommandHandlerTests
         """;
 
     private static PblPipelinesImporter PipelinesImporter() =>
-        Substitute.For<PblPipelinesImporter>(new object?[] { null, null, null, null, null, null, null, null, null });
+        Substitute.For<PblPipelinesImporter>(new object?[] { null, null, null, null, null, null, null, null, null, null });
 
     [Fact]
     public async Task HandleBatchAsync_QblWithPipeline_ImportsThePipelineAfterTheApp()

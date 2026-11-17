@@ -40,4 +40,15 @@ public sealed class QbRecordsController : ControllerBase
         if (request is null) throw QbApiException.BadRequest("Request body is required");
         return Ok(await _records.DeleteAsync(request, ct));
     }
+    /// <summary>Query for data (Quickbase runQuery): POST /v1/records/query with body { from, select, where, sortBy, groupBy, options }.</summary>
+    [HttpPost("query")]
+    [ProducesResponseType(typeof(QbRunReportResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(QbErrorBody), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(QbErrorBody), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(QbErrorBody), StatusCodes.Status403Forbidden)]
+    public async Task<IActionResult> Query([FromBody] QbQueryRequest? request, CancellationToken ct)
+    {
+        if (request is null) throw QbApiException.BadRequest("Request body is required");
+        return Ok(await _records.QueryAsync(request, ct));
+    }
 }

@@ -674,6 +674,7 @@ builder.Services.AddHostedService<PowerBase.API.Workers.ReferenceRelinkWorker>()
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.RelationshipQueriesHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetParentOptionsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.IsParentAllowedQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetControllingFillQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetParentRecordQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetChildRecordsForParentQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Commands.SetKey.SetKeyCommandHandler>();
@@ -713,8 +714,10 @@ builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbReferenceTyp
 builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbReportService>();
 builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbUserValueResolver>();
 builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbRecordService>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbFileService>();
 builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbXmlDispatcher>();
 builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbXmlRecordActions>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbXmlQueryActions>();
 builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbXmlUserActions>();
 builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbUserProvisioning>();
 builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbXmlImportActions>();

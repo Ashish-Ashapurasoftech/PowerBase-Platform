@@ -40,3 +40,28 @@ public sealed class QbDeleteRecordsRequest
 }
 
 public sealed record QbDeleteRecordsResponse(int NumberDeleted);
+
+/// <summary>POST /v1/records/query body (Quickbase "Query for data").</summary>
+public sealed class QbQueryRequest
+{
+    public string? From { get; set; }
+    public List<JsonElement>? Select { get; set; }
+    public string? Where { get; set; }
+    /// <summary>Array of <c>{fieldId, order}</c>, or <c>false</c>.</summary>
+    public JsonElement? SortBy { get; set; }
+    public List<QbQueryGroupBy>? GroupBy { get; set; }
+    public QbQueryOptions? Options { get; set; }
+}
+
+public sealed class QbQueryGroupBy
+{
+    public long? FieldId { get; set; }
+    public string? Grouping { get; set; }
+}
+
+public sealed class QbQueryOptions
+{
+    public int? Skip { get; set; }
+    public int? Top { get; set; }
+    public bool? CompareWithAppLocalTime { get; set; }
+}

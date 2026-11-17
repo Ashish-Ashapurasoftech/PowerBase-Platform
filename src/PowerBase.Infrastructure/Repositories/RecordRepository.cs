@@ -1463,6 +1463,15 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return dict;
     }
 
+    public async Task<long> GetNextRecordIdAsync(AppTable table, CancellationToken ct = default)
+    {
+        // sys.identity_columns.last_value is the last id ever handed out (NULL before the first insert).
+        const string sql = "SELECT ISNULL(CAST(ic.last_value AS BIGINT), 0) + 1 FROM sys.identity_columns ic WHERE ic.object_id = OBJECT_ID(@name)";
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<long?>(
+            new CommandDefinition(sql, new { name = PhysicalNaming.FullTableName(table.Id) }, cancellationToken: ct)) ?? 1;
+    }
+
     public async Task<long> GetRecordIdByPublicIdAsync(AppTable table, Guid publicId, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         var sql = $"SELECT Id FROM {PhysicalNaming.FullTableName(table.Id)} WHERE PublicId = @publicId";

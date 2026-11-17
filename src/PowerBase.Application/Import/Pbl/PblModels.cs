@@ -187,6 +187,9 @@ public sealed class PblAppFormatting
 
     /// <summary>Date pattern with "-" separators, e.g. "MM-DD-YYYY".</summary>
     public string DateFormat { get; set; } = "MM-DD-YYYY";
+
+    /// <summary>The source app's time zone as an IANA id, or null when the file does not say.</summary>
+    public string? TimeZone { get; set; }
 }
 
 public sealed class PblAppSecurity

@@ -2,7 +2,7 @@ name: Build and deploy .NET Core application to Web App powerbaseapi-wus2
 on:
   push:
     branches:
-    - performance-03-11-2026
+    - develop
 permissions:
   id-token: write
   contents: read

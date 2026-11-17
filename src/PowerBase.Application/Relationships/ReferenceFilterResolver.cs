@@ -65,9 +65,35 @@ public static class ReferenceFilterResolver
         return fids.Distinct().ToList();
     }
 
-    /// <summary>True when the Reference has any filter at all (legacy conditions or a tree).</summary>
+    /// <summary>True when the Reference has a filter that applies (legacy conditions or a tree, not switched off).</summary>
     public static bool HasFilter(ReferenceSettings? settings) =>
-        settings?.FilterConditions is { Count: > 0 } || ParseTree(settings) is not null;
+        settings?.FilterDisabled != true
+        && (settings?.FilterConditions is { Count: > 0 } || ParseTree(settings) is not null);
+
+    /// <summary>"Parent field equals form field" pairs a picked parent record can fill the form from: each equals comparison
+    /// to a form field in the tree's AND groups (under an OR the value isn't settled by one record), plus the older direct
+    /// conditions. None for a filter that is switched off.</summary>
+    public static IReadOnlyList<(int ParentFid, int FormFid)> EqualityPairs(ReferenceSettings? settings)
+    {
+        var pairs = new List<(int ParentFid, int FormFid)>();
+        if (settings?.FilterDisabled == true) return pairs;
+        foreach (var c in settings?.FilterConditions ?? [])
+            if (c.FormFid is int formFid && c.ParentFid is int parentFid && c.JunctionTableId is null) pairs.Add((parentFid, formFid));
+        if (ParseTree(settings) is { } tree) CollectEqualityPairs(tree, pairs);
+        return pairs.Distinct().ToList();
+    }
+
+    private static void CollectEqualityPairs(FilterGroup group, List<(int ParentFid, int FormFid)> pairs)
+    {
+        if (group.Nodes.Count > 1 && !string.Equals(group.Logic, "and", StringComparison.OrdinalIgnoreCase)) return;
+        foreach (var node in group.Nodes)
+        {
+            if (node.Condition is { } c && ParentFieldScope.IsParentFieldMode(c.ValueMode) && c.ValueFieldId is long formFid
+                && string.Equals(c.Operator, "eq", StringComparison.OrdinalIgnoreCase) && string.IsNullOrEmpty(c.SubField))
+                pairs.Add(((int)c.FieldId, (int)formFid));
+            if (node.Group is { } sub) CollectEqualityPairs(sub, pairs);
+        }
+    }
 
     private static void CollectFormFids(FilterGroup group, List<int> fids)
     {
@@ -81,13 +107,14 @@ public static class ReferenceFilterResolver
 
     /// <summary>Replaces each form-field comparison in the tree with the submitted value as a literal.
     /// A comparison whose form field was deleted, or isn't part of the submission, is dropped (nothing to
-    /// filter by); one whose field is blank — "no selection yet" — can match nothing. Groups left empty go.
+    /// filter by); one whose field is blank — "no selection yet" — can match nothing, or, with
+    /// <paramref name="showAllWhenBlank"/>, is dropped too. Groups left empty go.
     /// With <paramref name="keys"/>, a condition on a parent Reference that shows a key is moved onto that key,
     /// and a form Reference is compared as the key of the record it points at — except a form Reference
     /// compared to a parent Reference of the same table, where both hold that table's Record ID#.</summary>
     private static FilterGroup ResolveTree(FilterGroup group, IReadOnlyList<AppField> childFields,
         IReadOnlyList<AppField> parentFields, IReadOnlyDictionary<int, string?> formValues,
-        IReadOnlyDictionary<long, AppField> lookupSources, long currentUserId, TreeKeys? keys)
+        IReadOnlyDictionary<long, AppField> lookupSources, long currentUserId, TreeKeys? keys, bool showAllWhenBlank)
     {
         var nodes = new List<FilterNode>();
         foreach (var node in group.Nodes)
@@ -127,6 +154,7 @@ public static class ReferenceFilterResolver
                     if (keys.Moved.TryGetValue(c.FieldId, out var standIn)) (fieldId, compared) = (standIn, keys.Sources[standIn]);
                 }
                 var value = string.IsNullOrWhiteSpace(raw) ? null : raw.Trim();
+                if (value is null && showAllWhenBlank) continue;
                 // A value the compared column can't hold (a date that isn't one, text for a number) would
                 // fail in SQL; it can't match anything either, so treat it as no selection.
                 // A Lookup column holds its source's type.
@@ -143,7 +171,7 @@ public static class ReferenceFilterResolver
             }
             else if (node.Group is { } sub)
             {
-                var resolved = ResolveTree(sub, childFields, parentFields, formValues, lookupSources, currentUserId, keys);
+                var resolved = ResolveTree(sub, childFields, parentFields, formValues, lookupSources, currentUserId, keys, showAllWhenBlank);
                 if (resolved.Nodes.Count > 0) nodes.Add(new FilterNode { Group = resolved });
             }
         }
@@ -260,6 +288,9 @@ public static class ReferenceFilterResolver
         IRecordRepository? recordRepo = null)
     {
         var clauses = new List<ReferenceFilterClause>();
+        // Switched off: every parent record is offered (the configuration is kept for switching back on).
+        if (settings?.FilterDisabled == true) return clauses;
+        var showAllWhenBlank = settings?.ShowAllWhenBlank == true;
 
         if (ParseTree(settings) is { } tree)
         {
@@ -267,7 +298,7 @@ public static class ReferenceFilterResolver
             // Without the relationships the keys can't be known: References are then compared as their Record ID#.
             var keys = relRepo is null ? null
                 : await LoadKeysAsync(tree, settings, childFields, parentFields, formValues, relRepo, recordRepo, tableRepo, fieldRepo, ct);
-            var resolved = ResolveTree(tree, childFields, parentFields, formValues, lookupSources, currentUserId, keys);
+            var resolved = ResolveTree(tree, childFields, parentFields, formValues, lookupSources, currentUserId, keys, showAllWhenBlank);
             if (resolved.Nodes.Count > 0)
                 clauses.Add(new ReferenceFilterClause(null, null, null, null, null, resolved, keys?.TreeFields ?? parentFields));
         }
@@ -284,9 +315,10 @@ public static class ReferenceFilterResolver
 
             // The caller didn't supply the controlling field at all (it isn't on this form): there
             // is nothing to filter by, so don't filter. A supplied-but-blank value is different —
-            // "no selection yet" — and matches nothing.
+            // "no selection yet" — and matches nothing, unless ShowAllWhenBlank leaves it out.
             if (!formValues.TryGetValue(formFid, out var raw)) continue;
             var value = string.IsNullOrWhiteSpace(raw) ? null : raw.Trim();
+            if (value is null && showAllWhenBlank) continue;
 
             if (c.JunctionTableId is long junctionTableId)
             {
