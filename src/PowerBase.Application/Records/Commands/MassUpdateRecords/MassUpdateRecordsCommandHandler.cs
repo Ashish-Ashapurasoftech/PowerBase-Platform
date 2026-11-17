@@ -108,7 +108,8 @@ public class MassUpdateRecordsCommandHandler
         // Reference fields must point at an existing parent record; a value submitted as a
         // human key is resolved to the parent row Id before any constraint check or persist.
         var effectiveValues = new Dictionary<long, object?>(command.FieldValues);
-        var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, effectiveValues, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct);
+        var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, effectiveValues, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct,
+            users: new ReferenceFilterUsers(_userRepo, _appUserRepo));
         foreach (var kvp in refOverrides)
             effectiveValues[kvp.Key] = kvp.Value;
 

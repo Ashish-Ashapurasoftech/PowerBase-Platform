@@ -102,7 +102,8 @@ public sealed class RecordCreatePreparer
     {
         // Reference fields must point at an existing parent record; a value submitted as a
         // human key is resolved to the parent row Id here.
-        var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, submitted, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct);
+        var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, submitted, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct,
+            users: new ReferenceFilterUsers(_userRepo, _appUserRepo));
 
         // Inject default values for fields that were not submitted (e.g. hidden None-access fields).
         // This ensures required fields with defaults are always populated regardless of role restrictions.
