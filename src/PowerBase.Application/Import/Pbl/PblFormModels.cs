@@ -55,6 +55,10 @@ public sealed class PblFormSection
     public bool IsPinned { get; set; }
     public bool? ShowDividers { get; set; }
 
+    /// <summary>False when the source section had no typed title (<see cref="Name"/> was inferred), so the
+    /// generated name is kept for the designer but not shown on the form. Null = default (shown).</summary>
+    public bool? ShowHeading { get; set; }
+
     public string LogicalRef { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public bool IsCollapsed { get; set; }
