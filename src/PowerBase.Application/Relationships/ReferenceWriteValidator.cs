@@ -38,7 +38,7 @@ public static class ReferenceWriteValidator
         //  • On an update (existingValues supplied), only when the Reference or one of its controlling
         //    fields actually changed — otherwise saving an unrelated edit of a record whose current
         //    value predates the rule would start failing.
-        async Task EnforceFilterAsync(AppField field, ReferenceSettings settings, AppTable parent, long parentRowId)
+        async Task EnforceFilterAsync(AppField field, ReferenceSettings settings, AppTable parent, long parentRowId, bool storedValue = false)
         {
             if (!ReferenceFilterResolver.HasFilter(settings)) return;
             // The controlling value is the submitted one, or — on an update that doesn't resend it —
@@ -76,7 +76,9 @@ public static class ReferenceWriteValidator
             if (!await recordRepo.MatchesReferenceFilterAsync(parent, parentRowId, clauses, ct))
                 throw new ValidationException(new Dictionary<string, string[]>
                 {
-                    [field.Name] = [$"The selected {parent.Name} record is not allowed for the current selection."],
+                    [field.Name] = [storedValue
+                        ? $"{field.Label ?? field.Name} no longer matches the new selection. Choose another {parent.Name} record or clear it."
+                        : $"The selected {parent.Name} record is not allowed for the current selection."],
                 });
         }
 
@@ -137,7 +139,35 @@ public static class ReferenceWriteValidator
                 new Dictionary<string, string[]> { [field.Name] = [$"The referenced {parent.Name} record does not exist."] });
         }
 
+        // A Reference left out of an update keeps its stored parent. When one of its controlling fields changes in
+        // this update, that stored parent must still be allowed: Grid Edit and the API send only the changed cells,
+        // so changing Task Type alone would otherwise keep an Activity that belongs to another type. A Reference
+        // that is sent (picked, or cleared) was judged above.
+        if (existingValues is not null)
+        {
+            foreach (var field in fields.Where(f => f.TypeCode == "Reference" && f.Fid.HasValue && !values.ContainsKey(f.Fid!.Value)))
+            {
+                if (StoredRowId(existingValues.GetValueOrDefault(field.Fid!.Value)) is not long storedRowId) continue;
+                var settings = FormulaTypeMap.ParseReferenceSettings(field.Settings);
+                if (settings?.ParentTableId is not long parentTableId || !ReferenceFilterResolver.HasFilter(settings)) continue;
+                if (!ReferenceFilterResolver.ControllingFids(settings).Any(fid => values.ContainsKey(fid))) continue;
+                var parent = await tableRepo.GetByIdAsync(parentTableId, ct);
+                // A stored parent that no longer exists can't be judged; leave it to the delete guards.
+                if (!await recordRepo.ExistsAsync(parent, storedRowId, ct)) continue;
+                await EnforceFilterAsync(field, settings, parent, storedRowId, storedValue: true);
+            }
+        }
+
         return overrides;
+    }
+
+    /// <summary>A stored Reference value as the parent row Id it holds (a BIGINT column may read back as long or
+    /// decimal), or null when it is blank or not a positive whole number.</summary>
+    private static long? StoredRowId(object? stored)
+    {
+        var text = stored?.ToString()?.Trim();
+        return decimal.TryParse(text, System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var d)
+            && d > 0 && d == decimal.Truncate(d) ? (long)d : null;
     }
 
     /// <summary>A submitted or stored value as the culture-independent text the filter resolver reads: a date as

@@ -674,6 +674,7 @@ builder.Services.AddHostedService<PowerBase.API.Workers.ReferenceRelinkWorker>()
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.RelationshipQueriesHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetParentOptionsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.IsParentAllowedQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetControllingFillQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetParentRecordQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetChildRecordsForParentQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Commands.SetKey.SetKeyCommandHandler>();

@@ -243,7 +243,7 @@ public class RelationshipsController : ControllerBase
         var conditions = request.Conditions
             .Select(c => new ReferenceFilterConditionInput(c.FormFid, c.ParentFid, c.JunctionTableId, c.JunctionParentFid, c.JunctionValueFid))
             .ToList();
-        var result = await _updateReferenceFilter.HandleAsync(new UpdateReferenceFilterCommand(id, conditions, request.FilterTree), ct);
+        var result = await _updateReferenceFilter.HandleAsync(new UpdateReferenceFilterCommand(id, conditions, request.FilterTree, request.FilterDisabled, request.ShowAllWhenBlank), ct);
         return Ok(new ApiResponse<RelationshipDto>(result));
     }
 
@@ -311,6 +311,20 @@ public class RelationshipsController : ControllerBase
             return InvalidFilterValues();
         var allowed = await _parentAllowed.HandleAsync(relId, recordId, values, ct);
         return Ok(new ApiResponse<ParentAllowedResponse>(new ParentAllowedResponse(allowed)));
+    }
+
+    /// <summary>Values the picked parent record fills into the form fields this Reference's dropdown depends on: with "show
+    /// all until chosen" an Activity can be picked first, and fills the Task Type. Fid → value; empty when "show all" is
+    /// off. The client fills only fields that are still blank.</summary>
+    [HttpGet("tables/{tableId:guid}/relationships/{relId:guid}/controlling-fill/{recordId}")]
+    [RequireAppPermission(PermissionCodes.RecordsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<ControllingFillResponse>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ControllingFill(
+        Guid tableId, Guid relId, string recordId, [FromServices] GetControllingFillQueryHandler controllingFill, CancellationToken ct)
+    {
+        var values = await controllingFill.HandleAsync(relId, recordId, ct);
+        return Ok(new ApiResponse<ControllingFillResponse>(
+            new ControllingFillResponse(values.ToDictionary(kv => kv.Key.ToString(System.Globalization.CultureInfo.InvariantCulture), kv => kv.Value))));
     }
 
     /// <summary>The parent record a child record's Reference points at, so a field set to link to its parent can open it. Data is null
