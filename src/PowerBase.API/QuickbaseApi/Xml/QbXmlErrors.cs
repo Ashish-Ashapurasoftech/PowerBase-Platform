@@ -17,6 +17,7 @@ public static class QbXmlErrors
     public const int REGISTRATION_REQUIRED = 27;
     public const int NO_SUCH_RECORD = 30;
     public const int NO_SUCH_FIELD = 31;
+    public const int NO_SUCH_QUERY = 33;
     public const int CANNOT_CHANGE_FIELD = 34;
     public const int MISSING_REQUIRED_FIELD = 50;
     public const int NOT_UNIQUE = 51;
@@ -38,7 +39,7 @@ public static class QbXmlErrors
     public static int HttpStatus(int errcode) => errcode switch
     {
         NO_ERROR => 200,
-        NO_SUCH_RECORD or NO_SUCH_FIELD or NO_SUCH_OPERATION => 404,
+        NO_SUCH_RECORD or NO_SUCH_FIELD or NO_SUCH_OPERATION or NO_SUCH_QUERY => 404,
         UNKNOWN_USER => 401,
         _ => 400,
     };

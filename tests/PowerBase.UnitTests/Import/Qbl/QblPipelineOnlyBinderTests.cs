@@ -197,12 +197,15 @@ Resources:
 
         var request = pipeline.Steps[2];
         request.Config["requestMode"].Should().Be("quickbase");
-        request.Config["method"].Should().Be("GET");
-        var url = request.Config["url"].Should().BeOfType<PblPipelineTextValue>().Subject;
-        url.Parts.Should().HaveCount(3);
-        url.Parts[0].Should().Be("/tables/");
-        url.Parts[1].Should().BeOfType<PblPipelineTableValue>().Which.TableRef.Should().Be("$Table_PB_10");
-        url.Parts[2].Should().Be("/records");
+        request.Config["method"].Should().Be("POST");
+        request.Config["url"].Should().Be("/v1/records/query");
+        // The body keeps Quickbase's format (the compatible API reads it); only the table id becomes the matched table.
+        var body = request.Config["body"].Should().BeOfType<PblPipelineTextValue>().Subject;
+        body.Parts.Should().HaveCount(3);
+        body.Parts[0].Should().Be("{\"from\":\"");
+        body.Parts[1].Should().BeOfType<PblPipelineTableValue>().Which.TableRef.Should().Be("$Table_PB_10");
+        body.Parts[2].Should().Be("\"}");
+        request.IsComplete.Should().BeTrue();
         pipeline.Issues.Should().Contain(i => i.Code == "PIPELINE_REQUEST_URL_MAPPED");
         pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_REQUEST_URL_QUICKBASE");
     }

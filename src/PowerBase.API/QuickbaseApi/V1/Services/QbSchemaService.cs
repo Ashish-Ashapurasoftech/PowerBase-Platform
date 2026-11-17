@@ -19,10 +19,13 @@ public sealed class QbSchemaService
     private readonly IAppRoleRepository _roles;
     private readonly IAppRolePermissionRepository _rolePermissions;
     private readonly QbReferenceTypes _referenceTypes;
+    private readonly IRecordRepository? _records;
 
     public QbSchemaService(IAppRepository apps, IAppTableRepository tables, IAppFieldRepository fields, IAppAccessService access,
-        IRolePermissionEnforcer enforcer, IAppRoleRepository roles, IAppRolePermissionRepository rolePermissions, QbReferenceTypes referenceTypes)
+        IRolePermissionEnforcer enforcer, IAppRoleRepository roles, IAppRolePermissionRepository rolePermissions, QbReferenceTypes referenceTypes,
+        IRecordRepository? records = null)
     {
+        _records = records;
         _referenceTypes = referenceTypes;
         _apps = apps;
         _tables = tables;
@@ -74,7 +77,8 @@ public sealed class QbSchemaService
             Description = table.Description,
             Created = Iso(table.CreatedOn),
             Updated = Iso(table.ModifiedOn ?? table.CreatedOn),
-            NextRecordId = null,
+            // Quickbase's record counter: deleted records still count.
+            NextRecordId = _records is null ? null : await _records.GetNextRecordIdAsync(table, ct),
             NextFieldId = await _fields.GetNextFidAsync(table.Id, ct),
             DefaultSortFieldId = null,
             DefaultSortOrder = null,

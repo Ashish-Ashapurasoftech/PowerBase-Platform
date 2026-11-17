@@ -19,6 +19,27 @@ public class FieldVersionService
         _queryContext = queryContext;
     }
 
+    /// <summary>Adds an Import version to a field's audit history: the commit message says in plain words what the import could not
+    /// carry over (or kept as a stand-in), and the change rows hold the details — including the complete original definition. The
+    /// snapshot is the field as the import left it. Used by the import, which has no unit of work to join.</summary>
+    public Task<int> RecordImportVersionAsync(AppField field, string commitMessage, IReadOnlyList<FieldChangeEntry> changes, CancellationToken ct = default)
+    {
+        var version = new AppFieldVersion
+        {
+            AppFieldId = field.Id,
+            ChangeType = FieldVersionChangeType.Import,
+            CommitMessage = commitMessage.Length > MAX_COMMIT_MESSAGE ? commitMessage[..(MAX_COMMIT_MESSAGE - 1)] + "…" : commitMessage,
+            ChangedByUserId = _queryContext.UserId,
+            ChangedByName = _queryContext.UserName,
+            ChangedOn = DateTime.UtcNow,
+            SnapshotJson = FieldSnapshot.From(field).ToJson(),
+        };
+        return _versionRepo.InsertStandaloneVersionAsync(version, changes, ct);
+    }
+
+    /// <summary>The commit message column holds 500 characters.</summary>
+    public const int MAX_COMMIT_MESSAGE = 500;
+
     /// <summary>Diffs <paramref name="before"/> against <paramref name="after"/> and, only if they
     /// differ, inserts a new AppFieldVersion (+ its AppFieldVersionChange rows) within
     /// <paramref name="transaction"/>. Returns the new version number, or null if nothing changed.

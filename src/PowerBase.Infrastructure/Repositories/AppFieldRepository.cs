@@ -216,6 +216,10 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         UPDATE meta.AppField SET Settings = @settings, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy WHERE Id = @id
         """;
 
+    private const string SetSearchableReportableSql = """
+        UPDATE meta.AppField SET IsSearchable = @isSearchable, IsReportable = @isReportable, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy WHERE Id = @id
+        """;
+
     // TypeCode is not a physical column on meta.AppField — it's derived via the ft.Code join in
     // SelectColumns, so changing type is just a FieldTypeId swap.
     private const string UpdateFieldTypeSql = """
@@ -709,6 +713,14 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateSettingsSql, new { id, settings, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
+    }
+
+    public async Task SetSearchableReportableAsync(long id, bool isSearchable, bool isReportable, CancellationToken ct = default)
+    {
+        FieldsChanging();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(
+            new CommandDefinition(SetSearchableReportableSql, new { id, isSearchable, isReportable, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
     }
 
     public async Task UpdateFieldTypeAsync(long id, long fieldTypeId, string? settings, bool isRequired, CancellationToken ct = default)

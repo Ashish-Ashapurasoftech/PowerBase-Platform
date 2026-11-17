@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 
@@ -8,11 +9,13 @@ public class DuplicatePageCommandHandler
 {
     private readonly IPageRepository _pageRepo;
     private readonly IAuditRepository _auditRepo;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
-    public DuplicatePageCommandHandler(IPageRepository pageRepo, IAuditRepository auditRepo)
+    public DuplicatePageCommandHandler(IPageRepository pageRepo, IAuditRepository auditRepo, IFieldReferenceIndexer? refIndexer = null)
     {
         _pageRepo = pageRepo;
         _auditRepo = auditRepo;
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
     }
 
     public async Task<PageDetailDto> HandleAsync(DuplicatePageCommand command, CancellationToken ct = default)
@@ -21,6 +24,8 @@ public class DuplicatePageCommandHandler
         var newName = string.IsNullOrWhiteSpace(command.NewName) ? $"{source.Name} (copy)" : command.NewName;
 
         var (pageId, publicId, pageNumber) = await _pageRepo.DuplicateAsync(command.PagePublicId, newName, ct);
+        if (source.PageType == PageTypes.Dashboard)
+            await _refIndexer.ReindexDashboardAsync(publicId, ct);
 
         // Duplicated pages start Personal to the duplicating user (PageRepository.DuplicateAsync
         // already resets OwnerId) and carry no role visibility rows — a deliberate default,

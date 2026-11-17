@@ -721,7 +721,7 @@ public static class QblPipelineConverter
                 SourceId = source.Id,
                 Location = source.Location,
                 Name = source.Name,
-                Notes = Scalar(source.Node.Properties, "Note"),
+                Notes = NoteWithoutQuickbaseUrls(source),
                 Type = source.Entry!.Type,
                 Subtype = source.Entry.Subtype,
                 Config = QblPipelineStepCatalog.DefaultConfig(source.Entry.Subtype),
@@ -756,12 +756,57 @@ public static class QblPipelineConverter
                 case "call-another-pipeline": context.CallAnotherPipeline(); break;
             }
             context.NoteUnusedSettings();
+            RemoveQuickbaseUrls(source, step);
 
             step.Children = Build(step.Subtype switch { "for-each" => source.Steps, "handle-errors" => source.Try, _ => source.Then });
             step.ElseChildren = Build(source.Else);
             step.SuccessChildren = Build(source.OnSuccess);
             step.ErrorChildren = Build(source.OnError);
             return step;
+        }
+
+        /// <summary>The step's note with every Quickbase address rewritten to PowerBase (or removed), like any other value.</summary>
+        private string? NoteWithoutQuickbaseUrls(SourceStep source)
+        {
+            var note = Scalar(source.Node.Properties, "Note");
+            if (!QuickbaseUrlRewriter.ContainsQuickbaseUrl(note)) return note;
+            // A note is free text with no ids to resolve: the Quickbase address is taken out and named in the report.
+            var removed = QuickbaseUrlRewriter.UrlPattern.Matches(note!).Select(m => m.Value).ToList();
+            Note(source, "PIPELINE_QUICKBASE_URL_REMOVED", $"Step note: the Quickbase address(es) {string.Join(", ", removed)} were taken out of the note.", changesExecution: false);
+            return QuickbaseUrlRewriter.UrlPattern.Replace(note!, string.Empty).Trim();
+        }
+
+        /// <summary>Last guard: no imported step keeps a Quickbase URL. Values the rewriter did not see (settings copied as is) are
+        /// emptied and reported, and the step stays a draft.</summary>
+        private void RemoveQuickbaseUrls(SourceStep source, PblPipelineStep step)
+        {
+            object? Clean(object? value, string path)
+            {
+                switch (value)
+                {
+                    case string s when QuickbaseUrlRewriter.ContainsQuickbaseUrl(s):
+                        return Removed(s, path);
+                    case PblPipelineTextValue t when t.Parts.Any(p => p is string s && QuickbaseUrlRewriter.ContainsQuickbaseUrl(s)):
+                        return Removed(string.Concat(t.Parts.OfType<string>()), path);
+                    case Dictionary<string, object?> d:
+                        foreach (var k in d.Keys.ToList()) d[k] = Clean(d[k], path + "." + k);
+                        return d;
+                    case List<object?> l:
+                        for (var i = 0; i < l.Count; i++) l[i] = Clean(l[i], $"{path}[{i}]");
+                        return l;
+                    default:
+                        return value;
+                }
+            }
+            object Removed(string text, string path)
+            {
+                step.IsComplete = false;
+                Note(source, "PIPELINE_QUICKBASE_URL_REMOVED",
+                    $"'{path}' held a Quickbase address ({QuickbaseUrlRewriter.UrlPattern.Match(text).Value}) and was emptied: PowerFlows never call or link to Quickbase. Set the PowerBase value before turning the PowerFlow on.", changesExecution: true);
+                return string.Empty;
+            }
+            foreach (var key in step.Config.Keys.ToList())
+                step.Config[key] = Clean(step.Config[key], key);
         }
 
         private void Note(SourceStep step, string code, string message, bool changesExecution) =>
@@ -955,9 +1000,67 @@ public static class QblPipelineConverter
 
             /// <summary>A value that may hold Jinja tokens. Only <c>{{stepId.key}}</c> naming a record field of an earlier, reachable
             /// record step converts (<c>{{steps.stepId.fid_N}}</c>). Anything else empties the value and makes the step a draft.</summary>
-            private object Text(object? raw, string where)
+            /// <summary><see cref="TextCore"/> after every Quickbase URL in the value was rewritten to its PowerBase address
+            /// (<see cref="QuickbaseUrlRewriter"/>): an imported PowerFlow never points at Quickbase.</summary>
+            private object Text(object? raw, string where, bool requestUrl = false, string method = "GET", string? body = null)
             {
                 var text = raw?.ToString() ?? string.Empty;
+                if (QuickbaseUrlRewriter.ContainsQuickbaseUrl(text))
+                {
+                    var rewritten = QuickbaseUrlRewriter.Rewrite(text, new QuickbaseUrlRewriter.Context(
+                        id => reader.Index.TableByQbId(id) is not null, id => reader.Index.AppByQbId(id) is not null, requestUrl, method, body));
+                    foreach (var note in rewritten.Notes)
+                        reader.Note(source, "PIPELINE_QUICKBASE_URL_REPLACED", $"{where}: {note}.", changesExecution: false);
+                    foreach (var problem in rewritten.Problems)
+                        Incomplete("PIPELINE_QUICKBASE_URL_REVIEW", $"{where}: {problem}. Check it before turning the PowerFlow on.");
+                    text = rewritten.Text;
+                }
+                return Markers(TextCore(text, where));
+            }
+
+            /// <summary>The imported ids and PowerBase addresses the URL rewriter left as markers, as table / app / site values.</summary>
+            private object Markers(object value)
+            {
+                List<object>? Expand(string text)
+                {
+                    // Inside a formula value the markers are JSON-escaped; the ids written in their place are plain text there too.
+                    if (text.Contains(@"\u0001", StringComparison.Ordinal))
+                        text = text.Replace(@"\u0001", "\u0001").Replace(@"\u0002", "\u0002");
+                    if (text.IndexOf(QuickbaseUrlRewriter.MARK_START) < 0) return null;
+                    var parts = new List<object>();
+                    foreach (var (literal, kind, id) in QuickbaseUrlRewriter.Split(text))
+                    {
+                        if (literal is not null) { parts.Add(literal); continue; }
+                        switch (kind)
+                        {
+                            case QuickbaseUrlRewriter.TABLE when reader.Index.TableByQbId(id!) is { } t: parts.Add(new PblPipelineTableValue(t.App, t.Table)); break;
+                            case QuickbaseUrlRewriter.APP_OF_TABLE when reader.Index.TableByQbId(id!) is { } t: parts.Add(new PblPipelineAppValue(t.App)); break;
+                            case QuickbaseUrlRewriter.APP when reader.Index.AppByQbId(id) is { } a: parts.Add(new PblPipelineAppValue(a)); break;
+                            case QuickbaseUrlRewriter.ANY_APP when (reader.Index.AppByQbId(id) ?? reader.Index.Apps.FirstOrDefault()) is { } a: parts.Add(new PblPipelineAppValue(a)); break;
+                            case QuickbaseUrlRewriter.SITE: parts.Add(new PblPipelineSiteValue(Api: false)); break;
+                            case QuickbaseUrlRewriter.API: parts.Add(new PblPipelineSiteValue(Api: true)); break;
+                            default: parts.Add(string.Empty); break;
+                        }
+                    }
+                    return parts;
+                }
+                switch (value)
+                {
+                    case string text when Expand(text) is { } parts:
+                        return new PblPipelineTextValue(parts);
+                    case PblPipelineTextValue t when t.Parts.Any(p => p is string s && (s.IndexOf(QuickbaseUrlRewriter.MARK_START) >= 0 || s.Contains(@"\u0001", StringComparison.Ordinal))):
+                        var all = new List<object>();
+                        foreach (var part in t.Parts)
+                            if (part is string s && Expand(s) is { } pieces) all.AddRange(pieces);
+                            else all.Add(part);
+                        return new PblPipelineTextValue(all);
+                    default:
+                        return value;
+                }
+            }
+
+            private object TextCore(string text, string where)
+            {
                 if (!text.Contains("{{", StringComparison.Ordinal) && !text.Contains("{%", StringComparison.Ordinal))
                     return text;
 
@@ -1050,6 +1153,12 @@ public static class QblPipelineConverter
                 if (!IsReachable(target, source))
                     return $"step '{target.Name}' ({target.Label}) is not reachable from here in PowerFlows";
 
+                // The URL rewriter's rid: the record's PowerBase id (a PowerBase page opens a record by it, not by its number).
+                if (key == QuickbaseUrlRewriter.RECORD_KEY && keys.Length == 1)
+                {
+                    parts = [RecordPlaceholder(target)];
+                    return null;
+                }
                 if (target.Subtype == "pipeline-called")
                     return CallableTokenProblem(target, keys, out parts);
                 if (target.Subtype == "make-request")
@@ -1477,6 +1586,21 @@ public static class QblPipelineConverter
 
             private SourceStep Target => reader._byId[source.TargetId!];
 
+            /// <summary>The PowerBase id of the record step <paramref name="target"/> works on, as read from this step.</summary>
+            private string RecordPlaceholder(SourceStep target)
+            {
+                if (target.Subtype is "search-records" or "new-bulk-event" && target.Id is not null
+                    && source.LoopOver(target.Id) is { Removed: false } loop && loop.RefId.Length > 0)
+                    return $"{{{{steps.{loop.RefId}.item.RecordPublicId}}}}";
+                return target.Subtype switch
+                {
+                    "new-event" => "{{trigger.RecordPublicId}}",
+                    "create-record" => $"{{{{steps.{target.RefId}.CreatedRecordPublicId}}}}",
+                    "update-record" => $"{{{{steps.{target.RefId}.UpdatedRecordPublicId}}}}",
+                    _ => $"{{{{steps.{target.RefId}.RecordPublicId}}}}",
+                };
+            }
+
             private string TargetRecordPlaceholder()
             {
                 var target = Target;
@@ -1762,7 +1886,7 @@ public static class QblPipelineConverter
             {
                 if (source.Channel == "http")
                     HttpRequest();
-                else if (source.Channel == "webhooks" && !CallsMappableQuickbaseApi())
+                else if (source.Channel == "webhooks" && !CallsMappableQuickbaseApi() && !QuickbaseUrlRewriter.ContainsQuickbaseUrl(Setting("Url")?.ToString()))
                     WebhookRequest();
                 else
                     PowerBaseRequest();
@@ -1876,20 +2000,40 @@ public static class QblPipelineConverter
                 Connection();
                 Config["requestMode"] = "quickbase";
                 Config["disableSsl"] = "No";
-                var headers = RequestHeaders().Select(h => (object?)new Dictionary<string, object?>(StringComparer.Ordinal) { ["name"] = h.Name, ["value"] = h.Value }).ToList();
+                // Quickbase's own credentials and realm mean nothing here: the PowerBase account signs the call, and PowerBase rejects
+                // a realm that is not the tenant's (and any Authorization header).
+                var all = RequestHeaders();
+                var dropped = all.Where(h => h.Name.Equals("Authorization", StringComparison.OrdinalIgnoreCase) || h.Name.Equals("QB-Realm-Hostname", StringComparison.OrdinalIgnoreCase)
+                    || h.Name.Equals("QB-App-Token", StringComparison.OrdinalIgnoreCase)).Select(h => h.Name).ToList();
+                if (dropped.Count > 0)
+                    reader.Note(source, "PIPELINE_REQUEST_HEADER_DROPPED", $"Quickbase header(s) {string.Join(", ", dropped)} were left out: the PowerBase account authenticates the request.", changesExecution: false);
+                var headers = all.Where(h => !dropped.Contains(h.Name)).Select(h => (object?)new Dictionary<string, object?>(StringComparer.Ordinal) { ["name"] = h.Name, ["value"] = h.Value }).ToList();
                 Config["headersList"] = headers.Count > 0 ? headers : new List<object?> { new Dictionary<string, object?>(StringComparer.Ordinal) { ["name"] = "", ["value"] = "" } };
                 RequestMethod();
                 Config["contentType"] = Setting("Content_Type")?.ToString() ?? string.Empty;
                 Config["body"] = Setting("Body") is { } body ? Text(body, "Body") : string.Empty;
 
-                var url = Setting("Url")?.ToString();
-                if (url is not null && Uri.TryCreate(url, UriKind.Absolute, out var absolute) && absolute.Host.EndsWith("quickbase.com", StringComparison.OrdinalIgnoreCase))
+                var url = Setting("Url")?.ToString()?.Trim();
+                if (url is not null && QuickbaseUrlRewriter.ContainsQuickbaseUrl(url))
                 {
-                    if (MapQuickbaseApi(absolute, out var reason))
+                    if (!url.Contains("{{", StringComparison.Ordinal) && Uri.TryCreate(url, UriKind.Absolute, out var absolute) && MapQuickbaseApi(absolute, out _))
                         return;
-                    // Kept as in the file so nothing is lost; the PowerBase account rejects other hosts at run time, so it never calls Quickbase.
-                    Config["url"] = Text(url, "URL");
-                    Incomplete("PIPELINE_REQUEST_URL_QUICKBASE", $"The request URL '{url}' calls the Quickbase API and was kept as is: {reason}. Change it to the PowerBase endpoint (for example /tables/TABLE_PUBLIC_ID/records) before turning the PowerFlow on.");
+                    // Computed URLs and calls the compatible API does not cover: rewritten (or removed and reported), never kept.
+                    Config["url"] = Text(url, "URL", requestUrl: true, Config["method"]?.ToString() ?? "GET", Setting("Body")?.ToString());
+                    if (Config["headersList"] is List<object?> hs)
+                    {
+                        hs.RemoveAll(h => h is Dictionary<string, object?> d && d.GetValueOrDefault("name")?.ToString() is { } n
+                            && (n.Equals("Authorization", StringComparison.OrdinalIgnoreCase) || n.Equals("QB-Realm-Hostname", StringComparison.OrdinalIgnoreCase)));
+                        if (hs.Count == 0) hs.Add(new Dictionary<string, object?>(StringComparer.Ordinal) { ["name"] = "", ["value"] = "" });
+                    }
+                    if (Config["url"] is string { Length: 0 })
+                        Incomplete("PIPELINE_INPUT_MISSING", "The request URL called Quickbase and has no PowerBase equivalent; set the PowerBase endpoint before turning the PowerFlow on.");
+                    var bodyIds = QuickbaseApiUrlMap.BodyTableIds(Setting("Body")?.ToString());
+                    var unknown = bodyIds.Where(t => reader.Index.TableByQbId(t) is null).ToList();
+                    if (unknown.Count > 0)
+                        Incomplete("PIPELINE_REQUEST_NEEDS_REVIEW", $"The request body names Quickbase table '{string.Join("', '", unknown)}', which is not one of the imported tables; put the PowerBase table id there before turning the PowerFlow on.");
+                    else if (bodyIds.Count > 0)
+                        Config["body"] = BodyWithTables(Config["body"], bodyIds);
                 }
                 else if (url is not null)
                     Config["url"] = Text(url, "URL");
@@ -1912,10 +2056,12 @@ public static class QblPipelineConverter
                 return QuickbaseApiUrlMap.Map(method, absolute, body, out _) is { } mapped && Resolve(mapped) is not null;
             }
 
-            private List<object>? Resolve(QuickbaseApiUrlMap.Mapped mapped)
+            private List<object>? Resolve(QuickbaseApiUrlMap.Mapped mapped) => Resolve(mapped.Path);
+
+            private List<object>? Resolve(IEnumerable<QuickbaseApiUrlMap.Part> path)
             {
                 var parts = new List<object>();
-                foreach (var part in mapped.Path)
+                foreach (var part in path)
                     switch (part)
                     {
                         case QuickbaseApiUrlMap.Literal literal: parts.Add(literal.Text); break;
@@ -1923,16 +2069,23 @@ public static class QblPipelineConverter
                             parts.Add(new PblPipelineTableValue(found.App, found.Table)); break;
                         case QuickbaseApiUrlMap.AppId app when (reader.Index.AppByQbId(app.QbAppId) ?? (reader.Index.Apps.Count == 1 ? reader.Index.Apps.First() : null)) is { } appRef:
                             parts.Add(new PblPipelineAppValue(appRef)); break;
+                        case QuickbaseApiUrlMap.XmlDbId db when reader.Index.TableByQbId(db.QbId) is { } dbTable:
+                            parts.Add(new PblPipelineTableValue(dbTable.App, dbTable.Table)); break;
+                        case QuickbaseApiUrlMap.XmlDbId db when reader.Index.AppByQbId(db.QbId) is { } dbApp:
+                            parts.Add(new PblPipelineAppValue(dbApp)); break;
                         default: return null;
                     }
                 return parts;
             }
 
             /// <summary>Quickbase API URL -> the PowerBase endpoint that does the same (relative path, run inside PowerBase by the
-            /// PowerBase account). Quickbase's own auth headers are dropped: the PowerBase account authenticates the call.</summary>
+            /// PowerBase account). The Quickbase-compatible /v1 endpoints keep Quickbase's path and body; only the table / app ids
+            /// (URL and body from/to/tableId) become the imported ones. Quickbase's own auth / realm headers are dropped: the
+            /// PowerBase account authenticates the call.</summary>
             private bool MapQuickbaseApi(Uri absolute, out string reason)
             {
-                var mapped = QuickbaseApiUrlMap.Map(Config["method"]?.ToString() ?? "GET", absolute, Setting("Body")?.ToString(), out reason);
+                var rawBody = Setting("Body")?.ToString();
+                var mapped = QuickbaseApiUrlMap.Map(Config["method"]?.ToString() ?? "GET", absolute, rawBody, out reason);
                 if (mapped is null)
                     return false;
                 if (Resolve(mapped) is not { } parts)
@@ -1940,9 +2093,19 @@ public static class QblPipelineConverter
                     reason = "the Quickbase table or app id it uses is not one of the imported tables";
                     return false;
                 }
-                Config["url"] = new PblPipelineTextValue(parts);
+                var unknownBodyIds = mapped.BodyTableIds.Where(t => reader.Index.TableByQbId(t) is null).ToList();
+                if (unknownBodyIds.Count > 0)
+                {
+                    reason = $"the body names Quickbase table '{string.Join("', '", unknownBodyIds)}', which is not one of the imported tables";
+                    return false;
+                }
+                Config["url"] = parts.All(p => p is string) ? string.Concat(parts) : new PblPipelineTextValue(parts);
                 var originalMethod = Config["method"]?.ToString();
                 Config["method"] = mapped.Method;
+                if (rawBody is not null && mapped.BodyTableIds.Count > 0)
+                    Config["body"] = BodyWithTables(Config["body"], mapped.BodyTableIds);
+                if (string.IsNullOrWhiteSpace(Config["contentType"]?.ToString()) && mapped.Method != "GET")
+                    Config["contentType"] = "application/json";
                 if (Config["headersList"] is List<object?> headers)
                 {
                     var kept = headers.OfType<Dictionary<string, object?>>()
@@ -1951,11 +2114,35 @@ public static class QblPipelineConverter
                         .Cast<object?>().ToList();
                     Config["headersList"] = kept.Count > 0 ? kept : new List<object?> { new Dictionary<string, object?>(StringComparer.Ordinal) { ["name"] = "", ["value"] = "" } };
                 }
+                var methodNote = string.Equals(originalMethod, mapped.Method, StringComparison.OrdinalIgnoreCase) ? "" : $" (method {originalMethod} → {mapped.Method}, the only one Quickbase accepts there)";
                 reader.Note(source, "PIPELINE_REQUEST_URL_MAPPED",
-                    $"The Quickbase API call '{originalMethod} {absolute}' was changed to the PowerBase endpoint '{mapped.Endpoint}'.", changesExecution: false);
-                if (mapped.BodyDiffers)
+                    $"The Quickbase API call '{originalMethod} {absolute}' was changed to the PowerBase endpoint '{mapped.Endpoint}'{methodNote}.", changesExecution: false);
+                if (mapped.ResponseDiffers)
                     Incomplete("PIPELINE_REQUEST_BODY_FORMAT", $"The request now calls PowerBase '{mapped.Endpoint}', whose request and response format differ from Quickbase's; check the body and the steps that read the response before turning the PowerFlow on.");
+                if (mapped.Review is { } review)
+                    Incomplete("PIPELINE_REQUEST_NEEDS_REVIEW", $"The request now calls PowerBase '{mapped.Endpoint}', but {review}. Fix it before turning the PowerFlow on.");
                 return true;
+            }
+
+            /// <summary>The body with each Quickbase table id after from / to / tableId replaced by the imported table's id.</summary>
+            private object? BodyWithTables(object? body, IReadOnlyList<string> qbTableIds)
+            {
+                List<object>? Split(string text) =>
+                    QuickbaseApiUrlMap.SplitBody(text, qbTableIds) is { } split ? Resolve(split) : null;
+                switch (body)
+                {
+                    case string text when Split(text) is { } parts:
+                        return new PblPipelineTextValue(parts);
+                    case PblPipelineTextValue value:
+                        var all = new List<object>();
+                        foreach (var part in value.Parts)
+                            if (part is string piece && Split(piece) is { } pieces) all.AddRange(pieces);
+                            else all.Add(part);
+                        return new PblPipelineTextValue(all);
+                    default:
+                        Incomplete("PIPELINE_REQUEST_NEEDS_REVIEW", $"The request body names Quickbase table '{string.Join("', '", qbTableIds)}' inside an expression; put the imported table's id there before turning the PowerFlow on.");
+                        return body;
+                }
             }
 
             /// <summary>Quickbase "Incoming Request" → PowerFlows' webhook trigger. PowerFlows gives it a new URL.</summary>

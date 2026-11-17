@@ -22,6 +22,10 @@ public sealed class QblFieldMapping
     public bool? IsSearchable { get; init; }
     public bool? IsReportable { get; init; }
 
+    /// <summary>SingleSelect/MultiSelect only — see <see cref="PowerBase.Application.Import.Pbl.PblField.ChoiceSourceTableRef"/>.</summary>
+    public string? ChoiceSourceTableRef { get; init; }
+    public string? ChoiceSourceFieldRef { get; init; }
+
     public List<string> Notes { get; init; } = [];
 }
 
@@ -47,6 +51,8 @@ public static class QblFieldMapper
     {
         var notes = new List<string>();
         var s = new Dictionary<string, object?>(StringComparer.Ordinal);
+        string? choiceSourceTableRef = null;
+        string? choiceSourceFieldRef = null;
 
         var isFormula = pbTypeCode.StartsWith("Formula_", StringComparison.Ordinal);
         var baseType = isFormula ? pbTypeCode["Formula_".Length..] : pbTypeCode;
@@ -72,8 +78,19 @@ public static class QblFieldMapper
 
             case "SingleSelect":
             case "MultiSelect":
-                var options = Choices(node);
-                if (options.Count > 0) s["options"] = options;
+                var fromAnotherField = string.Equals(Str(Node(node, "InputOptions"), "InputType"), "FromAnotherField", StringComparison.OrdinalIgnoreCase);
+                var choiceSource = fromAnotherField ? MapChoiceSource(node) : null;
+                if (choiceSource is { } cs)
+                {
+                    (choiceSourceTableRef, choiceSourceFieldRef) = cs;
+                }
+                else
+                {
+                    if (fromAnotherField)
+                        notes.Add("The choices come from another field's values in Quickbase, but which field could not be determined from the import file; set the field's \"choices from another field\" setting manually in PowerBase.");
+                    var options = Choices(node);
+                    if (options.Count > 0) s["options"] = options;
+                }
                 if (baseType == "SingleSelect" && Int(node, "MaxLength") is > 0 and var selectMax) s["maxLength"] = selectMax;
                 break;
 
@@ -167,6 +184,8 @@ public static class QblFieldMapper
             IsAuditable = Bool(node, "IsAuditable") == true ? true : null,
             IsSearchable = Bool(node, "IsSearchable") == false ? false : null,
             IsReportable = Bool(node, "AllowedInReports") == false ? false : null,
+            ChoiceSourceTableRef = choiceSourceTableRef,
+            ChoiceSourceFieldRef = choiceSourceFieldRef,
             Notes = notes,
         };
     }
@@ -267,6 +286,19 @@ public static class QblFieldMapper
     }
 
     // ---- choices ----
+
+    /// <summary>The Table/Field refs a "choices come from another field" source field's choices come from (caller has already
+    /// confirmed InputOptions.InputType is "FromAnotherField"). The exact property that carries this reference is not yet
+    /// confirmed against a real export (it occurs only once across every sample file this project has audited), so this looks
+    /// for a cross-reference anywhere under InputOptions rather than a specific key — there is only ever one on a field, so
+    /// this cannot pick the wrong one. Returns null (never guessed) when no usable reference is found, so the caller falls
+    /// back to a plain, choice-less select field and a clear import note instead of a wrong one.</summary>
+    private static (string? TableRef, string FieldRef)? MapChoiceSource(QblResourceNode node)
+    {
+        var reference = Node(node, "InputOptions")?.Values.OfType<QblRef>().FirstOrDefault();
+        var fieldRef = reference?["Field"];
+        return fieldRef is null ? null : (reference!["Table"], fieldRef);
+    }
 
     private static List<string> Choices(QblResourceNode node)
     {

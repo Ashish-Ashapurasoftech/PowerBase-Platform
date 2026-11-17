@@ -81,7 +81,7 @@ public class ImportTests : IntegrationTestBase
         var report = await ReadReport(response);
         report.AppName.Should().Be("Imported App");
         report.TablesCreated.Should().Be(1);
-        report.FieldsCreated.Should().Be(2); // Legacy Score is skipped
+        report.FieldsCreated.Should().Be(3); // Legacy Score is kept as a placeholder Text field, never dropped
         report.Skipped.Should().ContainSingle(s => s.Name == "Legacy Score");
 
         var getAppResponse = await GetAsync($"/apps/{report.AppPublicId}", token);

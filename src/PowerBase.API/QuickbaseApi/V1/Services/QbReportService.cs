@@ -92,9 +92,8 @@ public sealed class QbReportService
                 FormulaFields = def.ReportFormulas.Select(f => new QbFormulaField(
                     f.Id, f.Name, QbFieldTypeMap.Map(f.TypeCode).FieldType, QbFieldPropertiesBuilder.QbFormula(f.Expression) ?? "", null)).ToList(),
                 Fields = type != "table" ? null
-                    : def.Columns.Count > 0 ? def.Columns.ToList()
-                    // "Default" columns: the report shows every field the caller can see, so list what a run returns.
-                    : (await _runReport.HandleAsync(new RunReportQuery(reportId, 1, 1), ct)).Columns.Select(c => c.FieldId).ToList(),
+                    // "Default" columns: Quickbase answers an empty list (live realm, List All: "fields": []).
+                    : def.Columns.ToList(),
                 SortBy = type != "table" ? null : SortBy(report.ReportType, def),
                 GroupBy = type == "chart" ? null : GroupBy(report.ReportType, def),
             },
@@ -228,6 +227,13 @@ public sealed class QbReportService
 
         var isTable = report.ReportType == "Table";
         var columns = first.Columns;
+        if (isTable && (await _getReport.HandleAsync(new GetReportQuery(reportId), ct)).Definition.Columns.Count == 0)
+        {
+            // A report on the table's default columns shows the fields that appear by default — not the built-in fields 1-5 —
+            // in field id order (live realm: List All).
+            columns = columns.Where(c => byFid.TryGetValue(c.FieldId, out var f) && QbFieldShape.AppearsByDefault(f))
+                .OrderBy(c => c.FieldId).ToList();
+        }
         if (!isTable)
         {
             // The automatic record-count column is only shown when the report asks for it (as in Quickbase).

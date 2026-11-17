@@ -1,5 +1,6 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Formulas;
 using PowerBase.Application.Relationships.Queries;
 using PowerBase.Application.Reports;
@@ -23,14 +24,17 @@ public class UpdateReferenceFilterCommandHandler
     private readonly IAppFieldRepository _fieldRepo;
     private readonly RelationshipQueriesHandler _queries;
     private readonly IAuditRepository _auditRepo;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public UpdateReferenceFilterCommandHandler(
         IRelationshipRepository relRepo,
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         RelationshipQueriesHandler queries,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _relRepo = relRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -105,6 +109,7 @@ public class UpdateReferenceFilterCommandHandler
         if (command.FilterDisabled is bool disabled) settings.FilterDisabled = disabled ? true : null;
         if (command.ShowAllWhenBlank is bool showAll) settings.ShowAllWhenBlank = showAll ? true : null;
         await _fieldRepo.UpdateSettingsAsync(referenceField.Id, JsonSerializer.Serialize(settings, JsonOpts), ct);
+        await _refIndexer.ReindexFieldAsync(referenceField.PublicId, ct); // Usage tab: which fields control the dropdown
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, referenceField.Id.ToString(),

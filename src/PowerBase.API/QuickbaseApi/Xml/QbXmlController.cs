@@ -49,6 +49,7 @@ public sealed class QbXmlController : ControllerBase
             var response = await _dispatcher.DispatchAsync(req, ct);
             if (response.Html is { } html)
                 return new ContentResult { Content = html, ContentType = "text/html; charset=utf-8", StatusCode = 200 };
+            if (response.Raw is { } raw) return Xml(raw, 200);
             return Xml(response.ToXml(req.Udata), 200);
         }
         catch (OperationCanceledException) { throw; }
@@ -57,7 +58,9 @@ public sealed class QbXmlController : ControllerBase
             var err = QbXmlErrors.From(ex);
             if (ex is not (QbXmlException or Domain.Exceptions.DomainException or Common.QbApiException or UnauthorizedAccessException))
                 _logger.LogError(ex, "Quickbase XML call {Action} on {DbId} failed", action, dbid);
-            return Xml(new QbXmlResponse(action).ToXml(req?.Udata, err.Code, err.Message, err.Detail, err.Extra), QbXmlErrors.HttpStatus(err.Code));
+            var errorXml = new QbXmlResponse(action).ToXml(req?.Udata, err.Code, err.Message, err.Detail, err.Extra);
+            if (QbXmlQueryActions.UsesCrlf(action)) errorXml = QbXmlQueryActions.ToCrlf(errorXml);
+            return Xml(errorXml, QbXmlErrors.HttpStatus(err.Code));
         }
     }
 

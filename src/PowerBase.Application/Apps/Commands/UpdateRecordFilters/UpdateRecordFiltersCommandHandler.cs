@@ -1,6 +1,7 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Common.Models;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Validation;
 using PowerBase.Domain.Constants;
@@ -18,6 +19,7 @@ public class UpdateRecordFiltersCommandHandler
     private readonly IAuditRepository _auditRepo;
     private readonly IQueryContext _queryContext;
     private readonly IAppUserRepository _appUserRepo;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public UpdateRecordFiltersCommandHandler(
         IAppRoleRepository appRoleRepo,
@@ -26,8 +28,10 @@ public class UpdateRecordFiltersCommandHandler
         IAppFieldRepository fieldRepo,
         IAuditRepository auditRepo,
         IQueryContext queryContext,
-        IAppUserRepository appUserRepo)
+        IAppUserRepository appUserRepo,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _appRoleRepo = appRoleRepo;
         _permRepo = permRepo;
         _tableRepo = tableRepo;
@@ -119,6 +123,8 @@ public class UpdateRecordFiltersCommandHandler
         }
 
         await _permRepo.SetRecordFiltersAsync(role.Id, rows, null, ct);
+        // Usage tab: all of the role's rules were just replaced, so all of its index rows are too.
+        await _refIndexer.ReindexCustomRulesAsync(role.PublicId, ct);
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Updated, AuditEntityTypes.AppRole, role.Id.ToString(),

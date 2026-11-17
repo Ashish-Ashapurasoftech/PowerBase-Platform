@@ -9,6 +9,9 @@ public sealed class ImportSkippedItem
     public string LogicalRef { get; init; } = string.Empty;
     public string Name { get; init; } = string.Empty;
     public string Reason { get; init; } = string.Empty;
+
+    /// <summary>The importer's stable code for this item (e.g. "QBL_UNSUPPORTED_FIELD_TYPE"); empty when it had none.</summary>
+    public string Code { get; init; } = string.Empty;
 }
 
 /// <summary>Per-formula outcome of the formula translation pass — clean, or needs manual

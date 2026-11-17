@@ -306,10 +306,13 @@ public class QblToPblConverterTests
                   Explanation: The QB::Field::Reference for this QB::Field::Lookup is referring to a deleted, or otherwise missing, field.
             """));
 
-        result.Document.Tables[0].Fields.Should().BeEmpty();
+        // Never dropped: a plain Text field keeps its place, and the explanation is carried verbatim.
+        var placeholder = result.Document.Tables[0].Fields.Should().ContainSingle().Subject;
+        placeholder.TypeCode.Should().Be("Text");
+        placeholder.Placeholder!.Reason.Should().Be("The QB::Field::Reference for this QB::Field::Lookup is referring to a deleted, or otherwise missing, field");
         result.Issues.Should().ContainSingle(i =>
             i.Code == "QBL_UNSUPPORTED_FIELD_TYPE" &&
-            i.Message == "The QB::Field::Reference for this QB::Field::Lookup is referring to a deleted, or otherwise missing, field.");
+            i.Message.StartsWith("The QB::Field::Reference for this QB::Field::Lookup is referring to a deleted, or otherwise missing, field"));
     }
 
     [Theory]
@@ -351,22 +354,30 @@ public class QblToPblConverterTests
     }
 
     [Theory]
-    [InlineData("QB::Field::Reference")]
-    [InlineData("QB::Field::Lookup")]
-    [InlineData("QB::Field::Summary")]
-    [InlineData("QB::Field::ReportLink")]
-    public void Convert_RelationshipFamilyFields_NotCreatedAsStandaloneFields(string qblType)
+    [InlineData("QB::Field::Reference", "Number", "QBL_REFERENCE_MISSING_RELATIONSHIP")]
+    [InlineData("QB::Field::Lookup", "Text", "QBL_LOOKUP_MISSING_RELATIONSHIP")]
+    [InlineData("QB::Field::Summary", "Text", "QBL_SUMMARY_UNRESOLVED_REFERENCE")]
+    [InlineData("QB::Field::ReportLink", "Text", "QBL_REPORT_LINK_TARGET_UNAVAILABLE")]
+    public void Convert_RelationshipFamilyFieldWithoutARelationship_KeepsItsPlaceAsAPlaceholder(string qblType, string expectedType, string expectedCode)
     {
-        // Slice 2 folds these into PblRelationship - Slice 1 just skips them (no issue, since
-        // this is expected until Slice 2 lands, not a genuine unsupported-type gap).
+        // A reference / lookup / summary / report link that never becomes part of a relationship is not dropped: a plain field with the
+        // same name keeps its place, and the placeholder carries what the source said about it.
         var result = Convert(TableWithFields($"""
               $Field_Rel:
                 Type: {qblType}
+                Id: 77
                 Properties:
                   Label: Related
             """));
 
-        result.Document.Tables[0].Fields.Should().BeEmpty();
+        var field = result.Document.Tables[0].Fields.Should().ContainSingle().Subject;
+        field.Name.Should().Be("Related");
+        field.TypeCode.Should().Be(expectedType);
+        field.SourceId.Should().Be(77);
+        field.Placeholder.Should().NotBeNull();
+        field.Placeholder!.Code.Should().Be(expectedCode);
+        field.Placeholder.OriginalMetadataJson.Should().Contain(qblType);
+        result.Issues.Should().Contain(i => i.Code == expectedCode && i.Message.Contains("placeholder"));
     }
 
     [Fact]
@@ -379,7 +390,9 @@ public class QblToPblConverterTests
                   Label: Weird
             """));
 
-        result.Document.Tables[0].Fields.Should().BeEmpty();
+        var placeholder = result.Document.Tables[0].Fields.Should().ContainSingle().Subject;
+        placeholder.TypeCode.Should().Be("Text");
+        placeholder.Placeholder!.OriginalMetadataJson.Should().Contain("QB::Field::SomeFutureType");
         result.Issues.Should().ContainSingle(i => i.Code == "QBL_UNKNOWN_FIELD_TYPE");
     }
 
