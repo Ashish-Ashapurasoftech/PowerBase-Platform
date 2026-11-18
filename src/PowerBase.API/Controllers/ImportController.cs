@@ -24,7 +24,7 @@ namespace PowerBase.API.Controllers;
 public class ImportController : ControllerBase
 {
     // Real QBL exports run to several MB (a 95-table app is ~9 MB).
-    private const long UploadLimit = 64L * 1024 * 1024;
+    private const long UploadLimit = 500L * 1024 * 1024;
 
     private readonly ImportPreviewQueryHandler _previewHandler;
     private readonly ImportAppFromPblCommandHandler _importHandler;

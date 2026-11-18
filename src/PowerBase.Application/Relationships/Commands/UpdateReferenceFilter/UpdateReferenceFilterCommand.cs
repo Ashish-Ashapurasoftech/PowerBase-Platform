@@ -3,11 +3,15 @@ using PowerBase.Application.Reports;
 namespace PowerBase.Application.Relationships.Commands.UpdateReferenceFilter;
 
 /// <summary>Replace a relationship's dependent-dropdown filter: the older <paramref name="Conditions"/> (empty
-/// clears them) and the filter tree (null/empty clears it).</summary>
+/// clears them) and the filter tree (null/empty clears it). <paramref name="FilterDisabled"/> and
+/// <paramref name="ShowAllWhenBlank"/> set those switches (see <see cref="PowerBase.Domain.FieldSettings.ReferenceSettings"/>);
+/// null leaves the stored value as it is.</summary>
 public record UpdateReferenceFilterCommand(
     Guid RelationshipPublicId,
     IReadOnlyList<ReferenceFilterConditionInput> Conditions,
-    FilterGroup? FilterTree = null);
+    FilterGroup? FilterTree = null,
+    bool? FilterDisabled = null,
+    bool? ShowAllWhenBlank = null);
 
 /// <summary>One condition as sent by the client: <see cref="JunctionTablePublicId"/> set = junction mode
 /// (uses the two junction Fids), otherwise direct mode (uses <see cref="ParentFid"/>).</summary>

@@ -116,6 +116,7 @@ using PowerBase.Infrastructure.Repositories;
 using PowerBase.Infrastructure.Services;
 using PowerBase.Infrastructure.UOW;
 using Serilog;
+using Azure.Monitor.OpenTelemetry.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -150,9 +151,27 @@ builder.Services.AddCors(options =>
         }
         policy.AllowAnyHeader()
               .AllowAnyMethod()
-              .AllowCredentials();
+              .AllowCredentials()
+              // Every API call carries an Authorization header, so the browser sends an OPTIONS preflight first. Without a
+              // max age it re-asks within seconds, doubling the round trips; 2 hours is the most Chromium honours.
+              .SetPreflightMaxAge(TimeSpan.FromHours(2));
     });
 });
+
+// Request, SQL and HTTP dependency, and Live Metrics telemetry for Application Insights. App Service supplies
+// APPLICATIONINSIGHTS_CONNECTION_STRING; without one (local runs) nothing is added. The App Service codeless agent does not
+// instrument this .NET 8 app on Linux, so the app does it itself.
+var azureMonitorConnection = builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"]
+    ?? builder.Configuration["ApplicationInsights:ConnectionString"];
+if (!string.IsNullOrWhiteSpace(azureMonitorConnection) && !azureMonitorConnection.StartsWith("<"))
+{
+    builder.Services.AddOpenTelemetry().UseAzureMonitor(o =>
+    {
+        o.ConnectionString = azureMonitorConnection;
+        // The background workers poll SQL every few seconds; sampling keeps that volume, and the ingestion bill, down.
+        o.SamplingRatio = builder.Configuration.GetValue("ApplicationInsights:SamplingRatio", 0.25f);
+    });
+}
 
 
 builder.Services.AddControllers();
@@ -179,6 +198,22 @@ builder.Services.AddSwaggerGen(c =>
 
 // Infrastructure
 builder.Services.AddMemoryCache();
+builder.Services.Configure<PowerBase.Application.Common.Configurations.MetadataCacheOptions>(builder.Configuration.GetSection(PowerBase.Application.Common.Configurations.MetadataCacheOptions.SectionName));
+builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.IMetadataCache, PowerBase.Infrastructure.Services.MetadataCache>();
+builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.IRequestOriginRegistry, PowerBase.Infrastructure.Services.RequestOriginRegistry>();
+builder.Services.Configure<PowerBase.API.Middleware.ServerTimingOptions>(builder.Configuration.GetSection(PowerBase.API.Middleware.ServerTimingOptions.SectionName));
+builder.Services.AddScoped<PowerBase.Infrastructure.Services.ServerTiming>();
+builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IServerTiming>(sp => sp.GetRequiredService<PowerBase.Infrastructure.Services.ServerTiming>());
+// JSON responses (report rows, field lists) compress to a fraction of their size; the SPA is on another origin, so this also matters over HTTPS.
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+    options.Providers.Add<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProvider>();
+    options.Providers.Add<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProvider>();
+    options.MimeTypes = Microsoft.AspNetCore.ResponseCompression.ResponseCompressionDefaults.MimeTypes.Concat(["application/json"]);
+});
+builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
+builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
 builder.Services.AddHttpClient();
 builder.Services.AddHttpClient("PipelineMakeRequest").ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
 {
@@ -369,6 +404,7 @@ builder.Services.AddScoped<IAppCopyRepository, AppCopyRepository>();
 builder.Services.AddSingleton<IAppCopyProgressStore, PowerBase.Infrastructure.Services.AppCopyProgressStore>();
 builder.Services.AddScoped<IAppVariableRepository, AppVariableRepository>();
 builder.Services.AddScoped<IImportSourceRefRepository, ImportSourceRefRepository>();
+builder.Services.AddScoped<IAppFieldImportNoteRepository, AppFieldImportNoteRepository>();
 builder.Services.AddScoped<IAppImportJobRepository, AppImportJobRepository>();
 builder.Services.AddScoped<IEmailTemplateRepository, EmailTemplateRepository>();
 builder.Services.AddSingleton<PowerBase.Application.Import.Jobs.AppImportJobQueue>();
@@ -419,6 +455,7 @@ builder.Services.AddScoped<PowerBase.Application.Imports.IPowerFlowImportActions
 builder.Services.AddScoped<PowerBase.Application.Imports.StartPowerFlowImportHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.ListAppImportDefinitionsHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.ValidateImportFormulaHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.ValidatePipelineFormula.ValidatePipelineFormulaHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.ListImportHistoryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.Files.ColumnFitHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.IReferenceOriginalFields, PowerBase.Application.Imports.ReferenceOriginalFields>();
@@ -443,6 +480,7 @@ builder.Services.AddScoped<IReportRepository, ReportRepository>();
 builder.Services.AddScoped<IFieldReferenceRepository, FieldReferenceRepository>();
 builder.Services.AddScoped<PowerBase.Application.FieldReferences.IFieldReferenceIndexer, PowerBase.Application.FieldReferences.FieldReferenceIndexer>();
 builder.Services.AddScoped<PowerBase.Application.FieldReferences.RebuildFieldReferencesCommandHandler>();
+builder.Services.AddHostedService<PowerBase.API.Workers.PipelineReferenceSyncWorker>();
 builder.Services.AddScoped<PowerBase.Application.Search.Commands.BackfillSearchIndex.BackfillSearchIndexCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Search.Commands.SanitizeEncryptedData.SanitizeEncryptedDataCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IExemptFieldEncryptionCleanupService, PowerBase.Infrastructure.Services.ExemptFieldEncryptionCleanupService>();
@@ -531,10 +569,13 @@ builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportPreview.Im
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblExtrasImporter>();
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblDeferredResolver>();
 builder.Services.AddScoped<PowerBase.Application.Import.Services.ImportFieldSanitizer>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.ImportFieldNoteRecorder>();
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblSettingsApplier>();
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblPermissionsApplier>();
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblConnectedTablesApplier>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PendingConnectedTableResolver>();
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblPipelinesImporter>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PipelineOnlyImportService>();
 builder.Services.AddScoped<PowerBase.Application.Import.Diff.ImportDiffBuilder>();
 builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportDiff.ImportDiffQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Import.Commands.UpdateAppFromPbl.UpdateAppFromPblCommandHandler>();
@@ -593,6 +634,7 @@ builder.Services.AddScoped<FieldVersionService>();
 builder.Services.AddScoped<ListFieldsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Queries.ListFields.ListAllFieldsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Queries.GetField.GetFieldQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Fields.ImportNotes.FieldImportNotesHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Queries.ListFieldTypes.ListFieldTypesQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Queries.GetFieldUsage.GetFieldUsageQueryHandler>();
 builder.Services.AddScoped<ListFieldVersionsQueryHandler>();
@@ -632,6 +674,7 @@ builder.Services.AddHostedService<PowerBase.API.Workers.ReferenceRelinkWorker>()
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.RelationshipQueriesHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetParentOptionsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.IsParentAllowedQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetControllingFillQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetParentRecordQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetChildRecordsForParentQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Commands.SetKey.SetKeyCommandHandler>();
@@ -664,6 +707,20 @@ builder.Services.AddScoped<PowerBase.Application.Reports.Queries.ListReportPicke
 builder.Services.AddScoped<ResolveDefaultReportQueryHandler>();
 builder.Services.AddScoped<RunReportQueryHandler>();
 builder.Services.AddScoped<ExportReportQueryHandler>();
+// Quickbase-compatible API v1 (QuickbaseApi/V1) — new services only; existing registrations unchanged.
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbSchemaService>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Common.QbIdResolver>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbReferenceTypes>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbReportService>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbUserValueResolver>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbRecordService>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.V1.Services.QbFileService>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbXmlDispatcher>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbXmlRecordActions>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbXmlQueryActions>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbXmlUserActions>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbUserProvisioning>();
+builder.Services.AddScoped<PowerBase.API.QuickbaseApi.Xml.QbXmlImportActions>();
 builder.Services.AddScoped<PowerBase.Application.Reports.Queries.GetRolesReportsMatrix.GetRolesReportsMatrixQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Reports.Commands.UpdateReportVisibilityMatrix.UpdateReportVisibilityMatrixCommandHandler>();
 builder.Services.AddScoped<ListUsersQueryHandler>();
@@ -741,7 +798,9 @@ PowerBase.API.ConnectedTables.ConnectedTablesApiExtensions.AddConnectedTablesMod
 var app = builder.Build();
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
+app.UseResponseCompression();
 app.UseCors("Frontend");
+app.UseMiddleware<PowerBase.API.Middleware.ServerTimingMiddleware>();
 
 if (app.Environment.IsDevelopment())
 {
@@ -767,7 +826,10 @@ app.UseStaticFiles(new StaticFileOptions
 });
 
 app.UseMiddleware<QueryContextMiddleware>();
+// Quickbase XML API (/db/*): copies a usertoken/ticket request parameter into the Authorization header. Other paths untouched.
+app.UseMiddleware<PowerBase.API.QuickbaseApi.Xml.QbXmlTokenMiddleware>();
 app.UseMiddleware<JwtMiddleware>();
+app.UseMiddleware<PowerBase.API.Middleware.RequestOriginMiddleware>();
 app.MapControllers();
 // Liveness of the search pipeline (workers, outbox backlog, search service): counts and times only, no record data. Point an uptime probe
 // or Azure Monitor availability test at it.

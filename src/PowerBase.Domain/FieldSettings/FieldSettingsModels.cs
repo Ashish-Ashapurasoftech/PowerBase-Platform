@@ -635,6 +635,18 @@ public sealed class ReferenceSettings
     /// together with <see cref="FilterConditions"/>. Null = no tree filter.</summary>
     public string? FilterTree { get; set; }
 
+    /// <summary>True = the dropdown filter is switched off: every parent record is offered and nothing is checked on
+    /// save, while <see cref="FilterConditions"/> and <see cref="FilterTree"/> are kept to switch back on.
+    /// Null/false = the filter applies (as before this setting existed).</summary>
+    public bool? FilterDisabled { get; set; }
+
+    /// <summary>True = while a controlling form field is still blank, its comparison is left out, so the dropdown offers
+    /// every record the rest of the filter allows (and such a choice can be saved). A record picked that way also fills
+    /// that blank field from itself — an Activity picked first fills the Task Type with the Activity's Task Type ("equals"
+    /// comparisons only; see Queries.GetControllingFillQueryHandler). Null/false = a blank controlling field offers
+    /// nothing until a selection is made.</summary>
+    public bool? ShowAllWhenBlank { get; set; }
+
     /// <summary>Show this field's value as a link that opens the parent record (Quickbase's DisplayAsLinkToParent).
     /// Off by default.</summary>
     public bool DisplayAsLinkToParent { get; set; }

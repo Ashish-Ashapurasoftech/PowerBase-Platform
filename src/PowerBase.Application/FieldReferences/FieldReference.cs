@@ -7,8 +7,21 @@ public static class FieldReferenceSourceTypes
     public const string Form = "Form";
     public const string FormRule = "FormRule";
     public const string Field = "Field";
+    /// <summary>A relationship (meta.Relationship), filed under its CHILD table — the one that owns the reference field.</summary>
+    public const string Relationship = "Relationship";
+    /// <summary>A dashboard page (meta.Page). One page can use fields of several tables.</summary>
+    public const string Dashboard = "Dashboard";
+    /// <summary>One role's Custom Rules (meta.AppRoleRecordFilter rows). The source id is the ROLE's id because
+    /// saving the rules replaces every filter row of the role at once, so row ids never survive a save.</summary>
+    public const string CustomRule = "CustomRule";
+    /// <summary>A PowerFlow (meta.Pipeline). The source id is the pipeline's id; one pipeline can use fields of several
+    /// tables, so each row is filed under the table of the field it uses and the Usage is <see cref="FieldReferenceUsages.PowerFlowStep"/> + the step's RefId.</summary>
+    public const string PowerFlow = "PowerFlow";
+    /// <summary>A saved import (meta.ImportDefinition). It can read one table and fill several, so each row is filed under the table of
+    /// the field it names.</summary>
+    public const string Import = "Import";
 
-    public static readonly string[] All = [Report, Form, FormRule, Field];
+    public static readonly string[] All = [Report, Form, FormRule, Field, Relationship, Dashboard, CustomRule, PowerFlow, Import];
 }
 
 /// <summary>How a source uses the field. Stored in meta.FieldReference.Usage.</summary>
@@ -40,6 +53,30 @@ public static class FieldReferenceUsages
     public const string Summary = "summary";
     public const string ReportLink = "report-link";
     public const string ActionButton = "action-button";
+    /// <summary>A Reference field's dropdown filter reads this field.</summary>
+    public const string ReferenceFilter = "reference-filter";
+
+    // Relationship
+    public const string RelationshipReference = "reference-field";
+    public const string RelationshipKey = "key-field";
+    public const string RelationshipDisplayKey = "display-key";
+    public const string RelationshipDisplayLabel = "display-label";
+
+    // Dashboard
+    public const string DashboardFilter = "dashboard-filter";
+    public const string DashboardSearch = "search-field";
+
+    // Custom rule
+    public const string ViewRule = "view-rule";
+    public const string ModifyRule = "modify-rule";
+
+    // PowerFlow: "step:" followed by the step's RefId (the Usage column holds 40 characters). The Usage tab shows the step's label.
+    public const string PowerFlowStep = "step:";
+
+    // Import (a filter or formula in an import reuses Filter / Formula)
+    public const string WritesTo = "writes-to";
+    public const string ReadsFrom = "reads-from";
+    public const string MatchKey = "match-key";
 }
 
 /// <summary>One row of meta.FieldReference: <see cref="SourceType"/>/<see cref="SourceId"/> uses
@@ -60,4 +97,8 @@ public sealed record FieldReferenceItem(
     /// <summary>For a FormRule: the form it belongs to (null otherwise).</summary>
     Guid? ParentPublicId,
     string? ParentName,
-    string Usage);
+    string Usage,
+    /// <summary>For a Report: who owns it (null otherwise).</summary>
+    long? OwnerId = null,
+    /// <summary>For a Report: "Personal", "Shared", "MyRole", "SpecificRoles" or "Hidden" (null otherwise).</summary>
+    string? Visibility = null);

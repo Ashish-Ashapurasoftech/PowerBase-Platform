@@ -16,6 +16,10 @@ public interface IFieldVersionRepository
     /// <summary>Current (highest) version number for a field, or 0 if it has never been versioned.</summary>
     Task<int> GetCurrentVersionNumberAsync(long appFieldId, CancellationToken ct = default);
 
+    /// <summary>Appends a version on its own connection and transaction (the import has no unit of work to join): numbers it, inserts it
+    /// and its change rows together. Returns the new version number.</summary>
+    Task<int> InsertStandaloneVersionAsync(AppFieldVersion version, IReadOnlyList<Fields.Versioning.FieldChangeEntry> changes, CancellationToken ct = default);
+
     Task InsertVersionAsync(AppFieldVersion version, IReadOnlyList<Fields.Versioning.FieldChangeEntry> changes,
         IDbTransaction transaction, CancellationToken ct = default);
 

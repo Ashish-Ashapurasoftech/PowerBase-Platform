@@ -53,4 +53,7 @@ public class AppField
     public long? ModifiedBy { get; set; }
     public DateTime? DeletedOn { get; set; }
     public long? DeletedBy { get; set; }
+
+    /// <summary>A copy the caller may change: the metadata cache hands the same stored fields to every request.</summary>
+    public AppField Clone() => (AppField)MemberwiseClone();
 }

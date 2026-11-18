@@ -187,6 +187,9 @@ public sealed class PblAppFormatting
 
     /// <summary>Date pattern with "-" separators, e.g. "MM-DD-YYYY".</summary>
     public string DateFormat { get; set; } = "MM-DD-YYYY";
+
+    /// <summary>The source app's time zone as an IANA id, or null when the file does not say.</summary>
+    public string? TimeZone { get; set; }
 }
 
 public sealed class PblAppSecurity
@@ -208,6 +211,12 @@ public sealed class PblTable
     public string? Description { get; set; }
     public string? Icon { get; set; }
     public List<PblField> Fields { get; set; } = [];
+
+    /// <summary>powerflowextraRd: the source's own labels for its built-in fields, keyed by PowerBase's default system label
+    /// (e.g. "Last Modified By" → "LastModifiedBy" when the Quickbase app renamed it). Only labels that differ are kept.
+    /// The import gives the seeded system fields these labels, so a custom field that carries the default label in the source
+    /// (Quickbase's formula "Last Modified By", FID 112) keeps it instead of becoming "Last Modified By (2)".</summary>
+    public Dictionary<string, string>? SystemFieldLabels { get; set; }
 
     /// <summary>Report links of the source table that do not belong to a relationship (they match on a field other than the child's
     /// reference field, or are a second link to the same child). Created after the relationships, on the source field number.</summary>
@@ -311,6 +320,46 @@ public sealed class PblField
     public bool? IsAuditable { get; set; }
     public bool? IsSearchable { get; set; }
     public bool? IsReportable { get; set; }
+
+    /// <summary>The source field's type as the source wrote it (e.g. "QB::Field::Currency::Formula"). Informational only —
+    /// kept so an import note and a stand-in field can say what the field was.</summary>
+    public string? SourceType { get; set; }
+
+    /// <summary>Formula fields: the formula exactly as the source had it, before any rewriting (table-id and field-id
+    /// substitutions, dialect fixes). <see cref="FormulaExpression"/> is what gets compiled; this is what is preserved.</summary>
+    public string? OriginalFormula { get; set; }
+
+    /// <summary>Set when this field is a stand-in for a source field that PowerBase cannot create as itself (unsupported type,
+    /// a relationship that does not exist, a link with nothing to open…). <see cref="TypeCode"/> is then the plain type chosen
+    /// to hold its place; everything else the source said is in here.</summary>
+    public PblPlaceholderInfo? Placeholder { get; set; }
+
+    /// <summary>SingleSelect/MultiSelect only: when the source field's choices come live from another field's values
+    /// (Quickbase's "choices come from another field" input type), the other field's fully-qualified <see cref="PblField.LogicalRef"/>
+    /// (same format as every other field's own LogicalRef — table ref + field ref). <see cref="PowerBase.Domain.FieldSettings.ChoiceSourceSettings"/>
+    /// needs a real <c>TableId</c>/<c>Fid</c>, which don't exist yet at conversion time — resolved once every field
+    /// exists (see ImportAppFromPblCommandHandler.ApplyChoiceSourcesAsync) and patched onto the already-created field's Settings.</summary>
+    public string? ChoiceSourceFieldRef { get; set; }
+}
+
+/// <summary>What a stand-in field stands in for — see <see cref="PblField.Placeholder"/>. Never a source of truth for the
+/// field's own behaviour: it is carried to the field's import note unchanged.</summary>
+public sealed class PblPlaceholderInfo
+{
+    /// <summary>The importer's stable code, e.g. "QBL_UNSUPPORTED_FIELD_TYPE".</summary>
+    public string Code { get; set; } = string.Empty;
+
+    /// <summary>Why the source field could not be created as itself, in plain words.</summary>
+    public string Reason { get; set; } = string.Empty;
+
+    /// <summary>The complete original definition (formula text, or a plain-words description of a lookup/summary/link).</summary>
+    public string? OriginalDefinition { get; set; }
+
+    /// <summary>The source field's properties as JSON.</summary>
+    public string? OriginalMetadataJson { get; set; }
+
+    /// <summary>Longer than a field description may be: the full source description, kept so nothing is cut.</summary>
+    public string? FullDescription { get; set; }
 }
 
 public sealed class PblReport
@@ -363,6 +412,29 @@ public sealed class PblReport
 
     /// <summary>Roles allowed to see the report. Null = no restriction information in the source (visible to all with table access).</summary>
     public List<string>? VisibleToRoleRefs { get; set; }
+
+    /// <summary>Table reports only: the source's report-level formula columns (Quickbase's <c>QB::Report::Formula::*</c>), up to
+    /// <see cref="PowerBase.Application.Reports.ReportFormulaFields.MaxFormulas"/>. A formula's name also appears in <see cref="Columns"/>
+    /// at the position it occupied in the source — resolved against the real table's fields and translated to PowerBase formula
+    /// syntax at report-creation time (needs real Fids, the same as a Formula field — see ImportAppFromPblCommandHandler.CreateReportAsync).</summary>
+    public List<PblReportFormula> ReportFormulas { get; set; } = [];
+}
+
+/// <summary>One report-level calculated column from the source, not yet translated (see <see cref="PblReport.ReportFormulas"/>).</summary>
+public sealed class PblReportFormula
+{
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>The source result type, already mapped to the FormulaTranslator's vocabulary ("Text", "Number", "Date", "Bool"
+    /// or "Time" — from Quickbase's Report::Formula::Text/Numeric/NumericPercent/Date/Checkbox/TimeOfDay respectively).</summary>
+    public string ResultType { get; set; } = "Text";
+
+    /// <summary>Numeric only: "Percent" when the source was NumericPercent; otherwise null (plain number).</summary>
+    public string? DisplayAs { get; set; }
+
+    /// <summary>Quickbase-syntax formula text, exactly as the source had it — translated to PowerBase syntax at
+    /// report-creation time, the same split as a Formula field's OriginalFormula/FormulaExpression.</summary>
+    public string Expression { get; set; } = string.Empty;
 }
 
 /// <summary>An AND/OR tree of field conditions — the translation of a Quickbase query.</summary>

@@ -69,6 +69,14 @@ public class UpdateReferenceFilterRequest
     /// with valueMode "parentField" compares to the current value of the form field whose Fid is its
     /// valueFieldId. Null/empty clears the tree filter.</summary>
     public FilterGroup? FilterTree { get; set; }
+
+    /// <summary>True switches the filter off (every parent record offered, the conditions kept); false switches it
+    /// back on. Null leaves it as it is.</summary>
+    public bool? FilterDisabled { get; set; }
+
+    /// <summary>True: while a controlling form field is blank, offer every record instead of none (and allow saving
+    /// such a choice). False: offer none until a selection is made. Null leaves it as it is.</summary>
+    public bool? ShowAllWhenBlank { get; set; }
 }
 
 /// <summary>Junction mode when <see cref="JunctionTableId"/> is set; otherwise direct (<see cref="ParentFid"/>).</summary>

@@ -102,7 +102,8 @@ public sealed class RecordCreatePreparer
     {
         // Reference fields must point at an existing parent record; a value submitted as a
         // human key is resolved to the parent row Id here.
-        var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, submitted, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct);
+        var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, submitted, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct,
+            users: new ReferenceFilterUsers(_userRepo, _appUserRepo));
 
         // Inject default values for fields that were not submitted (e.g. hidden None-access fields).
         // This ensures required fields with defaults are always populated regardless of role restrictions.
@@ -221,6 +222,20 @@ public sealed class RecordCreatePreparer
                     return (true, doc.RootElement.Clone());
                 }
                 catch (JsonException) { return (false, null); }
+
+            // Date/DateTime store a plain 'true'/'false' flag, not a date ("true" = default to today's
+            // date / the current date & time — see coerceDefault in the form renderer). Copying the flag
+            // verbatim wrote the text "true"/"false" into the date column and failed the format check
+            // with "must be a valid date". Resolve "true" to a real value; anything else = no default.
+            case "Date":
+                return string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase)
+                    ? (true, DateTime.UtcNow.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture))
+                    : (false, null);
+
+            case "DateTime":
+                return string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase)
+                    ? (true, DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture))
+                    : (false, null);
 
             case "User":
                 return await ResolveUserDefaultAsync(raw, isMulti: false, ct);

@@ -43,6 +43,34 @@ public static class FieldColumnConversionSql
         JOIN OPENJSON(@json) WITH (id BIGINT '$.id', v NVARCHAR(MAX) '$.v') m ON t.Id = m.id;
         """;
 
+    /// <summary>Plain text an encrypted column stores before encrypting, in the same shape record saves produce:
+    /// date-only <c>yyyy-MM-dd</c> (a value with a time keeps it), times <c>HH:mm:ss</c>, invariant numbers,
+    /// <c>True</c>/<c>False</c> for checkboxes (bool.ToString, as FieldEncryptionContext writes them).</summary>
+    public static string? ToEncryptedPlainText(object? value) => value switch
+    {
+        null => null,
+        string s => s,
+        bool b => b.ToString(),
+        DateTime d => d.TimeOfDay == TimeSpan.Zero
+            ? d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
+            : d.ToString("yyyy-MM-ddTHH:mm:ss.fff", CultureInfo.InvariantCulture),
+        TimeSpan t => t.ToString(@"hh\:mm\:ss", CultureInfo.InvariantCulture),
+        IFormattable f => f.ToString(null, CultureInfo.InvariantCulture),
+        _ => value.ToString(),
+    };
+
+    /// <summary>One batch of (row id, already-encrypted text or null) — nulls included, because an encrypted column
+    /// is updated in place and a value that couldn't be converted must be cleared.</summary>
+    public static string EncryptedBatchJson(IEnumerable<KeyValuePair<long, string?>> values) =>
+        JsonSerializer.Serialize(values.Select(p => new { id = p.Key, v = p.Value }));
+
+    /// <summary>Writes one batch of encrypted text into the (VARCHAR) column in place.</summary>
+    public static string EncryptedBatchUpdateSql(string physicalTable, string column) => $"""
+        UPDATE t SET {column} = m.v
+        FROM {physicalTable} t
+        JOIN OPENJSON(@json) WITH (id BIGINT '$.id', v VARCHAR(MAX) '$.v') m ON t.Id = m.id;
+        """;
+
     /// <summary>Lists every non-PK index that includes the column, plus the Unique digest column SetUniqueAsync may
     /// have added for MAX columns — both must go before the column can be renamed away and dropped.</summary>
     public static string IndexesOnColumnSql => """

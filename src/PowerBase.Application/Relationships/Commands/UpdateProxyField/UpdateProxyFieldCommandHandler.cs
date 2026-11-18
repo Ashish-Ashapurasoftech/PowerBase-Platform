@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Relationships.Queries;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -15,14 +16,17 @@ public class UpdateProxyFieldCommandHandler
     private readonly IAppFieldRepository _fieldRepo;
     private readonly RelationshipQueriesHandler _queries;
     private readonly IAuditRepository _auditRepo;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public UpdateProxyFieldCommandHandler(
         IRelationshipRepository relRepo,
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         RelationshipQueriesHandler queries,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _relRepo = relRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -57,6 +61,7 @@ public class UpdateProxyFieldCommandHandler
         if (rel.ProxyFieldId != proxy?.Id)
         {
             await _relRepo.UpdateProxyFieldAsync(rel.Id, proxy?.Id, ct);
+            await _refIndexer.ReindexRelationshipAsync(rel.PublicId, ct); // Usage tab: the relationship's display label changed
 
             var message = proxy is null
                 ? $"Proxy field cleared for relationship {child.Name} → {parent.Name}"

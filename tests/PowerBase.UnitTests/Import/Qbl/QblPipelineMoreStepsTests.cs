@@ -243,7 +243,11 @@ public class QblPipelineMoreStepsTests
 
         Step(pipeline, "ref_ab").Config["maxResults"].Should().Be(105);
         var update = Step(pipeline, "ref_ac");
-        Mapping(update, "Name").Should().Be("{{steps.ref_ab.[Email]}} {{steps.ref_aa.[Date Created]}}");
+        // powerflowextraRd: a date/time field written inside a text prints as Quickbase prints it (a UTC datetime), so the value
+        // becomes a formula reading both fields.
+        var name = Mapping(update, "Name");
+        name.Should().StartWith(PowerBase.Application.Pipelines.PipelineFormulaValue.Prefix);
+        name.Should().Contain("{{steps.ref_ab.[Email]}}").And.Contain("{{steps.ref_aa.[Date Created]}}").And.Contain("\\u002B00:00");
         Mapping(update, "TCheckbox").Should().Be("{{steps.ref_ab.[TCheckbox]}}");
         Mapping(update, "Email").Should().Be("{{steps.ref_aa.[TestUser].email}}");
         // T_Address_City sets the City part of T Address (fid_N.city).
@@ -796,7 +800,7 @@ public class QblPipelineMoreStepsTests
     }
 
     [Fact]
-    public void QuickbaseMakeRequestHeaders_AreKept()
+    public void QuickbaseMakeRequestHeaders_AreKept_ExceptQuickbaseRealmAndAuth()
     {
         var pipeline = Convert(Trigger(), """
                   - Type: QB::PipelineStep::Quickbase
@@ -814,8 +818,9 @@ public class QblPipelineMoreStepsTests
             """);
 
         ((List<object?>)Step(pipeline, "ref_ab").Config["headersList"]!).Cast<Dictionary<string, object?>>().Select(h => $"{h["name"]}={h["value"]}")
-            .Should().Equal("QB-Realm-Hostname=ysl.quickbase.com", "Content-Type=application/json");
+            .Should().Equal("Content-Type=application/json");
         pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_SETTING_NOT_IMPORTED");
+        pipeline.Issues.Should().Contain(i => i.Code == "PIPELINE_REQUEST_HEADER_DROPPED" && i.Message.Contains("QB-Realm-Hostname"));
     }
 
     [Theory]
@@ -1002,7 +1007,7 @@ public class QblPipelineMoreStepsTests
     }
 
     [Fact]
-    public void QuickbaseMakeRequest_IsThePowerBaseAccountMode_AndNeverKeepsAQuickbaseApiUrl()
+    public void QuickbaseMakeRequest_IsThePowerBaseAccountMode_AndQueryBecomesTheCompatibleV1Endpoint()
     {
         var pipeline = Convert("""
                   - Type: QB::PipelineStep::Quickbase
@@ -1016,12 +1021,14 @@ public class QblPipelineMoreStepsTests
         var request = pipeline.Steps.Single();
         request.Config["requestMode"].Should().Be("quickbase");
         request.Config["connectionPublicId"].Should().BeOfType<PblPipelineConnectionValue>();
-        request.Config["method"].Should().Be("GET");
+        // Quickbase "Query for data" is POST only; the GET in the file is sent as POST to the same PowerBase path.
+        request.Config["method"].Should().Be("POST");
         request.Config["contentType"].Should().Be("application/json");
-        Text(request.Config["url"]).Should().Be("https://api.quickbase.com/v1/records/query");
-        request.IsComplete.Should().BeFalse();
-        pipeline.Issues.Should().ContainSingle(i => i.Code == "PIPELINE_REQUEST_URL_QUICKBASE")
-            .Which.Message.Should().Contain("https://api.quickbase.com/v1/records/query");
+        Text(request.Config["url"]).Should().Be("/v1/records/query");
+        request.IsComplete.Should().BeFalse(); // no body: Quickbase needs {"from": ...}
+        pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_REQUEST_URL_QUICKBASE");
+        pipeline.Issues.Should().ContainSingle(i => i.Code == "PIPELINE_REQUEST_URL_MAPPED").Which.Message.Should().Contain("GET → POST");
+        pipeline.Issues.Should().ContainSingle(i => i.Code == "PIPELINE_REQUEST_NEEDS_REVIEW").Which.Message.Should().Contain("no body");
     }
 
     [Fact]

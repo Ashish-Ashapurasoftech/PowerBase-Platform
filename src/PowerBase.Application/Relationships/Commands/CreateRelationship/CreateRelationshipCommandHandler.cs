@@ -1,5 +1,6 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -26,6 +27,7 @@ public class CreateRelationshipCommandHandler
     private readonly IMessagePublisher? _publisher;
     private readonly ISearchFieldJobs? _fieldJobs;
     private readonly IQueryContext? _queryContext;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public CreateRelationshipCommandHandler(
         IAppTableRepository tableRepo,
@@ -41,8 +43,10 @@ public class CreateRelationshipCommandHandler
         IRelationalProjector relationalProjector,
         IMessagePublisher? publisher = null,
         IQueryContext? queryContext = null,
-        ISearchFieldJobs? fieldJobs = null)
+        ISearchFieldJobs? fieldJobs = null,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _publisher = publisher;
         _fieldJobs = fieldJobs;
         _queryContext = queryContext;
@@ -244,6 +248,7 @@ public class CreateRelationshipCommandHandler
 
         if (firstLookup is not null)
             await _relRepo.UpdateProxyFieldAsync(relId, firstLookup.Id, ct);
+        await _refIndexer.ReindexRelationshipAsync(relPublicId, ct); // Usage tab: reference field, key, display label
 
         // 4. Summary fields on the parent.
         var parentAddFids = new List<int>();

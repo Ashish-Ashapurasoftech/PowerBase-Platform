@@ -56,6 +56,9 @@ public interface IAppFieldRepository
     /// <summary>Lightweight settings-only update (used when wiring relationship metadata after field creation).</summary>
     Task UpdateSettingsAsync(long id, string? settings, CancellationToken ct = default);
 
+    /// <summary>Lightweight update of the "searchable" and "allowed in reports" switches only. For a field that was just created (empty, no search index yet) — it skips the index sync, version and audit work of a full field update.</summary>
+    Task SetSearchableReportableAsync(long id, bool isSearchable, bool isReportable, CancellationToken ct = default);
+
     /// <summary>Sets (or clears, when <paramref name="sourceFid"/> is null) the field's Snapshot configuration.</summary>
     Task SetSnapshotConfigAsync(long id, int? sourceFid, bool editable, CancellationToken ct = default, IDbTransaction? transaction = null);
 

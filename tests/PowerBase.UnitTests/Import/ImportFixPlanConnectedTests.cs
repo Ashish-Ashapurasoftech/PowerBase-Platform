@@ -1,11 +1,14 @@
 using FluentAssertions;
 using NSubstitute;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.ConnectedTables.Handlers;
+using PowerBase.Application.ConnectedTables.Interfaces;
 using PowerBase.Application.Import.Commands.ImportAppFromPbl;
 using PowerBase.Application.Import.Pbl;
 using PowerBase.Application.ConnectedTables.Scheduling;
 using PowerBase.Application.Import.Qbl;
 using PowerBase.Application.Import.Services;
+using PowerBase.Domain.Entities;
 using Xunit;
 
 namespace PowerBase.UnitTests.Import;
@@ -104,16 +107,90 @@ public class ImportFixPlanConnectedTests
     [Fact]
     public void NoCron_MeansRefreshedByHand() => PblConnectedTablesApplier.ToSchedule(null).Should().BeNull();
 
+    private static IAppRepository AppRepoWith(params App[] apps)
+    {
+        var repo = Substitute.For<IAppRepository>();
+        repo.ListAllAsync(Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<App>>(apps));
+        return repo;
+    }
+
     [Fact]
-    public async Task Applier_SourceAppNotImported_KeepsTheTableOrdinaryAndSaysSo()
+    public async Task Applier_SourceAppNotFoundAnywhere_KeepsTheTableOrdinaryAndDefersIt()
     {
         var document = new PblDocument();
         document.ConnectedTables.Add(new PblConnectedTable { TableRef = "$T", TableName = "Clients", SourceAppName = "CARES Database", SourceTableName = "Clients" });
         var report = new ImportReport { AppName = "Dest App", AppPublicId = Guid.NewGuid() };
-        var sut = new PblConnectedTablesApplier(null!, Substitute.For<IAppRepository>(), Substitute.For<IAppTableRepository>());
+        var tableRepo = Substitute.For<IAppTableRepository>();
+        tableRepo.ListByAppAsync(Arg.Any<long>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult<IReadOnlyList<AppTable>>([new AppTable { Id = 1, PublicId = Guid.NewGuid(), AppId = 42, Name = "Clients" }]));
+        var pendingRepo = Substitute.For<IConnectedPendingImportRepository>();
+        var sut = new PblConnectedTablesApplier(null!, AppRepoWith(), tableRepo, pendingRepo);
 
         await sut.ApplyAsync([(document, report)], CancellationToken.None);
 
-        report.Skipped.Should().ContainSingle().Which.Reason.Should().Contain("not one of the imported apps").And.Contain("CARES Database");
+        report.Skipped.Should().ContainSingle().Which.Reason.Should().Contain("does not exist yet").And.Contain("CARES Database");
+        await pendingRepo.Received(1).UpsertAsync(Arg.Is<PowerBase.Domain.ConnectedTables.ConnectedPendingImportConnection>(
+            p => p.AppTableId == 1 && p.AppId == 42 && p.SourceAppName == "CARES Database" && p.SourceTableName == "Clients"), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Applier_SourceAppExistsButNotInThisImport_StillResolves()
+    {
+        // The dependency app was imported earlier, in a previous call — it is not one of the documents passed to
+        // ApplyAsync, only visible through IAppRepository.ListAllAsync.
+        var document = new PblDocument();
+        document.ConnectedTables.Add(new PblConnectedTable
+        {
+            TableRef = "$T", TableName = "Clients", SourceAppName = "CARES Database", SourceTableName = "Clients",
+            Fields = [new PblConnectedField { FieldName = "Name", SourceFid = 7 }],
+        });
+        var report = new ImportReport { AppName = "Dest App", AppPublicId = Guid.NewGuid() };
+        var destApp = new App { Id = 1, PublicId = report.AppPublicId, Name = "Dest App" };
+        var sourceApp = new App { Id = 2, PublicId = Guid.NewGuid(), Name = "CARES Database" };
+
+        var appRepo = AppRepoWith(destApp, sourceApp);
+        appRepo.GetIdByPublicIdAsync(destApp.PublicId, Arg.Any<CancellationToken>()).Returns(Task.FromResult(destApp.Id));
+        appRepo.GetIdByPublicIdAsync(sourceApp.PublicId, Arg.Any<CancellationToken>()).Returns(Task.FromResult(sourceApp.Id));
+
+        var tableRepo = Substitute.For<IAppTableRepository>();
+        var destTable = new AppTable { Id = 10, PublicId = Guid.NewGuid(), AppId = destApp.Id, Name = "Clients" };
+        var sourceTable = new AppTable { Id = 20, PublicId = Guid.NewGuid(), AppId = sourceApp.Id, Name = "Clients" };
+        tableRepo.ListByAppAsync(destApp.Id, Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<AppTable>>([destTable]));
+        tableRepo.ListByAppAsync(sourceApp.Id, Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<AppTable>>([sourceTable]));
+
+        var connector = Substitute.For<IExistingTableConnector>();
+        connector.ConnectAsync(Arg.Any<ConnectExistingTableCommand>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(new ConnectExistingTableResult(Guid.NewGuid(), 1, [])));
+
+        var sut = new PblConnectedTablesApplier(connector, appRepo, tableRepo, Substitute.For<IConnectedPendingImportRepository>());
+
+        await sut.ApplyAsync([(document, report)], CancellationToken.None);
+
+        report.Skipped.Should().BeEmpty();
+        await connector.Received(1).ConnectAsync(Arg.Is<ConnectExistingTableCommand>(
+            c => c.DestinationTablePublicId == destTable.PublicId && c.SourceAppPublicId == sourceApp.PublicId && c.SourceTablePublicId == sourceTable.PublicId),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Applier_SourceAppNameAmbiguous_NeverGuesses()
+    {
+        var document = new PblDocument();
+        document.ConnectedTables.Add(new PblConnectedTable { TableRef = "$T", TableName = "Clients", SourceAppName = "CARES Database", SourceTableName = "Clients" });
+        var report = new ImportReport { AppName = "Dest App", AppPublicId = Guid.NewGuid() };
+        var destApp = new App { Id = 1, PublicId = report.AppPublicId, Name = "Dest App" };
+        var appRepo = AppRepoWith(destApp, new App { Id = 2, PublicId = Guid.NewGuid(), Name = "CARES Database" }, new App { Id = 3, PublicId = Guid.NewGuid(), Name = "CARES-Database" });
+        appRepo.GetIdByPublicIdAsync(destApp.PublicId, Arg.Any<CancellationToken>()).Returns(Task.FromResult(destApp.Id));
+        var tableRepo = Substitute.For<IAppTableRepository>();
+        tableRepo.ListByAppAsync(destApp.Id, Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult<IReadOnlyList<AppTable>>([new AppTable { Id = 10, PublicId = Guid.NewGuid(), AppId = destApp.Id, Name = "Clients" }]));
+        var pendingRepo = Substitute.For<IConnectedPendingImportRepository>();
+
+        var sut = new PblConnectedTablesApplier(null!, appRepo, tableRepo, pendingRepo);
+
+        await sut.ApplyAsync([(document, report)], CancellationToken.None);
+
+        report.Skipped.Should().ContainSingle().Which.Reason.Should().Contain("more than one application");
+        await pendingRepo.DidNotReceiveWithAnyArgs().UpsertAsync(default!, default);
     }
 }

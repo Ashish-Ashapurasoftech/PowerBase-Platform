@@ -28,6 +28,21 @@ public class AppFormattingSettings
             return new DateFormatSettings().FormatString;
         }
     }
+
+    /// <summary>The app's time zone id from its raw <c>Formatting</c> JSON; "UTC" when unset or unreadable.</summary>
+    public static string GetTimeZone(string? formattingJson)
+    {
+        if (string.IsNullOrWhiteSpace(formattingJson)) return new DateFormatSettings().TimeZone;
+        try
+        {
+            var settings = JsonSerializer.Deserialize<AppFormattingSettings>(formattingJson, JsonOptions);
+            return string.IsNullOrWhiteSpace(settings?.Date?.TimeZone) ? new DateFormatSettings().TimeZone : settings!.Date.TimeZone;
+        }
+        catch (JsonException)
+        {
+            return new DateFormatSettings().TimeZone;
+        }
+    }
 }
 
 public class CurrencyFormatSettings
@@ -52,4 +67,8 @@ public class DateFormatSettings
     /// <summary>Display separator only: "-" (default) or "/". Never affects parsing — typed
     /// dates accept '-', '/' and '.' either way.</summary>
     public string Separator { get; set; } = "-";
+
+    /// <summary>The app's time zone (IANA or Windows id). Date-times sent as wall-clock text through the Quickbase
+    /// compatible API are read in this zone, as Quickbase reads them in the app's zone. "UTC" when not chosen.</summary>
+    public string TimeZone { get; set; } = "UTC";
 }

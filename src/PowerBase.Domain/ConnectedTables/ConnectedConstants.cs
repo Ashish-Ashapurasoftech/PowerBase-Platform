@@ -130,6 +130,14 @@ public static class ConnectedErrorCodes
     public const string LimitExceeded = "CONNECTED_LIMIT_EXCEEDED";
 }
 
+public static class ConnectedPendingImportStatuses
+{
+    /// <summary>Waiting for its source application (or source table) to exist.</summary>
+    public const string Pending = "pending";
+    /// <summary>Connected once its dependency was imported. Kept for history, not retried again.</summary>
+    public const string Resolved = "resolved";
+}
+
 /// <summary>Source field ids PowerBase reserves for built-in fields (Quickbase convention).</summary>
 public static class ConnectedSystemFids
 {

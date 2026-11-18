@@ -208,6 +208,10 @@ public class SavePipelineStepsCommandHandler
             {
                 await stepValidator.ValidateNewEventStepAsync(dto.ConfigJson ?? string.Empty, ct);
             }
+            // A formula value must compile before the step counts as complete.
+            if (dto.IsValidated)
+                PipelineFormulaValue.ValidateStepConfig(dto.ConfigJson, dto.Label,
+                    _serviceProvider.GetService<PowerBase.Formula.FormulaEngine>() ?? new PowerBase.Formula.FormulaEngine());
             if (dto.Subtype == "copy-records" && dto.IsValidated)
                 await stepValidator.ValidateCopyRecordsStepAsync(dto.ConfigJson ?? "{}", ct);
             if (dto.Subtype == "search-records" && dto.IsValidated)

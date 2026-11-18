@@ -18,4 +18,7 @@ public class AppUser
     public bool IsFromGroup { get; set; } = false;
     public long? GroupId { get; set; }
     public bool IsDeleted { get; set; }
+
+    /// <summary>A copy the caller may change: the metadata cache hands the same stored AppUser to every request.</summary>
+    public AppUser Clone() => (AppUser)MemberwiseClone();
 }
