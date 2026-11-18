@@ -6,7 +6,8 @@ using PowerBase.QbMigration.Worker;
 //   map      --qb-app <dbid> --pb-app <id> --run-as <userId>
 //   plan     --run <id> [--extend]              --extend plans only records created in QuickBase since the plan
 //   run      --run <id> [--queue local|servicebus] [--reload]   --reload loads done chunks again (after users/fixes)
-//   users    --run <id> [--qbl <QBL export file>] [--apply]   users and roles as in QuickBase; run before the load; no emails
+//   users    --run <id> [--qbl <QBL export file>] [--apply] [--allow-super-users]   users and roles as in QuickBase; no emails
+//            QuickBase Super Users become tenant Administrators, so --apply stops unless --allow-super-users is given
 //   finalize --run <id>
 //   validate --run <id> [--sample 1.0]           gates 3, 4, 7 (sample 1 = compare every record)
 //   reindex  --run <id> --api <PowerBase API url>  needs PowerBase:ApiToken (super admin user token)
@@ -15,7 +16,8 @@ using PowerBase.QbMigration.Worker;
 // Operator commands (docs/qb-migration/operator-guide.md):
 //   migrate  --qb-app <dbid> --pb-app <id> --run-as <userId> [--new]   start (or continue the latest run of that app)
 //   migrate  --run <id>                          continue a run: users -> plan -> load -> finalize -> validate -> reindex -> report
-//            [--qbl <QBL export file>] [--api <PowerBase API url>] [--skip-users]   built-in role switches / search reindex at the end
+//            [--qbl <QBL export file>] [--api <PowerBase API url>] [--skip-users] [--allow-super-users]
+//            --api must be https and the PowerBase API host (or one in PowerBase:AllowedApiHosts)
 //            [--queue local|servicebus] [--sample 1.0] [--out <folder or .xlsx>]
 //   pause | resume | stop  --run <id>            the running worker finishes the chunks in progress first
 //   status   --run <id>                          progress, speed, dead letters, chunks to fix first
@@ -60,7 +62,8 @@ try
         case "map": await commands.MapAsync(Text("qb-app"), Required("pb-app"), Required("run-as"), cts.Token); break;
         case "plan": await commands.PlanAsync(Required("run"), options.ContainsKey("extend"), cts.Token); break;
         case "run": return await commands.RunAsync(Required("run"), options.GetValueOrDefault("queue") ?? "local", options.ContainsKey("reload"), cts.Token) ? 0 : 2;
-        case "users": return await commands.UsersAsync(Required("run"), options.GetValueOrDefault("qbl"), options.ContainsKey("apply"), cts.Token);
+        case "users": return await commands.UsersAsync(Required("run"), options.GetValueOrDefault("qbl"), options.ContainsKey("apply"),
+            options.ContainsKey("allow-super-users"), cts.Token);
         case "finalize": return await commands.FinalizeAsync(Required("run"), cts.Token) ? 0 : 2;
         case "validate": return await commands.ValidateAsync(Required("run"), double.Parse(options.GetValueOrDefault("sample") ?? "1", System.Globalization.CultureInfo.InvariantCulture), cts.Token) ? 0 : 2;
         case "reindex": await commands.ReindexAsync(Required("run"), Text("api"), cts.Token); break;
@@ -68,7 +71,8 @@ try
         case "migrate":
             return await commands.MigrateAsync(Optional("run"), options.GetValueOrDefault("qb-app"), Optional("pb-app"), Optional("run-as"),
                 options.ContainsKey("new"), queue, sample, options.GetValueOrDefault("out"),
-                options.GetValueOrDefault("qbl"), options.GetValueOrDefault("api"), options.ContainsKey("skip-users"), cts.Token);
+                options.GetValueOrDefault("qbl"), options.GetValueOrDefault("api"), options.ContainsKey("skip-users"),
+                options.ContainsKey("allow-super-users"), cts.Token);
         case "pause" or "resume" or "stop": await commands.SetControlAsync(Required("run"), args[0], cts.Token); break;
         case "status": await commands.StatusAsync(Required("run"), cts.Token); break;
         case "retry-dlq":

@@ -12,7 +12,8 @@ namespace PowerBase.Infrastructure.QbMigration;
 /// migration created earlier (no password, never signed in) is brought to QuickBase's status. A real PowerBase account (has a
 /// password or has signed in) is never changed.</item>
 /// <item>Tenant membership: added if missing with the same status; tenant "User" role, or tenant "Administrator" for a QuickBase
-/// Super User. A membership of a real account is never changed.</item>
+/// Super User. A membership of a real account is only ever activated (QuickBase: Registered, membership inactive); its role
+/// is never changed and it is never deactivated.</item>
 /// <item>App membership: the exact role and status, added or corrected.</item>
 /// </list></summary>
 public sealed class QbmUserProvisioner(ITenantConnectionFactory tenant, Func<SqlConnection> control)
@@ -136,6 +137,18 @@ public sealed class QbmUserProvisioner(ITenantConnectionFactory tenant, Func<Sql
                     await c.ExecuteAsync(new CommandDefinition(
                         "UPDATE meta.TenantUser SET IsActive = @active, TenantRoleId = @wantRole WHERE TenantId = @tenantId AND UserId = @userId",
                         new { active = p.IsActive, wantRole, tenantId, userId }, tx, cancellationToken: ct));
+            }
+            else if (p.IsActive && !member.IsActive)
+            {
+                // A real account: only an inactive membership of this tenant is activated when QuickBase says Registered. Its role,
+                // the account itself and its other tenants are never touched, and an active membership is never deactivated.
+                tenantAction = "activated (QuickBase: Registered; role not changed)";
+                if (!dryRun)
+                    await c.ExecuteAsync(new CommandDefinition(
+                        "UPDATE meta.TenantUser SET IsActive = 1 WHERE TenantId = @tenantId AND UserId = @userId AND IsActive = 0",
+                        new { tenantId, userId }, tx, cancellationToken: ct));
+                if (p.IsSuperUser && member.TenantRoleId != tenantRoles.Administrator)
+                    warning = (warning is null ? "" : warning + " ") + "QuickBase Super User, but not a tenant Administrator in PowerBase; left as it is.";
             }
             else
             {

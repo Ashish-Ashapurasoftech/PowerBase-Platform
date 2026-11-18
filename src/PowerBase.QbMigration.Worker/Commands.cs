@@ -481,7 +481,7 @@ public sealed class Commands(Composition c)
     /// "Registered" status, "None" for users without a role, Super Users as tenant Administrators. No invitation email is sent.
     /// With --qbl, the built-in Administrator / Participant / Viewer roles get QuickBase's "Manage users" and "Edit app" switches.
     /// Without --apply nothing is written: every user is listed with what would happen. Run it before the load.</summary>
-    public async Task<int> UsersAsync(long runId, string? qblPath, bool apply, CancellationToken ct)
+    public async Task<int> UsersAsync(long runId, string? qblPath, bool apply, bool allowSuperUsers, CancellationToken ct)
     {
         var dryRun = !apply;
         var run = await c.State().RunAsync(runId, ct);
@@ -494,6 +494,28 @@ public sealed class Commands(Composition c)
         var plan = QbUserPlanner.Plan(directory, roles.Keys.ToList());
         foreach (var w in plan.Warnings) _log.LogWarning("{Warning}", w);
         var reportIssues = plan.Warnings.Select(w => new QbIssue("warning", "QBM_USERS_WARNING", w)).ToList();
+
+        // Both checks come before anything is written.
+        if (!plan.CanApply)
+        {
+            _log.LogError("Roles QuickBase uses that the PowerBase app doesn't have: {Roles}. Nothing was written. Re-run the QBL import (update the app), then run users again.",
+                string.Join(", ", plan.MissingRoles));
+            if (apply) await c.State().AddIssuesAsync(runId, null, null, [new("error", "QBM_USERS_ROLE_MISSING",
+                $"Roles missing in PowerBase: {string.Join(", ", plan.MissingRoles)}. Re-run the QBL import, then migrate again.")], ct);
+            return ExitGatesFailed;
+        }
+        var superUsers = plan.Users.Where(u => u.IsSuperUser).ToList();
+        if (superUsers.Count > 0)
+        {
+            _log.LogWarning("QuickBase Super Users, who become tenant Administrators in PowerBase: {Users}", string.Join(", ", superUsers.Select(u => u.Email)));
+            if (apply && !allowSuperUsers)
+            {
+                _log.LogError("Nothing was written: {Count} Super User(s) would become tenant Administrator. Check them in the dry run, then add --allow-super-users.", superUsers.Count);
+                await c.State().AddIssuesAsync(runId, null, null, [new("error", "QBM_USERS_SUPER_USER",
+                    $"{superUsers.Count} QuickBase Super User(s) would become tenant Administrator; not applied without --allow-super-users.")], ct);
+                return ExitGatesFailed;
+            }
+        }
 
         _log.LogInformation("Step: built-in roles (Administrator, Participant, Viewer)");
         if (qblPath is null)
@@ -518,14 +540,6 @@ public sealed class Commands(Composition c)
             }
         }
 
-        if (!plan.CanApply)
-        {
-            _log.LogError("Roles QuickBase uses that the PowerBase app doesn't have: {Roles}. Nothing was written. Re-run the QBL import (update the app), then run users again.",
-                string.Join(", ", plan.MissingRoles));
-            if (apply) await c.State().AddIssuesAsync(runId, null, null, [new("error", "QBM_USERS_ROLE_MISSING",
-                $"Roles missing in PowerBase: {string.Join(", ", plan.MissingRoles)}. Re-run the QBL import, then migrate again.")], ct);
-            return ExitGatesFailed;
-        }
         if (plan.Users.Any(u => u.AppRoleName == QbUserPlanner.NoneRoleName) && !roles.ContainsKey(QbUserPlanner.NoneRoleName))
         {
             var id = await provisioner.EnsureNoneRoleAsync(run.PbAppId, run.RunAsUserId, dryRun, ct);
@@ -548,7 +562,7 @@ public sealed class Commands(Composition c)
             }
         }
         var changed = outcomes.Count(o => (o.Account != "unchanged" && !o.Account.StartsWith("existing")) || o.Tenant.StartsWith("added")
-                                          || o.Tenant.StartsWith("corrected") || o.App != "unchanged");
+                                          || o.Tenant.StartsWith("corrected") || o.Tenant.StartsWith("activated") || o.App != "unchanged");
         _log.LogInformation("{Mode}: {Users} users ({Active} active, {Inactive} inactive); {Changes} with changes.", dryRun ? "Dry run" : "Done",
             outcomes.Count, outcomes.Count(o => o.Plan.IsActive), outcomes.Count(o => !o.Plan.IsActive), changed);
         if (dryRun) _log.LogInformation("Nothing was written. Add --apply to write it.");
@@ -556,7 +570,8 @@ public sealed class Commands(Composition c)
         {
             reportIssues.Add(new QbIssue("info", "QBM_USERS", $"{outcomes.Count} users as in QuickBase ({outcomes.Count(o => o.Plan.IsActive)} active, " +
                 $"{outcomes.Count(o => !o.Plan.IsActive)} inactive); {changed} added or corrected; no invitation emails."));
-            await c.State().AddIssuesAsync(runId, null, null, reportIssues, ct);
+            // The report rows keep emails masked; the full addresses are only in the operator's log.
+            await c.State().AddIssuesAsync(runId, null, null, reportIssues.Select(i => i with { Message = QbmSafety.MaskEmails(i.Message) }).ToList(), ct);
         }
         return ExitOk;
     }
@@ -643,7 +658,8 @@ public sealed class Commands(Composition c)
     {
         var token = c.Config["PowerBase:ApiToken"];
         if (string.IsNullOrWhiteSpace(token)) throw new InvalidOperationException("PowerBase:ApiToken (a super admin's user token) is required.");
-        using var http = new HttpClient { BaseAddress = new Uri(apiUrl.TrimEnd('/') + "/") };
+        var baseUri = QbmSafety.ApiUri(apiUrl, c.Config["PowerBase:AllowedApiHosts"]);
+        using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { BaseAddress = baseUri };
         http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
         foreach (var t in await c.State().TableMapsAsync(runId, ct))
         {
@@ -789,9 +805,12 @@ public sealed class Commands(Composition c)
     /// report. Running it again continues the same run where it ended (done chunks are skipped). Pause waits between chunks
     /// and between steps; stop ends after the chunks in progress, and the report is still written.</summary>
     public async Task<int> MigrateAsync(long? runId, string? qbAppId, long? pbAppId, long? runAsUserId, bool newRun, string queue, double sample,
-        string? reportOut, string? qblPath, string? apiUrl, bool skipUsers, CancellationToken ct)
+        string? reportOut, string? qblPath, string? apiUrl, bool skipUsers, bool allowSuperUsers, CancellationToken ct)
     {
         var state = c.State();
+        // A bad API url fails now, not after hours of loading.
+        var api = apiUrl ?? c.Config["PowerBase:ApiUrl"];
+        if (!string.IsNullOrWhiteSpace(api)) QbmSafety.ApiUri(api, c.Config["PowerBase:AllowedApiHosts"]);
         if (runId is null)
         {
             if (qbAppId is null || pbAppId is null) throw new ArgumentException("Give --run <id>, or --qb-app <dbid> --pb-app <id> (and --run-as <userId> for a new run).");
@@ -823,7 +842,7 @@ public sealed class Commands(Composition c)
             else
             {
                 if (!await NextAsync("users")) return ExitStopped;
-                var users = await UsersAsync(id, qblPath, apply: true, ct);
+                var users = await UsersAsync(id, qblPath, apply: true, allowSuperUsers, ct);
                 if (users != ExitOk) return users;
             }
             if (!await NextAsync("plan")) return ExitStopped;
@@ -842,7 +861,6 @@ public sealed class Commands(Composition c)
             ok &= await ValidateCoreAsync(id, sample, ct);
 
             // Search last, once every record is in: encrypted apps show report rows from the search index.
-            var api = apiUrl ?? c.Config["PowerBase:ApiUrl"];
             if (!ok)
                 _log.LogWarning("Search not reindexed because some gates failed; fix them, then 'reindex --run {Run} --api <url>'.", id);
             else if (string.IsNullOrWhiteSpace(api))
@@ -980,7 +998,7 @@ public sealed class Commands(Composition c)
             return ExitOk;
         }
         // Users were set up when the run started; the reindex uses PowerBase:ApiUrl when it is configured.
-        return await MigrateAsync(runId, null, null, null, false, queue, sample, reportOut, null, null, skipUsers: true, ct);
+        return await MigrateAsync(runId, null, null, null, false, queue, sample, reportOut, null, null, skipUsers: true, allowSuperUsers: false, ct);
     }
 
     private async Task<int> RemoveDeadLettersAsync(long runId, IReadOnlySet<long> chunkIds, CancellationToken ct)

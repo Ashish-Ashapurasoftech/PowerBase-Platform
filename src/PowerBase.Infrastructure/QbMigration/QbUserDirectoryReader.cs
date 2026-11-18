@@ -38,7 +38,15 @@ public sealed class QbUserDirectoryReader(HttpClient http, QuickBaseClientOption
             users.Add((id, (string?)u.Element("name") ?? id, (string?)u.Element("firstName"), (string?)u.Element("lastName"), null, userRoles));
         }
 
-        var emails = await EmailsAsync(appId, ct);
+        var emails = await EmailsAsync(appId, null, ct);
+        // Super Users reach the app through the account, not an app role, so the app's user list leaves them out: look the
+        // missing ones up account-wide (needs a realm/account admin token; without it they stay unresolved and are reported).
+        var missing = users.Where(u => u.Email is null && !emails.ContainsKey(u.Id)).Select(u => u.Id).ToHashSet(StringComparer.Ordinal);
+        if (missing.Count > 0)
+        {
+            try { foreach (var (k, v) in await EmailsAsync(null, missing, ct)) emails.TryAdd(k, v); }
+            catch (QuickBaseRequestException ex) { warnings.Add($"Account-wide user lookup for {missing.Count} user(s) without an app email failed: {ex.Message}"); }
+        }
         var registered = new Dictionary<string, bool?>(StringComparer.OrdinalIgnoreCase);
         var result = new List<QbAppUser>();
         foreach (var u in users)
@@ -71,14 +79,18 @@ public sealed class QbUserDirectoryReader(HttpClient http, QuickBaseClientOption
         return found;
     }
 
-    /// <summary>Email by QuickBase user id, for the app's users (REST "Get users", paged).</summary>
-    private async Task<Dictionary<string, string>> EmailsAsync(string appId, CancellationToken ct)
+    /// <summary>Email by QuickBase user id (REST "Get users", paged): the app's users, or with <paramref name="appId"/> null the
+    /// whole account's, stopping as soon as every id in <paramref name="wanted"/> is found.</summary>
+    private async Task<Dictionary<string, string>> EmailsAsync(string? appId, IReadOnlySet<string>? wanted, CancellationToken ct)
     {
         var emails = new Dictionary<string, string>(StringComparer.Ordinal);
         string? next = null;
         for (var page = 0; page < 1000; page++)
         {
-            var body = JsonSerializer.Serialize(next is null ? new { appIds = new[] { appId } } : (object)new { appIds = new[] { appId }, nextPageToken = next });
+            var fields = new Dictionary<string, object>();
+            if (appId is not null) fields["appIds"] = new[] { appId };
+            if (next is not null) fields["nextPageToken"] = next;
+            var body = JsonSerializer.Serialize(fields);
             await limiter.WaitAsync(ct);
             using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(new Uri(options.BaseUrl), "users"))
                 { Content = new StringContent(body, Encoding.UTF8, "application/json") };
@@ -92,7 +104,8 @@ public sealed class QbUserDirectoryReader(HttpClient http, QuickBaseClientOption
             using var doc = JsonDocument.Parse(text);
             foreach (var u in doc.RootElement.GetProperty("users").EnumerateArray())
                 if (u.TryGetProperty("hashId", out var h) && u.TryGetProperty("emailAddress", out var e) && e.ValueKind == JsonValueKind.String)
-                    emails[h.GetString()!] = e.GetString()!;
+                    if (wanted is null || wanted.Contains(h.GetString()!)) emails[h.GetString()!] = e.GetString()!;
+            if (wanted is not null && wanted.All(emails.ContainsKey)) break;
             next = doc.RootElement.TryGetProperty("metadata", out var m) && m.TryGetProperty("nextPageToken", out var n) && n.ValueKind == JsonValueKind.String
                 ? n.GetString() : null;
             if (string.IsNullOrEmpty(next)) break;

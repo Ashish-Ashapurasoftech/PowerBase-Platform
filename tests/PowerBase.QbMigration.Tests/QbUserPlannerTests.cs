@@ -74,4 +74,11 @@ public class QbUserPlannerTests
         var basic = QbmBuiltInRoleSync.Target(withAdminCodes, new PblRole { Name = "Viewer" });
         basic.Should().Contain(current).And.Contain("audit:read").And.NotContain(QbmBuiltInRoleSync.ManageUsersCodes).And.NotContain(QbmBuiltInRoleSync.EditAppCodes);
     }
+
+    [Fact]
+    public void A_viewer_without_edit_app_keeps_powerbases_default_page_access()
+    {
+        QbmBuiltInRoleSync.EditAppCodes.Should().NotContain("pages:read");
+        QbmBuiltInRoleSync.Target(["records:read", "pages:read"], new PblRole { Name = "Viewer" }).Should().Contain("pages:read");
+    }
 }

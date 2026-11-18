@@ -3,6 +3,7 @@ using Microsoft.Data.SqlClient;
 using PowerBase.Application.Import.Pbl;
 using PowerBase.Application.Import.Qbl;
 using PowerBase.Application.Import.Services;
+using PowerBase.Domain.Constants;
 using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.QbMigration;
@@ -16,7 +17,14 @@ public sealed class QbmBuiltInRoleSync(ITenantConnectionFactory tenant)
 {
     public sealed record Change(string Role, IReadOnlyList<string> Added, IReadOnlyList<string> Removed, IReadOnlyList<string> Warnings);
 
-    private static readonly HashSet<string> Base = [.. PblPermissionsApplier.PermissionCodesFor(new PblRole())];
+    // Never added or removed by the sync: what the import grants every role, plus the read permissions PowerBase gives its built-in
+    // Viewer on app creation (CreateAppCommandHandler), e.g. pages:read, which the import counts as "Edit app" but viewers need.
+    private static readonly HashSet<string> Base =
+    [
+        .. PblPermissionsApplier.PermissionCodesFor(new PblRole()),
+        PermissionCodes.TablesRead, PermissionCodes.FieldsRead, PermissionCodes.RecordsRead, PermissionCodes.ReportsRead,
+        PermissionCodes.ReportsRun, PermissionCodes.FormsRead, PermissionCodes.PagesRead, PermissionCodes.PowerFlowsRead,
+    ];
     public static readonly IReadOnlyList<string> ManageUsersCodes =
         PblPermissionsApplier.PermissionCodesFor(new PblRole { ManageUsers = true }).Where(c => !Base.Contains(c)).ToList();
     public static readonly IReadOnlyList<string> EditAppCodes =
