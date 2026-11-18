@@ -17,14 +17,10 @@ public sealed class QbmBuiltInRoleSync(ITenantConnectionFactory tenant)
 {
     public sealed record Change(string Role, IReadOnlyList<string> Added, IReadOnlyList<string> Removed, IReadOnlyList<string> Warnings);
 
-    // Never added or removed by the sync: what the import grants every role, plus the read permissions PowerBase gives its built-in
-    // Viewer on app creation (CreateAppCommandHandler), e.g. pages:read, which the import counts as "Edit app" but viewers need.
-    private static readonly HashSet<string> Base =
-    [
-        .. PblPermissionsApplier.PermissionCodesFor(new PblRole()),
-        PermissionCodes.TablesRead, PermissionCodes.FieldsRead, PermissionCodes.RecordsRead, PermissionCodes.ReportsRead,
-        PermissionCodes.ReportsRun, PermissionCodes.FormsRead, PermissionCodes.PagesRead, PermissionCodes.PowerFlowsRead,
-    ];
+    // Never added or removed by the sync: what the import grants every role, plus pages:read, which PowerBase gives its built-in
+    // Viewer and Participant on app creation (CreateAppCommandHandler) and viewers need to open pages, but the import counts as
+    // "Edit app". Everything else in the "Edit app" bundle is still reconciled against QuickBase.
+    private static readonly HashSet<string> Base = [.. PblPermissionsApplier.PermissionCodesFor(new PblRole()), PermissionCodes.PagesRead];
     public static readonly IReadOnlyList<string> ManageUsersCodes =
         PblPermissionsApplier.PermissionCodesFor(new PblRole { ManageUsers = true }).Where(c => !Base.Contains(c)).ToList();
     public static readonly IReadOnlyList<string> EditAppCodes =

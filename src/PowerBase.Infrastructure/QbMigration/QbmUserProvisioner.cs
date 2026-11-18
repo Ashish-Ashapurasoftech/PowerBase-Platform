@@ -12,8 +12,8 @@ namespace PowerBase.Infrastructure.QbMigration;
 /// migration created earlier (no password, never signed in) is brought to QuickBase's status. A real PowerBase account (has a
 /// password or has signed in) is never changed.</item>
 /// <item>Tenant membership: added if missing with the same status; tenant "User" role, or tenant "Administrator" for a QuickBase
-/// Super User. A membership of a real account is only ever activated (QuickBase: Registered, membership inactive); its role
-/// is never changed and it is never deactivated.</item>
+/// Super User. A membership of a real account is never changed, except that with --activate-tenant-members an inactive one is
+/// activated when QuickBase says Registered (role never changed, never deactivated).</item>
 /// <item>App membership: the exact role and status, added or corrected.</item>
 /// </list></summary>
 public sealed class QbmUserProvisioner(ITenantConnectionFactory tenant, Func<SqlConnection> control)
@@ -73,7 +73,7 @@ public sealed class QbmUserProvisioner(ITenantConnectionFactory tenant, Func<Sql
     }
 
     public async Task<IReadOnlyList<Outcome>> ApplyAsync(long tenantId, long appId, IReadOnlyList<QbUserPlan> plans, IReadOnlyDictionary<string, long> roleIds,
-        (long Administrator, long User) tenantRoles, long addedBy, bool dryRun, CancellationToken ct = default)
+        (long Administrator, long User) tenantRoles, long addedBy, bool dryRun, CancellationToken ct = default, bool activateMemberships = false)
     {
         var outcomes = new List<Outcome>();
         foreach (var p in plans)
@@ -137,6 +137,15 @@ public sealed class QbmUserProvisioner(ITenantConnectionFactory tenant, Func<Sql
                     await c.ExecuteAsync(new CommandDefinition(
                         "UPDATE meta.TenantUser SET IsActive = @active, TenantRoleId = @wantRole WHERE TenantId = @tenantId AND UserId = @userId",
                         new { active = p.IsActive, wantRole, tenantId, userId }, tx, cancellationToken: ct));
+            }
+            else if (p.IsActive && !member.IsActive && !activateMemberships)
+            {
+                // Someone may have deactivated this person in PowerBase on purpose: only an explicit operator flag re-activates.
+                tenantAction = "inactive in PowerBase (not changed)";
+                warning = (warning is null ? "" : warning + " ") +
+                    "QuickBase says Registered but the tenant membership is inactive; left as it is (--activate-tenant-members activates it).";
+                if (p.IsSuperUser && member.TenantRoleId != tenantRoles.Administrator)
+                    warning += " QuickBase Super User, but not a tenant Administrator in PowerBase; left as it is.";
             }
             else if (p.IsActive && !member.IsActive)
             {

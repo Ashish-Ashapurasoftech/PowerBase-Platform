@@ -24,9 +24,11 @@ public static class QbmSafety
         return uri;
     }
 
-    private static readonly Regex Email = new(@"([A-Za-z0-9._%+'-]+)@([A-Za-z0-9.-]+\.[A-Za-z]{2,})", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    // Anything without spaces, quotes or brackets around an @ (any script, any characters QuickBase allows): over-matching only
+    // masks more, never less.
+    private static readonly Regex Email = new(@"([^\s@<>""(),;:\[\]]+)@([^\s@<>""'(),;:\[\]]+)", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>Email addresses in <paramref name="text"/> masked to their first two characters and domain (ch***@x.com).</summary>
     public static string MaskEmails(string text) =>
-        Email.Replace(text, m => (m.Groups[1].Value.Length <= 2 ? m.Groups[1].Value[..1] : m.Groups[1].Value[..2]) + "***@" + m.Groups[2].Value);
+        Email.Replace(text, m => (m.Groups[1].Value.Length <= 2 ? m.Groups[1].Value[..1] : m.Groups[1].Value[..2]) + "***@" + m.Groups[2].Value.TrimEnd('.'));
 }

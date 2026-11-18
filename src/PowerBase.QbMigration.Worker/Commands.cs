@@ -481,8 +481,12 @@ public sealed class Commands(Composition c)
     /// "Registered" status, "None" for users without a role, Super Users as tenant Administrators. No invitation email is sent.
     /// With --qbl, the built-in Administrator / Participant / Viewer roles get QuickBase's "Manage users" and "Edit app" switches.
     /// Without --apply nothing is written: every user is listed with what would happen. Run it before the load.</summary>
-    public async Task<int> UsersAsync(long runId, string? qblPath, bool apply, bool allowSuperUsers, CancellationToken ct)
+    public async Task<int> UsersAsync(long runId, string? qblPath, bool apply, bool allowSuperUsers, bool activateMembers, CancellationToken ct)
     {
+        // Every issue row this step stores has its emails masked; the full addresses are only in the operator's log.
+        Task SaveIssuesAsync(IEnumerable<QbIssue> issues) =>
+            c.State().AddIssuesAsync(runId, null, null, issues.Select(i => i with { Message = QbmSafety.MaskEmails(i.Message) }).ToList(), ct);
+
         var dryRun = !apply;
         var run = await c.State().RunAsync(runId, ct);
         var provisioner = new QbmUserProvisioner(c.Tenant, c.Control);
@@ -500,8 +504,8 @@ public sealed class Commands(Composition c)
         {
             _log.LogError("Roles QuickBase uses that the PowerBase app doesn't have: {Roles}. Nothing was written. Re-run the QBL import (update the app), then run users again.",
                 string.Join(", ", plan.MissingRoles));
-            if (apply) await c.State().AddIssuesAsync(runId, null, null, [new("error", "QBM_USERS_ROLE_MISSING",
-                $"Roles missing in PowerBase: {string.Join(", ", plan.MissingRoles)}. Re-run the QBL import, then migrate again.")], ct);
+            if (apply) await SaveIssuesAsync([new("error", "QBM_USERS_ROLE_MISSING",
+                $"Roles missing in PowerBase: {string.Join(", ", plan.MissingRoles)}. Re-run the QBL import, then migrate again.")]);
             return ExitGatesFailed;
         }
         var superUsers = plan.Users.Where(u => u.IsSuperUser).ToList();
@@ -511,8 +515,8 @@ public sealed class Commands(Composition c)
             if (apply && !allowSuperUsers)
             {
                 _log.LogError("Nothing was written: {Count} Super User(s) would become tenant Administrator. Check them in the dry run, then add --allow-super-users.", superUsers.Count);
-                await c.State().AddIssuesAsync(runId, null, null, [new("error", "QBM_USERS_SUPER_USER",
-                    $"{superUsers.Count} QuickBase Super User(s) would become tenant Administrator; not applied without --allow-super-users.")], ct);
+                await SaveIssuesAsync([new("error", "QBM_USERS_SUPER_USER",
+                    $"{superUsers.Count} QuickBase Super User(s) would become tenant Administrator; not applied without --allow-super-users.")]);
                 return ExitGatesFailed;
             }
         }
@@ -549,7 +553,7 @@ public sealed class Commands(Composition c)
 
         _log.LogInformation("Step: users");
         var outcomes = await provisioner.ApplyAsync(c.TenantId, run.PbAppId, plan.Users, roles, await provisioner.TenantRolesAsync(c.TenantId, ct),
-            run.RunAsUserId, dryRun, ct);
+            run.RunAsUserId, dryRun, ct, activateMembers);
         foreach (var o in outcomes)
         {
             _log.LogInformation("{Email} | QuickBase: {QbRoles}, {Reg} | PowerBase: {Role}, {Status}{Super} | account {Account} | tenant {Tenant} | app {App}{Note}",
@@ -570,8 +574,7 @@ public sealed class Commands(Composition c)
         {
             reportIssues.Add(new QbIssue("info", "QBM_USERS", $"{outcomes.Count} users as in QuickBase ({outcomes.Count(o => o.Plan.IsActive)} active, " +
                 $"{outcomes.Count(o => !o.Plan.IsActive)} inactive); {changed} added or corrected; no invitation emails."));
-            // The report rows keep emails masked; the full addresses are only in the operator's log.
-            await c.State().AddIssuesAsync(runId, null, null, reportIssues.Select(i => i with { Message = QbmSafety.MaskEmails(i.Message) }).ToList(), ct);
+            await SaveIssuesAsync(reportIssues);
         }
         return ExitOk;
     }
@@ -805,7 +808,7 @@ public sealed class Commands(Composition c)
     /// report. Running it again continues the same run where it ended (done chunks are skipped). Pause waits between chunks
     /// and between steps; stop ends after the chunks in progress, and the report is still written.</summary>
     public async Task<int> MigrateAsync(long? runId, string? qbAppId, long? pbAppId, long? runAsUserId, bool newRun, string queue, double sample,
-        string? reportOut, string? qblPath, string? apiUrl, bool skipUsers, bool allowSuperUsers, CancellationToken ct)
+        string? reportOut, string? qblPath, string? apiUrl, bool skipUsers, bool allowSuperUsers, bool activateMembers, CancellationToken ct)
     {
         var state = c.State();
         // A bad API url fails now, not after hours of loading.
@@ -842,7 +845,7 @@ public sealed class Commands(Composition c)
             else
             {
                 if (!await NextAsync("users")) return ExitStopped;
-                var users = await UsersAsync(id, qblPath, apply: true, allowSuperUsers, ct);
+                var users = await UsersAsync(id, qblPath, apply: true, allowSuperUsers, activateMembers, ct);
                 if (users != ExitOk) return users;
             }
             if (!await NextAsync("plan")) return ExitStopped;
@@ -998,7 +1001,7 @@ public sealed class Commands(Composition c)
             return ExitOk;
         }
         // Users were set up when the run started; the reindex uses PowerBase:ApiUrl when it is configured.
-        return await MigrateAsync(runId, null, null, null, false, queue, sample, reportOut, null, null, skipUsers: true, allowSuperUsers: false, ct);
+        return await MigrateAsync(runId, null, null, null, false, queue, sample, reportOut, null, null, skipUsers: true, allowSuperUsers: false, activateMembers: false, ct);
     }
 
     private async Task<int> RemoveDeadLettersAsync(long runId, IReadOnlySet<long> chunkIds, CancellationToken ct)

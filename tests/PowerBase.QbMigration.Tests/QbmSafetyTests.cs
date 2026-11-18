@@ -31,4 +31,11 @@ public class QbmSafetyTests
             .Should().Be("ch***@yslworkflow.com: QuickBase Super User; a***@x.com too");
         QbmSafety.MaskEmails("3 users, no emails here").Should().Be("3 users, no emails here");
     }
+
+    [Theory]
+    [InlineData("josé.müller@bücher.de: inactive", "jo***@bücher.de: inactive")]
+    [InlineData("'o'brien!x@mail.co.uk', role", "'o***@mail.co.uk', role")]
+    [InlineData("<first+tag@sub.example.org>", "<fi***@sub.example.org>")]
+    public void Unusual_emails_are_masked_too(string text, string masked) =>
+        QbmSafety.MaskEmails(text).Should().Be(masked);
 }
