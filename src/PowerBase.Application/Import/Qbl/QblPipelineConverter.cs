@@ -81,7 +81,9 @@ public static class QblPipelineConverter
     /// <summary>The pipelines of the file. <paramref name="qbl"/> is the parsed document (applications, tables, fields,
     /// parameters); <paramref name="content"/> is the file itself, from which the pipeline resources are read again (see
     /// <see cref="ReadPipelineResources"/>).</summary>
-    public static IReadOnlyList<PblPipeline> ConvertAll(QblDocument qbl, string content)
+    /// <param name="skipStepsWithUnmatchedTable">Pipeline-only import: a step whose Quickbase table matched no existing table
+    /// (it is still a bare Quickbase id) is skipped and reported instead of imported without a table.</param>
+    public static IReadOnlyList<PblPipeline> ConvertAll(QblDocument qbl, string content, bool skipStepsWithUnmatchedTable = false)
     {
         var pipelineRefs = qbl.Resources.Where(r => r.Value.Type == PIPELINE_TYPE).Select(r => r.Key).ToList();
         if (pipelineRefs.Count == 0)
@@ -113,7 +115,7 @@ public static class QblPipelineConverter
                 if (!resources.TryGetValue(pipelineRef, out var node))
                     throw new InvalidOperationException("the pipeline was not found when the file was read again");
                 index ??= FieldIndex.Build(qbl);
-                result.Add(new PipelineReader(pipelineRef, node, accountChannels, index, accountAliases).Read());
+                result.Add(new PipelineReader(pipelineRef, node, accountChannels, index, accountAliases, skipStepsWithUnmatchedTable).Read());
             }
             catch (Exception ex)
             {
@@ -248,7 +250,9 @@ public static class QblPipelineConverter
     internal static string NormalizeKey(string text)
     {
         var chars = text.Trim().ToLowerInvariant().Select(c => char.IsLetterOrDigit(c) ? c : '_').ToArray();
-        return Regex.Replace(new string(chars), "_+", "_").Trim('_');
+        var key = Regex.Replace(new string(chars), "_+", "_").Trim('_');
+        // Quickbase keys a label that starts with a digit with a leading "n" ("30 Days Post Completion" → n30_days_post_completion).
+        return key.Length > 0 && char.IsDigit(key[0]) ? "n" + key : key;
     }
 
     // ------------------------------------------------------------------------------------------------------------------------
@@ -413,7 +417,7 @@ public static class QblPipelineConverter
     }
 
     private sealed class PipelineReader(string pipelineRef, QblResourceNode node, IReadOnlyDictionary<string, string> accountChannels, FieldIndex index,
-        IReadOnlyDictionary<string, string> accountAliases)
+        IReadOnlyDictionary<string, string> accountAliases, bool skipStepsWithUnmatchedTable = false)
     {
         private static readonly Regex TokenPattern = new(@"\{\{(.*?)\}\}|\{%.*?%\}", RegexOptions.Singleline | RegexOptions.Compiled);
         private static readonly Regex PathToken = new(@"^\s*([A-Za-z][A-Za-z0-9_]*)((?:\.\$?[A-Za-z0-9_]+)+)\s*$", RegexOptions.Compiled); // powerflowextraRd: "$" allowed ({{a.$prev.name}})
@@ -440,6 +444,7 @@ public static class QblPipelineConverter
             _pipeline.SourceStepCount = _all.Count;
             AssignRefIds();
             SkipUnsupported();
+            if (skipStepsWithUnmatchedTable) SkipUnmatchedTables();
             ResolveTables();
             SkipBrokenDependencies();
             _pipeline.AppRef = PickApp();
@@ -564,6 +569,21 @@ public static class QblPipelineConverter
             });
             foreach (var nested in step.Nested)
                 Remove(nested, "PIPELINE_STEP_PARENT_SKIPPED", $"Skipped because the step that contains it ('{step.Name}', {step.Label}) is not imported.");
+        }
+
+        /// <summary>Pipeline-only import: a table data source that is still a bare Quickbase table id (bwcrtu9k5) matched no table of
+        /// the user's apps — its app was not imported. Such a step is skipped (and reported), never pointed at another table.</summary>
+        private void SkipUnmatchedTables()
+        {
+            foreach (var step in _all.Where(s => !s.Removed).ToList())
+                foreach (var (name, source) in step.DataSources)
+                    if (source.Type == "QB::PipelineStep::DataSource::Table"
+                        && source.Properties.TryGetValue("Table", out var value) && value is string qbTable && !string.IsNullOrWhiteSpace(qbTable))
+                    {
+                        Remove(step, "PIPELINE_STEP_TABLE_NOT_MATCHED",
+                            $"Skipped because its Quickbase table '{qbTable}' ({name}) matches no table of your apps (its Quickbase app was not imported).");
+                        break;
+                    }
         }
 
         private void ResolveTables()
@@ -1368,7 +1388,7 @@ public static class QblPipelineConverter
                     switch (Scalar(node, "Type"))
                     {
                         case "relational-expression":
-                            stack.Push([[node]]);
+                            stack.Push(Expand(node));
                             break;
                         case "logical-operator" when stack.Count >= 2 && Scalar(node, "Operator")?.ToUpperInvariant() is "AND" or "OR":
                             var right = stack.Pop();
@@ -1402,6 +1422,43 @@ public static class QblPipelineConverter
                 return true;
             }
 
+            /// <summary>Quickbase operators PowerFlows has no single operator for, written as the rules that mean the same:
+            /// <c>between [a, b]</c> → on or after a AND on or before b (<c>!between</c> → before a OR after b, numbers alike);
+            /// relative dates <c>more-than / less-than [n, unit, past|future]</c> → before / after today ± n units (a Jinja value the
+            /// converter turns into a formula); a custom expression (<c>Operator: true</c>, <c>{{c.status == 200}}</c>) → that
+            /// expression equals true. Anything else is one rule as written.</summary>
+            private List<List<IReadOnlyDictionary<string, object?>>> Expand(IReadOnlyDictionary<string, object?> node)
+            {
+                var op = Scalar(node, "Operator") ?? "";
+                var negated = op.StartsWith('!');
+                var name = negated ? op[1..] : op;
+                node.TryGetValue("Value", out var raw);
+                Dictionary<string, object?> With(string newOp, object? value)
+                {
+                    var copy = new Dictionary<string, object?>(node, StringComparer.Ordinal) { ["Operator"] = newOp, ["Value"] = value };
+                    return copy;
+                }
+                if (name == "between" && raw is IList<object?> { Count: >= 2 } range)
+                {
+                    var numeric = decimal.TryParse(range[0]?.ToString(), System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out _);
+                    var (lo, hi) = numeric ? ("greater", "less") : ("after", "before");
+                    // a ≤ x ≤ b is NOT (x < a) AND NOT (x > b).
+                    return negated
+                        ? [[With(hi, range[0])], [With(lo, range[1])]]
+                        : [[With("!" + hi, range[0]), With("!" + lo, range[1])]];
+                }
+                if (name is "more-than" or "less-than" && raw is IList<object?> { Count: >= 3 } rel && rel[2]?.ToString() is "past" or "future")
+                {
+                    // more than n in the past = before (today - n); less than n in the past = after it; the future mirrored.
+                    var past = rel[2]!.ToString() == "past";
+                    var before = (name == "more-than") == past;
+                    return [[With((negated ? "!" : "") + (before ? "before" : "after"), raw)]];
+                }
+                if (name == "true" && node.ContainsKey("CustomExpr") && raw is string expression && expression.Contains("{{", StringComparison.Ordinal))
+                    return [[new Dictionary<string, object?>(StringComparer.Ordinal) { ["Type"] = "custom-expression", ["Value"] = expression, ["Negated"] = negated }]];
+                return [[node]];
+            }
+
             private bool FilterNotVerified(string message)
             {
                 Incomplete("PIPELINE_FILTER_NOT_VERIFIED", message + " Set it again before turning the PowerFlow on.");
@@ -1411,6 +1468,11 @@ public static class QblPipelineConverter
             /// <summary>A Search / trigger filter rule as the PowerFlows filter editor writes it.</summary>
             private Dictionary<string, object?>? FilterRule(IReadOnlyDictionary<string, object?> expression)
             {
+                if (Scalar(expression, "Type") == "custom-expression")
+                {
+                    FilterNotVerified("A Search/trigger filter with a custom expression has no PowerFlows equivalent; it was left empty.");
+                    return null;
+                }
                 var key = Scalar(expression, "Field");
                 var field = key is null || source.Table is null ? null : FieldByKey(source.Table.Value, key);
                 if (field is null)
@@ -1429,6 +1491,16 @@ public static class QblPipelineConverter
             /// <summary>A Condition rule as the condition editor writes it: the tested step's field on the left.</summary>
             private Dictionary<string, object?>? ConditionRule(IReadOnlyDictionary<string, object?> expression)
             {
+                if (Scalar(expression, "Type") == "custom-expression")
+                {
+                    // Quickbase "custom expression" ({{c.status == 200}}): the expression, as a formula, must be true.
+                    var formula = Text(Scalar(expression, "Value"), "Condition expression");
+                    if (formula is string { Length: 0 }) return null;
+                    return new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        ["type"] = "rule", ["left"] = formula, ["op"] = expression.TryGetValue("Negated", out var neg) && neg is true ? "not-equals" : "equals", ["right"] = "true",
+                    };
+                }
                 var targetId = Scalar(expression, "Target");
                 var key = Scalar(expression, "Field");
                 if (targetId is null || !reader._byId.TryGetValue(targetId, out var tested))
@@ -1476,6 +1548,12 @@ public static class QblPipelineConverter
                     Incomplete("PIPELINE_FILTER_OPERATOR", $"Filter operator '{Scalar(expression, "Operator")}' on step '{search.Name}' ({search.Label}) has no confirmed PowerFlows equivalent; the filter was left empty.");
                     return null;
                 }
+                // The Search was not imported: a rule on its count would point at a missing step (and stop every step from saving).
+                if (search.Removed)
+                {
+                    Incomplete("PIPELINE_REFERENCE_CLEARED", $"The rule on step '{search.Name}' ({search.Label}) was cleared: that step is not imported. Set it again before turning the PowerFlow on.");
+                    return null;
+                }
                 return new Dictionary<string, object?>(StringComparer.Ordinal)
                 {
                     ["type"] = "rule", ["left"] = $"{{{{steps.{search.RefId}.count}}}}", ["op"] = found.Value ? "not-equals" : "equals", ["right"] = "0",
@@ -1513,7 +1591,7 @@ public static class QblPipelineConverter
                 var name = type?.Split("::") is { Length: >= 3 } parts ? parts[2] : null;
                 switch (name)
                 {
-                    case "Number" or "Currency" or "Percent" or "Rating" or "Duration" or "RecordID": return "NUMBER";
+                    case "Number" or "Numeric" or "Currency" or "Percent" or "Rating" or "Duration" or "RecordID": return "NUMBER";
                     case "Date" or "DateTime" or "DateCreated" or "DateModified" or "WorkDate" or "TimeOfDay": return "DATE";
                     case "Checkbox": return "BOOLEAN";
                     case null or "Lookup" or "Summary" or "Unsupported":
@@ -1562,14 +1640,72 @@ public static class QblPipelineConverter
                 }
                 if (mapped.Value.Unary)
                     return (mapped.Value.Op, NONE);
+                string? zoneOfValue = null;
                 if (name == "on_date" && raw is IList<object?> { Count: > 0 } onDate)
                 {
                     raw = onDate[0];
                     if (onDate.Count > 1 && onDate[1]?.ToString() is { Length: > 0 } zone)
+                    {
+                        zoneOfValue = zone;
+                        if (RelativeDay(raw, zone, fieldType) is { } relativeDay)
+                            return (mapped.Value.Op, relativeDay);
                         raw = OnDateInZone(raw, zone, fieldType, forCondition);
+                    }
+                }
+                if (category == "DATE")
+                {
+                    // [n, days, past] (Quickbase's relative date) or {{time.today - time.delta(days=n)}}: PowerFlows' own relative
+                    // date, which the editor shows as "n day(s) in the past" and the engine works out when the PowerFlow runs.
+                    if (raw is IList<object?> { Count: >= 3 } relative && RelativeList(relative) is { } fromList)
+                        return (mapped.Value.Op, fromList);
+                    if (raw is IList<object?> { Count: >= 3 } hoursList && HoursFormula(hoursList) is { } hoursJinja)
+                        raw = hoursJinja;
+                    else if (RelativeDay(raw, zoneOfValue ?? "UTC", fieldType) is { } relativeDay)
+                        return (mapped.Value.Op, relativeDay);
                 }
                 return (mapped.Value.Op, Text(raw, forCondition ? "Condition value" : "Filter value"));
             }
+
+            /// <summary><c>[n, days|weeks, past|future, zone?]</c> → <c>@relative-date|past|n|zone</c> (UTC when the file gives no zone,
+            /// as Quickbase's own <c>time.today</c>). Months, years and hours have no day count: null.</summary>
+            private static string? RelativeList(IList<object?> value)
+            {
+                if (!int.TryParse(value[0]?.ToString(), out var n) || n < 0) return null;
+                var days = value[1]?.ToString()?.TrimEnd('s') switch { "day" => n, "week" => n * 7, _ => (int?)null };
+                if (days is null || value[2]?.ToString() is not ("past" or "future") || days > 365000) return null;
+                var zone = value.Count > 3 && value[3]?.ToString() is { Length: > 0 } z && TimeZoneInfo.TryFindSystemTimeZoneById(z, out _) ? z : "UTC";
+                return Relative(days.Value == 0 ? "today" : value[2]!.ToString()!, days.Value, zone);
+            }
+
+            /// <summary><c>[n, hours|minutes, past|future]</c> → a Jinja value (now ± n), turned into a formula like any other.</summary>
+            private static string? HoursFormula(IList<object?> value)
+            {
+                if (!decimal.TryParse(value[0]?.ToString(), System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var n)) return null;
+                var unit = value[1]?.ToString()?.TrimEnd('s') switch { "hour" => "hours", "minute" => "minutes", "month" => "months", "year" => "years", _ => null };
+                if (unit is null || value[2]?.ToString() is not ("past" or "future")) return null;
+                var basis = unit is "hours" or "minutes" ? "time.now" : "time.today";
+                return $"{{{{{basis} {(value[2]!.ToString() == "past" ? "-" : "+")} time.delta({unit}={n.ToString(System.Globalization.CultureInfo.InvariantCulture)})}}}}";
+            }
+
+            private static readonly Regex TodayJinja = new(
+                @"^\{\{\s*\(?\s*time\.(?<base>today|now)\s*(?:(?<sign>[-+])\s*time\.delta\(\s*(?<unit>days|weeks)\s*=\s*(?<n>\d+)\s*\))?\s*\)?\s*(?<filter>\|\s*date_(?:ymd|mdy|dmy)(?:\([^)]*\))?)?\s*\}\}$",
+                RegexOptions.Compiled);
+
+            /// <summary>A Jinja day relative to today ({{time.today}}, {{(time.today - time.delta(days=30))|date_ymd}}, {{time.now|date_mdy}})
+            /// → <c>@relative-date|today|0|zone</c> / <c>past|30</c> / <c>future|n</c>. <c>time.now</c> without a date filter is an instant,
+            /// kept as it is unless the field holds a day (a Date field).</summary>
+            private static string? RelativeDay(object? raw, string zone, string? fieldType)
+            {
+                if (raw is not string text || TodayJinja.Match(text.Trim()) is not { Success: true } m) return null;
+                var dateField = fieldType?.Split("::") is { Length: >= 3 } parts && parts[2] is "Date" or "WorkDate";
+                if (m.Groups["base"].Value == "now" && !m.Groups["filter"].Success && !dateField) return null;
+                if (!TimeZoneInfo.TryFindSystemTimeZoneById(zone, out _)) zone = "UTC";
+                var n = m.Groups["n"].Success ? int.Parse(m.Groups["n"].Value, System.Globalization.CultureInfo.InvariantCulture) * (m.Groups["unit"].Value == "weeks" ? 7 : 1) : 0;
+                if (n == 0) return Relative("today", 0, zone);
+                return Relative(m.Groups["sign"].Value == "-" ? "past" : "future", n, zone);
+            }
+
+            private static string Relative(string mode, int days, string zone) => $"@relative-date|{mode}|{(mode == "today" ? 0 : days)}|{zone}";
 
             private void Filters()
             {
