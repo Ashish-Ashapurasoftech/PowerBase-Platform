@@ -2024,8 +2024,21 @@ public static class QblToPblConverter
                 if (item is not Dictionary<string, object?> sortItem)
                     continue;
 
-                var fieldRefValue = (sortItem.TryGetValue("Field", out var f) ? f as QblRef : null)?["Field"];
-                if (fieldRefValue is null || !fieldNameByRef.TryGetValue(fieldRefValue, out var fieldName))
+                var sortRef = sortItem.TryGetValue("Field", out var f) ? f as QblRef : null;
+                var fieldRefValue = sortRef?["Field"];
+                string? fieldName = null;
+                if (fieldRefValue is null && sortRef is not null && sortRef.Scopes.TryGetValue("ReportFormula", out var sortFormulaRef))
+                {
+                    // Sorting or grouping by a report formula: it goes by the formula's name, like a column does.
+                    fieldName = reportType == "Table"
+                        ? RegisterReportFormula(sortFormulaRef, report.ReportFormulas, reportNode, tableReportsAndCharts, name, "sort or grouping", "QBL_REPORT_FORMULA_SORT_NOT_CARRIED", reportRef, issues)
+                        : null;
+                    if (reportType != "Table")
+                        issues.Add(Warning("QBL_REPORT_FORMULA_SORT_NOT_CARRIED", $"Report '{name}' sorts or groups by a report-level formula, which is only carried on table reports; that sort level was left out.", reportRef));
+                    if (fieldName is null)
+                        continue;
+                }
+                else if (fieldRefValue is null || !fieldNameByRef.TryGetValue(fieldRefValue, out fieldName))
                     continue;
 
                 var descending = string.Equals(sortItem.TryGetValue("SortOrder", out var so) ? so?.ToString() : null, "Descending", StringComparison.OrdinalIgnoreCase);
@@ -2036,7 +2049,7 @@ public static class QblToPblConverter
             }
         }
 
-        ApplyReportOptions(report, reportNode, fieldNameByRef, fieldNameBySourceId, issues, reportRef);
+        ApplyReportOptions(report, reportNode, fieldNameByRef, fieldNameBySourceId, tableReportsAndCharts, issues, reportRef);
         foreach (var message in QblUnmappedSettings.ForReport(reportNode))
             issues.Add(Warning("QBL_REPORT_SETTING_NOT_CARRIED", $"Report '{name}': {message}", report.LogicalRef));
         return report;
@@ -2052,7 +2065,8 @@ public static class QblToPblConverter
 
     /// <summary>Report filters, totals, grouping display, column header text, grid options, dynamic filters and role visibility.
     /// A filter that cannot be translated is reported and the report is imported without it (never with a wrong one).</summary>
-    private static void ApplyReportOptions(PblReport report, QblResourceNode node, Dictionary<string, string> fieldNameByRef, Dictionary<int, string> fieldNameBySourceId, List<PblIssue> issues, string reportRef)
+    private static void ApplyReportOptions(PblReport report, QblResourceNode node, Dictionary<string, string> fieldNameByRef, Dictionary<int, string> fieldNameBySourceId,
+        IReadOnlyDictionary<string, QblResourceNode> tableReportsAndCharts, List<PblIssue> issues, string reportRef)
     {
         report.Description = NullIfBlank(ResolveScalar(node, "Description"));
         report.ShowDescription = node.PropertyBool("ShowDescription");
@@ -2062,7 +2076,17 @@ public static class QblToPblConverter
             var criteria = filters.TryGetValue("Criteria", out var c) ? c?.ToString() : null;
             if (!string.IsNullOrWhiteSpace(criteria) && !string.Equals(criteria.Trim(), "Default", StringComparison.OrdinalIgnoreCase))
             {
-                var result = QblCriteriaTranslator.Translate(criteria, id => fieldNameBySourceId.GetValueOrDefault(id), allowPrompts: true, allowRelativeDates: true);
+                // A negative field id in the criteria is one of the report's own formulas (table reports only): it resolves to that formula's name.
+                string? ResolveCriteriaField(int id)
+                {
+                    if (id >= 0)
+                        return fieldNameBySourceId.GetValueOrDefault(id);
+                    if (report.ReportType != "Table" || ReportFormulaRefForCriteriaId(id, node) is not { } formulaRef)
+                        return null;
+                    return RegisterReportFormula(formulaRef, report.ReportFormulas, node, tableReportsAndCharts, report.Name, "filter", "QBL_REPORT_FORMULA_FILTER_NOT_CARRIED", reportRef, issues);
+                }
+
+                var result = QblCriteriaTranslator.Translate(criteria, ResolveCriteriaField, allowPrompts: true, allowRelativeDates: true);
                 if (result.Succeeded) report.Filter = result.Filter;
                 else issues.Add(Warning("QBL_REPORT_FILTER_UNTRANSLATABLE", $"Report '{report.Name}': its filter could not be translated ({result.Problem}); imported without the filter.", reportRef));
             }
@@ -2328,30 +2352,9 @@ public static class QblToPblConverter
                     }
                     else if (item is QblRef { } formulaColumn && formulaColumn.Scopes.TryGetValue("ReportFormula", out var formulaRef))
                     {
-                        var formula = ResolveReportFormulaDefinition(formulaRef, reportNode, tableReportsAndCharts);
-                        if (formula is null)
-                        {
-                            issues.Add(Warning("QBL_REPORT_FORMULA_COLUMN_NOT_CARRIED",
-                                $"Report '{reportName}' has a report-level formula column ('{InferFieldName(formulaRef, null)}') that PowerBase reports cannot hold, so that column was left out. Add the calculation as a formula field on the table to show it in the report.",
-                                reportRef));
-                        }
-                        else if (reportFormulas.Count >= ReportFormulaFields.MaxFormulas)
-                        {
-                            issues.Add(Warning("QBL_REPORT_FORMULA_COLUMN_NOT_CARRIED",
-                                $"Report '{reportName}' already has {ReportFormulaFields.MaxFormulas} formula columns (PowerBase's maximum per report); formula column '{formula.Value.Name}' was left out. Add the calculation as a formula field on the table to show it in the report.",
-                                reportRef));
-                        }
-                        else
-                        {
-                            reportFormulas.Add(new PblReportFormula
-                            {
-                                Name = formula.Value.Name,
-                                ResultType = formula.Value.ResultType,
-                                DisplayAs = formula.Value.DisplayAs,
-                                Expression = formula.Value.Expression,
-                            });
-                            columns.Add(formula.Value.Name);
-                        }
+                        var formulaName = RegisterReportFormula(formulaRef, reportFormulas, reportNode, tableReportsAndCharts, reportName, "formula column", "QBL_REPORT_FORMULA_COLUMN_NOT_CARRIED", reportRef, issues);
+                        if (formulaName is not null)
+                            columns.Add(formulaName);
                     }
                     continue;
                 }
@@ -2378,14 +2381,17 @@ public static class QblToPblConverter
     private static (string Name, string ResultType, string? DisplayAs, string Expression)? ResolveReportFormulaDefinition(
         string formulaRef, QblResourceNode reportNode, IReadOnlyDictionary<string, QblResourceNode> tableReportsAndCharts)
     {
-        if (!reportNode.ChildMap("Formulas").TryGetValue(formulaRef, out var formulaNode) &&
+        // Real exports keep a report's formulas in the report's own "ReportFormulas" map (name in "Label"); the other two places are
+        // layouts an earlier version of this importer guessed at and are kept so nothing that worked before stops working.
+        if (!reportNode.ChildMap("ReportFormulas").TryGetValue(formulaRef, out var formulaNode) &&
+            !reportNode.ChildMap("Formulas").TryGetValue(formulaRef, out formulaNode) &&
             !tableReportsAndCharts.TryGetValue(formulaRef, out formulaNode))
             return null;
 
         if (!formulaNode.Type.StartsWith("QB::Report::Formula::", StringComparison.Ordinal))
             return null;
 
-        var name = NullIfBlank(ResolveScalar(formulaNode, "Name"));
+        var name = NullIfBlank(ResolveScalar(formulaNode, "Name")) ?? NullIfBlank(ResolveScalar(formulaNode, "Label"));
         var expression = NullIfBlank(ResolveScalar(formulaNode, "Formula")) ?? NullIfBlank(ResolveScalar(formulaNode, "Expression"));
         if (name is null || expression is null)
             return null;
@@ -2395,6 +2401,7 @@ public static class QblToPblConverter
         {
             "Checkbox" => ("Bool", (string?)null),
             "Date" => ("Date", null),
+            "DateTime" => ("DateTime", null),
             "TimeOfDay" => ("Time", null),
             "NumericPercent" => ("Number", "Percent"),
             "Numeric" => ("Number", null),
@@ -2402,6 +2409,59 @@ public static class QblToPblConverter
         };
 
         return (name, resultType, displayAs, expression);
+    }
+
+    /// <summary>Adds the report formula <paramref name="formulaRef"/> to the report's formulas (once, however many places use it) and returns its
+    /// name, or null — with a notice saying what was left out and why — when its definition cannot be found or the report already has the
+    /// maximum PowerBase allows. <paramref name="usage"/> is what the formula was used for ("formula column", "sort", "filter").</summary>
+    private static string? RegisterReportFormula(
+        string formulaRef, List<PblReportFormula> reportFormulas, QblResourceNode reportNode,
+        IReadOnlyDictionary<string, QblResourceNode> tableReportsAndCharts, string reportName, string usage, string code, string reportRef, List<PblIssue> issues)
+    {
+        var formula = ResolveReportFormulaDefinition(formulaRef, reportNode, tableReportsAndCharts);
+        if (formula is null)
+        {
+            issues.Add(Warning(code,
+                $"Report '{reportName}' uses a report-level formula ('{InferFieldName(formulaRef, null)}') in a {usage}, but its definition was not found in the file, so that {usage} was left out.",
+                reportRef));
+            return null;
+        }
+
+        var existing = reportFormulas.FirstOrDefault(f => string.Equals(f.Name, formula.Value.Name, StringComparison.OrdinalIgnoreCase));
+        if (existing is not null)
+            return existing.Name;
+
+        if (reportFormulas.Count >= ReportFormulaFields.MaxFormulas)
+        {
+            issues.Add(Warning(code,
+                $"Report '{reportName}' already has {ReportFormulaFields.MaxFormulas} report formulas (PowerBase's maximum per report); '{formula.Value.Name}' was left out of the {usage}. Add the calculation as a formula field on the table to use it.",
+                reportRef));
+            return null;
+        }
+
+        reportFormulas.Add(new PblReportFormula
+        {
+            Name = formula.Value.Name,
+            ResultType = formula.Value.ResultType,
+            DisplayAs = formula.Value.DisplayAs,
+            Expression = formula.Value.Expression,
+        });
+        return formula.Value.Name;
+    }
+
+    /// <summary>The report formulas of a report in the order the file defines them (ReportFormula_1, ReportFormula_2, …).</summary>
+    private static List<string> ReportFormulaRefsInOrder(QblResourceNode reportNode) =>
+        [.. reportNode.ChildMap("ReportFormulas").Keys
+            .OrderBy(k => int.TryParse(Regex.Match(k, @"\d+$").Value, out var n) ? n : int.MaxValue)
+            .ThenBy(k => k, StringComparer.Ordinal)];
+
+    /// <summary>Quickbase's filter criteria name a report formula by a negative field id: -1 is the report's first formula and -100 its second
+    /// (confirmed on real exports; a different negative id is not guessed at). Returns the formula's ref, or null.</summary>
+    private static string? ReportFormulaRefForCriteriaId(int id, QblResourceNode reportNode)
+    {
+        var index = id switch { -1 => 0, -100 => 1, _ => -1 };
+        var refs = ReportFormulaRefsInOrder(reportNode);
+        return index >= 0 && index < refs.Count ? refs[index] : null;
     }
 
     // ── Forms (Pass C) ───────────────────────────────────────────────────────
@@ -2682,6 +2742,8 @@ public static class QblToPblConverter
             LogicalRef = qualifiedSectionRef,
             Name = string.IsNullOrWhiteSpace(title) ? InferFieldName(sectionRef, null) : title,
             IsCollapsed = sectionNode.PropertyBool("IsCollapsedByDefault"),
+            // A section the user never titled gets an inferred name ("Form V2 section 1"); don't display it.
+            ShowHeading = !string.IsNullOrWhiteSpace(title),
             ShowDividers = sectionNode.Properties.ContainsKey("ShowColumnDividers") ? sectionNode.PropertyBool("ShowColumnDividers") : null,
         };
 

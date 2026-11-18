@@ -15,22 +15,29 @@ public class IsParentAllowedQueryHandler
     private readonly IRelationshipRepository _relRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly IQueryContext _queryContext;
+    private readonly IUserRepository? _userRepo;
+    private readonly IAppUserRepository? _appUserRepo;
 
     public IsParentAllowedQueryHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRelationshipRepository relRepo,
         IRecordRepository recordRepo,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IUserRepository? userRepo = null,
+        IAppUserRepository? appUserRepo = null)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _relRepo = relRepo;
         _recordRepo = recordRepo;
         _queryContext = queryContext;
+        _userRepo = userRepo;
+        _appUserRepo = appUserRepo;
     }
 
-    /// <param name="parentRecord">The parent's row Id (Record ID#) or its PublicId.</param>
+    /// <param name="parentRecord">The parent's row Id (Record ID#), its PublicId, or the key text a Reference reads back
+    /// as when its parent shows a key (resolved as the save check resolves it — see <see cref="ReferenceWriteValidator"/>).</param>
     /// <param name="filterValues">Current form values of controlling fields (fid → value); empty when the
     /// check runs outside a form, in which case conditions on form fields can't be judged.</param>
     public async Task<bool> HandleAsync(
@@ -42,12 +49,7 @@ public class IsParentAllowedQueryHandler
 
         var parent = await _tableRepo.GetByIdAsync(rel.ParentTableId, ct);
 
-        long parentRowId;
-        if (long.TryParse(parentRecord, out var rowId)) parentRowId = rowId;
-        else if (Guid.TryParse(parentRecord, out var publicId))
-            parentRowId = await _recordRepo.GetRecordIdByPublicIdAsync(parent, publicId, ct: ct);
-        else return false;
-
+        var parentRowId = await ParentRecordResolver.ResolveRowIdAsync(rel, parent, parentRecord, _recordRepo, _fieldRepo, ct);
         if (parentRowId <= 0 || !await _recordRepo.ExistsAsync(parent, parentRowId, ct)) return false;
 
         var childFields = await _fieldRepo.ListByTableAsync(rel.ChildTableId, ct);
@@ -58,7 +60,8 @@ public class IsParentAllowedQueryHandler
         var parentFields = await _fieldRepo.ListByTableAsync(parent.Id, ct);
         var clauses = await ReferenceFilterResolver.BuildAsync(
             settings, childFields, parentFields,
-            filterValues ?? new Dictionary<int, string?>(), _tableRepo, _fieldRepo, ct, _queryContext.UserId, _relRepo, _recordRepo);
+            filterValues ?? new Dictionary<int, string?>(), _tableRepo, _fieldRepo, ct, _queryContext.UserId, _relRepo, _recordRepo,
+            _userRepo is null ? null : new ReferenceFilterUsers(_userRepo, _appUserRepo, _queryContext.UserEmail, _queryContext.UserName));
         if (clauses.Count == 0) return true;   // nothing applicable without form values
 
         return await _recordRepo.MatchesReferenceFilterAsync(parent, parentRowId, clauses, ct);
