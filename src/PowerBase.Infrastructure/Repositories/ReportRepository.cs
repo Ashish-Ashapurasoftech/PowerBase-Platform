@@ -101,6 +101,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
           AND (@search IS NULL OR r.Name LIKE @search OR r.ReportType LIKE @search OR r.Visibility LIKE @search)
           AND (
               r.Visibility = 'Shared'
+              OR (@includeHidden = 1 AND r.Visibility = 'Hidden') -- settings list only: hidden reports are unlisted everywhere else
               OR (r.Visibility = 'Personal' AND r.OwnerId = @userId)
               OR (r.Visibility IN ('MyRole', 'SpecificRoles', 'Role') AND EXISTS (
                   SELECT 1 FROM meta.AppRoleReport arr
@@ -121,6 +122,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
           AND (@search IS NULL OR r.Name LIKE @search)
           AND (
               r.Visibility = 'Shared'
+              OR (@includeHidden = 1 AND r.Visibility = 'Hidden') -- settings list only: hidden reports are unlisted everywhere else
               OR (r.Visibility = 'Personal' AND r.OwnerId = @userId)
               OR (r.Visibility IN ('MyRole', 'SpecificRoles', 'Role') AND EXISTS (
                   SELECT 1 FROM meta.AppRoleReport arr
@@ -371,7 +373,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
     }
 
     public async Task<IReadOnlyList<ReportListItemDto>> ListByTablePagedAsync(
-        Guid tablePublicId, int page, int pageSize, string? search, string sortBy, bool sortDesc, CancellationToken ct = default)
+        Guid tablePublicId, int page, int pageSize, string? search, string sortBy, bool sortDesc, CancellationToken ct = default, bool includeHidden = false)
     {
         var column = ResolveSortColumn(sortBy);
         var sql = string.Format(ListByTablePagedSqlTemplate, $"{column} {(sortDesc ? "DESC" : "ASC")}, r.Id");
@@ -384,12 +386,13 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
                 userId = QueryContext.UserId,
                 search = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim()}%",
                 offset = (page - 1) * pageSize,
-                pageSize
+                pageSize,
+                includeHidden = includeHidden ? 1 : 0
             }, cancellationToken: ct));
         return rows.ToList();
     }
 
-    public async Task<int> CountByTableAsync(Guid tablePublicId, string? search, CancellationToken ct = default)
+    public async Task<int> CountByTableAsync(Guid tablePublicId, string? search, CancellationToken ct = default, bool includeHidden = false)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<int>(
@@ -398,6 +401,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
                 tablePublicId,
                 userId = QueryContext.UserId,
                 search = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim()}%",
+                includeHidden = includeHidden ? 1 : 0,
             }, cancellationToken: ct));
     }
 
