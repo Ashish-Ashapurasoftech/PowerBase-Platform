@@ -18,7 +18,12 @@ public class PipelineOnlyImportService(
 {
     private const string ADMINISTRATOR_ROLE = "Administrator";
 
-    public sealed record Prepared(PipelineOnlyBinding Binding, IReadOnlyList<ParsedApp> Apps);
+    /// <summary><paramref name="NotImported"/>: pipelines of the file left out because none of their tables or apps matches an
+    /// app of the user (name, reason).</summary>
+    public sealed record Prepared(PipelineOnlyBinding Binding, IReadOnlyList<ParsedApp> Apps, IReadOnlyList<(string Name, string Reason)> NotImported)
+    {
+        public Prepared(PipelineOnlyBinding binding, IReadOnlyList<ParsedApp> apps) : this(binding, apps, []) { }
+    }
 
     /// <summary>Matches the file to the apps the user administers and converts its pipelines, without writing anything.</summary>
     public virtual async Task<Prepared> PrepareAsync(string content, CancellationToken ct)
@@ -29,12 +34,39 @@ public class PipelineOnlyImportService(
             return new Prepared(binding, []);
 
         var qbl = QblSerializer.Deserialize(binding.Content);
-        var pipelines = QblPipelineConverter.ConvertAll(qbl, binding.Content);
+        var pipelines = QblPipelineConverter.ConvertAll(qbl, binding.Content, skipStepsWithUnmatchedTable: true);
         var appRefs = binding.Apps.Select(a => a.AppRef).ToList();
+        var (kept, notImported) = SplitByApp(pipelines, appRefs);
         var parsed = binding.Apps
-            .Select((a, i) => new ParsedApp(a.AppRef, Document(a.AppRef, a.App), [], QblPipelineConverter.ForApp(pipelines, appRefs, i)))
+            .Select((a, i) => new ParsedApp(a.AppRef, Document(a.AppRef, a.App), [], QblPipelineConverter.ForApp(kept, appRefs, i)))
             .ToList();
-        return new Prepared(binding, parsed);
+        return new Prepared(binding, parsed, notImported);
+    }
+
+    /// <summary>A pipeline goes into the app its trigger (or first step with a table) was matched to. A pipeline none of whose
+    /// steps matched an app belongs to a Quickbase app that is not among the user's apps: it is left out (and reported) rather
+    /// than put into an unrelated app.</summary>
+    public static (List<PblPipeline> Kept, List<(string Name, string Reason)> NotImported) SplitByApp(
+        IReadOnlyList<PblPipeline> pipelines, IReadOnlyList<string> appRefs)
+    {
+        var kept = new List<PblPipeline>();
+        var notImported = new List<(string, string)>();
+        foreach (var pipeline in pipelines)
+        {
+            // Its steps on the user's tables cannot start a PowerFlow (the trigger was on a table of a Quickbase app that was not
+            // imported): an empty PowerFlow would be created, so it is reported instead.
+            if (pipeline.AppRef is not null && appRefs.Contains(pipeline.AppRef, StringComparer.Ordinal)
+                && pipeline.Issues.Any(i => i.Code == "PIPELINE_NO_VALID_START"))
+                notImported.Add((pipeline.Name, "Its trigger / first step uses a table that is not in your apps (a Quickbase app that was not imported, or a clone of one), so the steps on your tables cannot start a PowerFlow. "
+                    + string.Join(" ", pipeline.Issues.Where(i => i.Code is "PIPELINE_STEP_TABLE_NOT_MATCHED").Select(i => $"Skipped: '{i.StepName}'.").Distinct().Take(5))));
+            else if (pipeline.AppRef is not null && appRefs.Contains(pipeline.AppRef, StringComparer.Ordinal))
+                kept.Add(pipeline);
+            else
+                notImported.Add((pipeline.Name, pipeline.IsUnreadable
+                    ? "The pipeline could not be read."
+                    : "None of its Quickbase tables matches a table of an app you administer (its Quickbase app was not imported). Import that application first, then this file again."));
+        }
+        return (kept, notImported);
     }
 
     /// <summary>Creates the file's pipelines (turned off, like every imported PowerFlow unless <paramref name="activate"/>).</summary>
@@ -55,11 +87,13 @@ public class PipelineOnlyImportService(
 
         foreach (var note in prepared.Binding.Notes)
             imported[0].Report.Skipped.Add(new ImportSkippedItem { LogicalRef = "", Name = "Pipeline-only import", Reason = note });
+        foreach (var (name, reason) in prepared.NotImported)
+            imported[0].Report.Skipped.Add(new ImportSkippedItem { LogicalRef = "", Name = name, Reason = reason, Code = "PIPELINE_ONLY_APP_NOT_FOUND" });
         foreach (var table in prepared.Binding.UnmatchedTables)
             imported[0].Report.Skipped.Add(new ImportSkippedItem
             {
                 LogicalRef = table, Name = $"Quickbase table {table}",
-                Reason = "No existing table matches this Quickbase table; its steps were imported without a table. Choose it in the step.",
+                Reason = "No existing table matches this Quickbase table; its steps were skipped (its Quickbase app was not imported, or the table is a copy in another Quickbase app).",
             });
 
         if (pipelinesImporter is not null)
@@ -88,16 +122,30 @@ public class PipelineOnlyImportService(
             var tables = new List<PipelineOnlyTable>();
             foreach (var table in await tableRepo.ListByAppAsync(app.Id, ct))
             {
-                var fields = (await fieldRepo.ListByTableAsync(table.Id, ct))
+                // One read per table: the key field is looked up in the same list.
+                var all = await fieldRepo.ListByTableAsync(table.Id, ct);
+                var fields = all
                     .Where(f => !f.IsDeleted && f.Fid is not null)
-                    .Select(f => new PipelineOnlyField(f.Fid!.Value, f.Name, f.Label ?? f.Name, f.TypeCode, f.IsSystem))
+                    .Select(f => new PipelineOnlyField(f.Fid!.Value, f.Name, f.Label ?? f.Name, f.TypeCode, f.IsSystem, ResultTypeOf(f.TypeCode, f.Settings)))
                     .ToList();
-                var keyFid = table.KeyFieldId is { } keyId ? (await fieldRepo.ListByTableAsync(table.Id, ct)).FirstOrDefault(f => f.Id == keyId)?.Fid : null;
+                var keyFid = table.KeyFieldId is { } keyId ? all.FirstOrDefault(f => f.Id == keyId)?.Fid : null;
                 tables.Add(new PipelineOnlyTable(table.Id, table.Name, keyFid, fields));
             }
             result.Add(new PipelineOnlyApp(app.PublicId, app.Id, app.Name, tables));
         }
         return result;
+    }
+
+    /// <summary>A Lookup / Summary field's result type (settings resultTypeCode); null for other fields.</summary>
+    internal static string? ResultTypeOf(string typeCode, string? settings)
+    {
+        if (typeCode is not ("Lookup" or "Summary") || string.IsNullOrWhiteSpace(settings)) return null;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(settings);
+            return doc.RootElement.TryGetProperty("resultTypeCode", out var r) && r.ValueKind == System.Text.Json.JsonValueKind.String ? r.GetString() : null;
+        }
+        catch (System.Text.Json.JsonException) { return null; }
     }
 
     /// <summary>What the pipeline importer needs to find the existing tables and fields: each table and field under the refs the
