@@ -155,7 +155,8 @@ public sealed class RecordWriteService : IRecordWriteService
         // Reference fields must point at an existing parent record; a value submitted as a
         // human key is resolved to the parent row Id here.
         var refOverrides = await ReferenceWriteValidator.ValidateAsync(
-            fields, fieldValues, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct, existingByFid);
+            fields, fieldValues, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct, existingByFid,
+            new ReferenceFilterUsers(_userRepo, _appUserRepo));
 
         var effectiveValues = new Dictionary<long, object?>(fieldValues);
         foreach (var kvp in refOverrides)

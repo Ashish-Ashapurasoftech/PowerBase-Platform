@@ -5,7 +5,9 @@ using YamlDotNet.RepresentationModel;
 namespace PowerBase.Application.Import.Qbl;
 
 /// <summary>A field of an existing PowerBase table, as the pipeline-only import sees it.</summary>
-public sealed record PipelineOnlyField(int Fid, string Name, string Label, string TypeCode, bool IsSystem);
+/// <remarks><see cref="ResultTypeCode"/>: what a Lookup / Summary field holds (its settings' resultTypeCode), so filters on it get
+/// the operators of that type.</remarks>
+public sealed record PipelineOnlyField(int Fid, string Name, string Label, string TypeCode, bool IsSystem, string? ResultTypeCode = null);
 
 /// <summary>A table of an existing PowerBase app. <see cref="KeyFid"/> is its Set-Key field (null = Record ID#).</summary>
 public sealed record PipelineOnlyTable(long Id, string Name, int? KeyFid, IReadOnlyList<PipelineOnlyField> Fields);
@@ -26,6 +28,8 @@ public sealed class PipelineOnlyBinding
     public List<PipelineOnlyTableMatch> Matches { get; init; } = [];
     /// <summary>Quickbase table ids of the file no existing table matched; their steps import without a table.</summary>
     public List<string> UnmatchedTables { get; init; } = [];
+    /// <summary>Quickbase app ids of the file no existing app clearly matched; their pipelines are not imported.</summary>
+    public List<string> UnmatchedApps { get; init; } = [];
     public List<string> Notes { get; init; } = [];
 }
 
@@ -92,6 +96,48 @@ public static class QblPipelineOnlyBinder
 
     public static PipelineOnlyBinding Bind(string content, IReadOnlyList<PipelineOnlyApp> candidates)
     {
+        var previous = _commonKeys;
+        var previousMemo = _evidenceMemo;
+        _evidenceMemo = null;
+        try { return BindCore(content, candidates); }
+        finally { _commonKeys = previous; _evidenceMemo = previousMemo; }
+    }
+
+    /// <summary>Evidence(table, use) of the current Bind: every use is collected before matching starts, so a pair's fit never
+    /// changes while apps, tables and rivals are compared again and again.</summary>
+    [ThreadStatic] private static Dictionary<(PipelineOnlyTable, TableUse), Fit>? _evidenceMemo;
+
+    private sealed class PairComparer : IEqualityComparer<(PipelineOnlyTable, TableUse)>
+    {
+        public static readonly PairComparer Instance = new();
+        public bool Equals((PipelineOnlyTable, TableUse) a, (PipelineOnlyTable, TableUse) b) =>
+            ReferenceEquals(a.Item1, b.Item1) && ReferenceEquals(a.Item2, b.Item2);
+        public int GetHashCode((PipelineOnlyTable, TableUse) p) =>
+            HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(p.Item1), System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(p.Item2));
+    }
+
+    /// <summary>Field keys that many Quickbase tables of the file use (email, name, status…): finding one says little about
+    /// which table a step uses, so it weighs like a field id. Worked out from the file alone, so the result never depends on how
+    /// many apps the user has. Set for the duration of one <see cref="Bind"/>.</summary>
+    [ThreadStatic] private static CommonKeys? _commonKeys;
+
+    private sealed class CommonKeys(IEnumerable<TableUse> uses)
+    {
+        private readonly HashSet<string> _common = CommonOf(uses.ToList());
+
+        private static HashSet<string> CommonOf(List<TableUse> uses)
+        {
+            var threshold = Math.Max(3, uses.Count / 20);
+            return uses.SelectMany(u => u.Keys.Select(k => (Key: QblPipelineConverter.NormalizeKey(k).Replace("_", "", StringComparison.Ordinal), u.Table)))
+                .Distinct().GroupBy(x => x.Key).Where(g => g.Count() >= threshold).Select(g => g.Key).ToHashSet(StringComparer.Ordinal);
+        }
+
+        /// <summary>The key is used on at least 1 in 20 of the file's Quickbase tables (at least 3).</summary>
+        public bool IsCommon(string key) => _common.Contains(QblPipelineConverter.NormalizeKey(key).Replace("_", "", StringComparison.Ordinal));
+    }
+
+    private static PipelineOnlyBinding BindCore(string content, IReadOnlyList<PipelineOnlyApp> candidates)
+    {
         var stream = new YamlStream();
         using (var reader = new StringReader(content))
             stream.Load(reader);
@@ -99,51 +145,188 @@ public static class QblPipelineOnlyBinder
             || Child(root, "Resources") is not YamlMappingNode resources)
             return new PipelineOnlyBinding { Content = content };
 
-        // 1. What each Quickbase table is used for.
+        // 1. What each Quickbase table is used for, and per pipeline: its tables and its name / tags (they often name the app).
+        var parameters = Child(root, "ParameterDefinitions") as YamlMappingNode;
         var uses = new Dictionary<string, TableUse>(StringComparer.Ordinal);
+        var pipelineFacts = new List<(HashSet<string> Tables, List<string> Hints)>();
         foreach (var (_, node) in resources.Children)
             if (node is YamlMappingNode resource && Scalar(resource, "Type") == "QB::Pipeline")
-                CollectPipeline(resource, uses);
+                pipelineFacts.Add((CollectPipeline(resource, uses), PipelineHints(resource, parameters)));
 
-        // 2. Match apps first (all tables of one Quickbase app go to one app), then each table inside its app.
+        _commonKeys = new CommonKeys(uses.Values);
+        _evidenceMemo = new Dictionary<(PipelineOnlyTable, TableUse), Fit>(PairComparer.Instance);
+
+        // A Quickbase page/API link (.../nav/app/{app}/table/{table}/...) also says which app a table belongs to.
+        foreach (var scalar in AllScalars(root))
+            foreach (Match link in AppTableLink.Matches(scalar))
+                if (uses.TryGetValue(link.Groups[2].Value, out var linked)) linked.App ??= link.Groups[1].Value;
+
         var binding = new PipelineOnlyBinding();
-        var appRefs = new Dictionary<long, string>();
         var tableOf = new Dictionary<string, (PipelineOnlyApp App, PipelineOnlyTable Table)>(StringComparer.Ordinal);
         var chosenApps = new Dictionary<string, PipelineOnlyApp>(StringComparer.Ordinal);
 
-        foreach (var group in uses.Values.Where(u => u.App is not null).GroupBy(u => u.App!, StringComparer.Ordinal))
+        // 2. Apps. An existing app is the copy of exactly ONE Quickbase app. Quickbase realms hold clones of an app (CARES / DSS /
+        // DSP / Voyage: same tables, same field ids), so every Quickbase app is scored against every app and the pairs are taken
+        // best first, one-to-one: the share of its evidence that is found (field labels differ between clones), then how many of
+        // its pipelines carry the app's name in their name or tags, then the amount of evidence. A tie that nothing breaks
+        // matches nothing: a pipeline is never put into an app it may not belong to.
+        var groups = uses.Values.Where(u => u.App is not null).GroupBy(u => u.App!, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
+        var pairs = new List<(string QbApp, PipelineOnlyApp App, Fit Fit, double Ratio, int Hint, Dictionary<string, PipelineOnlyTable> Tables)>();
+        foreach (var (qbApp, group) in groups)
         {
-            var best = candidates
-                .Select(app => (App: app, Score: group.Sum(use => Math.Max(0, BestIn(app, use).Score))))
-                .Where(x => x.Score > 0)
-                .OrderByDescending(x => x.Score).ThenByDescending(x => x.App.Id)
-                .ToList();
-            if (best.Count == 0) continue;
-            chosenApps[group.Key] = best[0].App;
-            if (best.Count > 1 && best[1].Score == best[0].Score)
-                binding.Notes.Add($"Quickbase app '{group.Key}' matches several apps equally ({best[0].App.Name}, {best[1].App.Name}); the newest, '{best[0].App.Name}', was used.");
+            var hintPipelines = pipelineFacts.Where(p => group.Any(u => p.Tables.Contains(u.Table))).Select(p => p.Hints).ToList();
+            foreach (var app in candidates)
+            {
+                var (fit, assigned) = AssignTables(app, group);
+                var idsOnly = fit.Miss == 0 && fit.Hit >= 2 && group.All(u => u.Keys.All(BuiltInKeys.Contains));
+                if (assigned.Count == 0 || !(fit.IsStrong || fit.Score >= 10 && fit.KeyHits >= 3 || idsOnly)) continue;
+                var hint = hintPipelines.Count(h => h.Any(x => NamesApp(x, app.Name)));
+                var ratio = Math.Round((double)fit.Hit / Math.Max(1, fit.Hit + fit.Miss), 3);
+                // Field ids and common labels (Name, Email, Status…) are shared by unrelated apps: without the app's name in any of
+                // the Quickbase app's pipeline names / tags, only near-complete evidence makes it that app.
+                var specificKeys = group.SelectMany(u => u.Keys.Where(k => !BuiltInKeys.Contains(k))).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+                // In a file of many Quickbase apps (clones among them) a few matching ids say little: then at least 20 found.
+                var minHits = groups.Count >= 3 ? 20 : 0;
+                if (hint == 0 && !(ratio >= 0.85 && fit.KeyHits >= Math.Max(1, Math.Min(5, specificKeys)) && fit.Hit >= minHits) && !(idsOnly && groups.Count < 3)) continue;
+                pairs.Add((qbApp, app, fit, Math.Round((double)fit.Hit / Math.Max(1, fit.Hit + fit.Miss), 3), hint, assigned));
+            }
         }
+        // Net evidence plus the app's name in the pipelines' names/tags (10 per pipeline).
+        static int Rank((string QbApp, PipelineOnlyApp App, Fit Fit, double Ratio, int Hint, Dictionary<string, PipelineOnlyTable> Tables) p) => p.Fit.Score + 10 * p.Hint;
+        var ranked = pairs.OrderByDescending(Rank).ThenByDescending(p => p.Ratio).ThenByDescending(p => p.App.Id).ToList();
+        var takenApps = new HashSet<long>();
+        var blockedQb = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var pair in ranked)
+        {
+            if (chosenApps.ContainsKey(pair.QbApp) || blockedQb.Contains(pair.QbApp) || takenApps.Contains(pair.App.Id)) continue;
+            // A Quickbase app whose best fit is an app another Quickbase app already took is a clone of that one (CARES / DSS /
+            // DSP / Voyage): it takes a different app only when its pipelines name that app.
+            if (pair.Hint == 0 && ranked.Any(p => p.QbApp == pair.QbApp && p.App.Id != pair.App.Id && takenApps.Contains(p.App.Id)
+                    && (Rank(p) > Rank(pair) || (Rank(p) == Rank(pair) && p.Ratio >= pair.Ratio))))
+                continue;
+            // Two different apps (not copies of each other) fit equally: nothing tells which one it is.
+            if (ranked.Any(p => p.QbApp == pair.QbApp && p.App.Id != pair.App.Id && !takenApps.Contains(p.App.Id)
+                    && Rank(p) == Rank(pair) && p.Ratio == pair.Ratio && !IsCopyOf(p.App, pair.App)))
+            {
+                binding.Notes.Add($"Quickbase app {pair.QbApp} fits several apps equally; none was used.");
+                blockedQb.Add(pair.QbApp);
+                continue;
+            }
+            var rival = ranked.FirstOrDefault(p => p.QbApp != pair.QbApp && p.App.Id == pair.App.Id
+                && !chosenApps.ContainsKey(p.QbApp) && !blockedQb.Contains(p.QbApp)
+                && Rank(p) == Rank(pair) && p.Ratio == pair.Ratio);
+            if (rival.QbApp is not null)
+            {
+                binding.Notes.Add($"Quickbase apps {pair.QbApp} and {rival.QbApp} fit '{pair.App.Name}' equally (clones); neither was used.");
+                takenApps.Add(pair.App.Id);
+                blockedQb.Add(pair.QbApp);
+                blockedQb.Add(rival.QbApp);
+                continue;
+            }
+            chosenApps[pair.QbApp] = pair.App;
+            takenApps.Add(pair.App.Id);
+            // Two existing apps that are copies of each other (same tables and fields) fit equally: the newest is used.
+            if (ranked.FirstOrDefault(p => p.QbApp == pair.QbApp && p.App.Id != pair.App.Id && Rank(p) == Rank(pair) && p.Ratio == pair.Ratio) is { QbApp: not null } copy)
+                binding.Notes.Add($"Quickbase app '{pair.QbApp}' matches several apps equally ({pair.App.Name}, {copy.App.Name}); the newest, '{pair.App.Name}', was used.");
+            // An existing app that is a copy of the chosen one (same tables, same fields) is that same Quickbase app imported again:
+            // no other Quickbase app (a clone) may take it.
+            foreach (var other in candidates.Where(c => c.Id != pair.App.Id && IsCopyOf(c, pair.App)))
+                takenApps.Add(other.Id);
+            binding.Notes.Add($"Quickbase app {pair.QbApp} -> '{pair.App.Name}' (evidence found {pair.Ratio:P0}, hit {pair.Fit.Hit} / miss {pair.Fit.Miss}, {pair.Hint} pipeline names/tags name the app).");
+            foreach (var (qbTable, table) in pair.Tables)
+            {
+                tableOf[qbTable] = (pair.App, table);
+                binding.Matches.Add(new PipelineOnlyTableMatch(pair.QbApp, qbTable, pair.App.PublicId, pair.App.Name, table.Id, table.Name));
+            }
+        }
+        foreach (var qbApp in groups.Keys.Where(a => !chosenApps.ContainsKey(a)))
+            binding.UnmatchedApps.Add(qbApp);
 
+        // 3. Tables no step names an app for (Create Record, Copy Records' source, Quickbase API calls): only a table of a matched
+        // app that no other Quickbase table took, with a strong fit no other table shares, and with support that it is that app's
+        // table: its id starts like the Quickbase app's id (Quickbase numbers an app's tables after it), or one of its pipelines
+        // also uses a table of that app.
+        var claimed = tableOf.Values.Select(v => v.Table.Id).ToHashSet();
+        var appless = new List<(TableUse Use, PipelineOnlyApp App, PipelineOnlyTable Table, Fit Fit)>();
         foreach (var use in uses.Values)
         {
-            // A table named without its app (Copy Records' source table): look in the apps already chosen first, then everywhere.
-            IEnumerable<PipelineOnlyApp> scope = use.App is not null && chosenApps.TryGetValue(use.App, out var chosen) ? [chosen]
-                : use.App is null && chosenApps.Count > 0 ? chosenApps.Values.Distinct() : candidates;
-            var ranked = scope.Select(app => (App: app, Match: BestIn(app, use))).Where(x => x.Match.Table is not null && x.Match.Score > 0)
-                .OrderByDescending(x => x.Match.Score).ThenByDescending(x => x.App.Id).ToList();
-            if (ranked.Count == 0 && use.App is null && chosenApps.Count > 0)
-                ranked = candidates.Select(app => (App: app, Match: BestIn(app, use))).Where(x => x.Match.Table is not null && x.Match.Score > 0)
-                    .OrderByDescending(x => x.Match.Score).ThenByDescending(x => x.App.Id).ToList();
-            if (ranked.Count == 0)
+            if (use.App is not null)
             {
+                if (!tableOf.ContainsKey(use.Table)) binding.UnmatchedTables.Add(use.Table);
+                continue;
+            }
+            var near = pipelineFacts.Where(p => p.Tables.Contains(use.Table)).SelectMany(p => p.Tables)
+                .Where(tableOf.ContainsKey).Select(t => tableOf[t].App.Id).ToHashSet();
+            bool Fits(Fit fit) => fit.IsStrong || (fit.Miss == 0 && fit.Hit >= 2 && use.Fids.Count(x => x > 5) >= 2 && use.Keys.All(BuiltInKeys.Contains));
+            var options = chosenApps
+                .Where(kv => near.Contains(kv.Value.Id) || CommonPrefix(kv.Key, use.Table) >= 5)
+                .SelectMany(kv => kv.Value.Tables.Where(t => !claimed.Contains(t.Id)).Select(t => (App: kv.Value, Table: t, Fit: Evidence(t, use))))
+                .Where(x => Fits(x.Fit))
+                .GroupBy(x => x.Table.Id).Select(g => g.First())
+                .OrderByDescending(x => x.Fit.Score).ThenByDescending(x => x.App.Id).ToList();
+            // Not in a matched Quickbase app's app: an app no Quickbase app of the file was matched to (it may be this table's own
+            // app, e.g. a file whose steps never name their app).
+            // Only for a file whose steps never name their Quickbase app: otherwise an app-less table belongs to one of the file's
+            // Quickbase apps, and one that was not matched must not land in an unrelated app that happens to have similar fields.
+            if (options.Count == 0 && groups.Count == 0)
+                options = candidates.Where(a => !takenApps.Contains(a.Id))
+                    .SelectMany(a => a.Tables.Where(t => !claimed.Contains(t.Id)).Select(t => (App: a, Table: t, Fit: Evidence(t, use))))
+                    .Where(x => Fits(x.Fit))
+                    .OrderByDescending(x => x.Fit.Score).ThenByDescending(x => x.App.Id).ToList();
+            if (options.Count == 0 || (options.Count > 1 && options[1].Fit.Score == options[0].Fit.Score && !SameShape(options[0].Table, options[1].Table)))
+            {
+                if (options.Count > 1)
+                    binding.Notes.Add($"Quickbase table '{use.Table}' fits '{options[0].Table.Name}' ({options[0].App.Name}) and '{options[1].Table.Name}' ({options[1].App.Name}) equally; it was left unmatched.");
                 binding.UnmatchedTables.Add(use.Table);
                 continue;
             }
-            var (app, match) = ranked[0];
-            tableOf[use.Table] = (app, match.Table!);
-            if (!appRefs.ContainsKey(app.Id))
-                appRefs[app.Id] = $"$App_PowerBase_{appRefs.Count + 1}";
-            binding.Matches.Add(new PipelineOnlyTableMatch(use.App, use.Table, app.PublicId, app.Name, match.Table!.Id, match.Table.Name));
+            appless.Add((use, options[0].App, options[0].Table, options[0].Fit));
+        }
+        // One existing table is the copy of one Quickbase table: when several of these tables chose it (clones in other Quickbase
+        // apps), only a clearly best one keeps it; a tie keeps none.
+        // Rivals count whatever app they seem to belong to: a Quickbase table that fits the same table at least as well — even one
+        // with no support for that app (a clone in an app that was not imported) — makes the choice ambiguous, so whether a table
+        // is matched never depends on which other apps happen to exist.
+        var applessUses = uses.Values.Where(u => u.App is null).ToList();
+        var allTables = candidates.SelectMany(a => a.Tables).ToList();
+        string? QbAppOf(PipelineOnlyApp app) => chosenApps.FirstOrDefault(kv => kv.Value.Id == app.Id).Key;
+        bool PrefixOf(string qbTable, PipelineOnlyApp app) => QbAppOf(app) is { } qbApp && CommonPrefix(qbApp, qbTable) >= 5;
+        foreach (var pick in appless.ToList())
+        {
+            // Quickbase numbers an app's tables after the app: a table whose id starts like its app's id is that app's own table.
+            if (PrefixOf(pick.Use.Table, pick.App)) continue;
+            var rival = applessUses.FirstOrDefault(u => u.Table != pick.Use.Table
+                && Evidence(pick.Table, u) is var fit && (fit.IsStrong || (fit.Miss == 0 && fit.Hit >= 2 && u.Fids.Count(x => x > 5) >= 2 && u.Keys.All(BuiltInKeys.Contains)))
+                && fit.Score >= pick.Fit.Score && !appless.Any(a => a.Use.Table == u.Table)
+                // A rival only when this table is its own best fit: a generic table that fits several tables belongs to none of them.
+                && allTables.Where(t => t.Id != pick.Table.Id).All(t => Evidence(t, u).Score < fit.Score));
+            if (rival is null) continue;
+            appless.Remove(pick);
+            binding.UnmatchedTables.Add(pick.Use.Table);
+            binding.Notes.Add($"Quickbase tables {pick.Use.Table} and {rival.Table} fit '{pick.Table.Name}' ({pick.App.Name}) equally (clones of one app); none was used.");
+        }
+        foreach (var group in appless.GroupBy(x => x.Table.Id))
+        {
+            var ranked2 = group.OrderByDescending(x => x.Fit.Score).ToList();
+            var keep = ranked2.Count == 1 || ranked2[0].Fit.Score > ranked2[1].Fit.Score ? ranked2[0].Use.Table : null;
+            if (ranked2.Count > 1)
+                binding.Notes.Add(keep is null
+                    ? $"Quickbase tables {string.Join(", ", ranked2.Select(r => r.Use.Table))} all fit '{ranked2[0].Table.Name}' ({ranked2[0].App.Name}) equally (clones of one app); none was used."
+                    : $"Quickbase tables {string.Join(", ", ranked2.Select(r => r.Use.Table))} all fit '{ranked2[0].Table.Name}' ({ranked2[0].App.Name}); only {keep} was used, the others are copies in other Quickbase apps.");
+            foreach (var x in ranked2)
+            {
+                if (x.Use.Table != keep) { binding.UnmatchedTables.Add(x.Use.Table); continue; }
+                tableOf[x.Use.Table] = (x.App, x.Table);
+                binding.Matches.Add(new PipelineOnlyTableMatch(null, x.Use.Table, x.App.PublicId, x.App.Name, x.Table.Id, x.Table.Name));
+            }
+        }
+
+        var appRefs = new Dictionary<long, string>();
+        foreach (var match in binding.Matches)
+        {
+            var app = candidates.First(a => a.PublicId == match.AppPublicId);
+            if (!appRefs.ContainsKey(app.Id)) appRefs[app.Id] = $"$App_PowerBase_{appRefs.Count + 1}";
         }
 
         // Apps a Quickbase app id was matched to keep their ref even when none of their tables was (DataSource::App only).
@@ -153,8 +336,6 @@ public static class QblPipelineOnlyBinder
             appByQbId[qbApp] = app;
             if (!appRefs.ContainsKey(app.Id)) appRefs[app.Id] = $"$App_PowerBase_{appRefs.Count + 1}";
         }
-        foreach (var (qbTable, (app, _)) in tableOf)
-            if (uses[qbTable].App is { } qbApp) appByQbId.TryAdd(qbApp, app);
 
         // 3. Rewrite the pipelines' data sources into !Refs, then add the matched apps.
         var usedFields = new Dictionary<(long Table, int Fid), bool>();
@@ -181,11 +362,113 @@ public static class QblPipelineOnlyBinder
         text = Regex.Replace(text, @"\r?\n\.\.\.\s*$", "\n");
         return new PipelineOnlyBinding
         {
-            Content = text, Apps = binding.Apps, Matches = binding.Matches, UnmatchedTables = binding.UnmatchedTables, Notes = binding.Notes,
+            Content = text, Apps = binding.Apps, Matches = binding.Matches, UnmatchedTables = binding.UnmatchedTables,
+            UnmatchedApps = binding.UnmatchedApps, Notes = binding.Notes,
         };
     }
 
     // ---------------------------------------------------------------------------------------------------------------- matching
+
+    /// <summary>An imported table is the copy of exactly one Quickbase table. Quickbase realms often hold clones of an app
+    /// (same tables, same field ids), so several Quickbase tables can fit one table equally well; only the one that fits best is
+    /// kept — on a tie, the one whose id shares the longest prefix with the Quickbase app ids already matched to that app
+    /// (Quickbase gives an app and the tables created with it consecutive ids). If that still ties, none is kept: a step is
+    /// never pointed at a table it may not belong to.</summary>
+    private static void KeepOneQuickbaseTablePerTable(Dictionary<string, TableUse> uses,
+        Dictionary<string, (PipelineOnlyApp App, PipelineOnlyTable Table)> tableOf, Dictionary<string, PipelineOnlyApp> chosenApps,
+        PipelineOnlyBinding binding)
+    {
+        foreach (var group in tableOf.GroupBy(kv => kv.Value.Table.Id).Where(g => g.Count() > 1).ToList())
+        {
+            var app = group.First().Value.App;
+            var appIds = chosenApps.Where(kv => kv.Value.Id == app.Id).Select(kv => kv.Key).ToList();
+            var ranked = group
+                .Select(kv => (QbTable: kv.Key, Score: Evidence(kv.Value.Table, uses[kv.Key]).Score,
+                    Own: uses[kv.Key].App is { } qbApp && appIds.Contains(qbApp) ? 1 : 0,
+                    Prefix: appIds.Count == 0 ? 0 : appIds.Max(id => CommonPrefix(id, kv.Key))))
+                .OrderByDescending(x => x.Own).ThenByDescending(x => x.Score).ThenByDescending(x => x.Prefix).ToList();
+            var keep = ranked[0];
+            var tie = ranked[1].Own == keep.Own && ranked[1].Score == keep.Score && ranked[1].Prefix == keep.Prefix;
+            var table = group.First().Value.Table;
+            foreach (var (qbTable, _, _, _) in tie ? ranked : ranked.Skip(1))
+            {
+                tableOf.Remove(qbTable);
+                binding.Matches.RemoveAll(m => m.QbTableId == qbTable);
+                binding.UnmatchedTables.Add(qbTable);
+            }
+            binding.Notes.Add(tie
+                ? $"Quickbase tables {string.Join(", ", ranked.Select(r => r.QbTable))} all fit '{table.Name}' ({app.Name}) equally (clones of one app); none was used."
+                : $"Quickbase tables {string.Join(", ", ranked.Select(r => r.QbTable))} all fit '{table.Name}' ({app.Name}); only {keep.QbTable} was used, the others are copies in other Quickbase apps.");
+        }
+    }
+
+    private static readonly Regex AppTableLink = new(@"/nav/app/(b[a-z0-9]{8})/table/(b[a-z0-9]{8})\b", RegexOptions.Compiled);
+
+    /// <summary>Each Quickbase table of one Quickbase app to its own table of <paramref name="app"/>, one-to-one, best fit first.
+    /// A table is taken only with a usable fit (strong, or every id/key found); one that fits two different tables equally gets
+    /// neither. Tables left without a table count all their evidence as missing.</summary>
+    internal static (Fit Fit, Dictionary<string, PipelineOnlyTable> Tables) AssignTables(PipelineOnlyApp app, IReadOnlyList<TableUse> uses)
+    {
+        var options = new List<(TableUse Use, PipelineOnlyTable Table, Fit Fit)>();
+        foreach (var use in uses)
+        {
+            var fits = app.Tables.Select(t => (Table: t, Fit: Evidence(t, use))).OrderByDescending(x => x.Fit.Score).ThenByDescending(x => x.Fit.Hit).ToList();
+            if (fits.Count == 0 || !Usable(fits[0].Fit)) continue;
+            // The best table must stand out: a second table that fits about as well means nothing tells them apart.
+            if (fits.Count > 1 && !SameShape(fits[0].Table, fits[1].Table) && !StandsOut(fits[0].Fit, fits[1].Fit)) continue;
+            options.Add((use, fits[0].Table, fits[0].Fit));
+        }
+        var result = new Dictionary<string, PipelineOnlyTable>(StringComparer.Ordinal);
+        var taken = new HashSet<long>();
+        var total = new Fit(0, 0, 0);
+        foreach (var (use, table, fit) in options.OrderByDescending(o => o.Fit.Score).ThenByDescending(o => o.Fit.Hit))
+        {
+            if (taken.Contains(table.Id)) continue;
+            result[use.Table] = table;
+            taken.Add(table.Id);
+            total += fit;
+        }
+        return (total, result);
+    }
+
+    /// <summary>Enough found evidence for a table: every listed id/key found, or at least one specific field key and more found
+    /// than missing (Quickbase apps keep changing after their export, so some fields are always missing).</summary>
+    internal static bool Usable(Fit fit) =>
+        (fit.Miss == 0 && fit.Hit >= 2) || (fit.KeyHits >= 1 && fit.Hit >= MIN_STRONG_HIT && fit.Hit > fit.Miss);
+
+    /// <summary>The best fit is clearly ahead of the runner-up.</summary>
+    internal static bool StandsOut(Fit best, Fit second) => best.Score > second.Score;
+
+    /// <summary>The pipeline's name and tags: Quickbase users name a pipeline after its app ("... (CARES Database)") or tag it.</summary>
+    private static List<string> PipelineHints(YamlMappingNode pipeline, YamlMappingNode? parameters)
+    {
+        var hints = new List<string>();
+        if (Child(pipeline, "Properties") is not YamlMappingNode props) return hints;
+        if (Child(props, "Tags") is YamlSequenceNode tags)
+            hints.AddRange(tags.Children.OfType<YamlScalarNode>().Select(t => t.Value ?? "").Where(t => t.Length > 0));
+        switch (Child(props, "Name"))
+        {
+            case YamlScalarNode { Value: { } name }: hints.Add(name); break;
+            case YamlMappingNode var when Scalar(var, "Name") is { } param && parameters is not null
+                && Child(parameters, param) is YamlMappingNode def && Scalar(def, "Value") is { } value:
+                hints.Add(value); break;
+        }
+        return hints;
+    }
+
+    /// <summary>The text names the app as a whole word run ("CARES Database" in "Fix (CARES Database)", not in "CARES Database 2").</summary>
+    internal static bool NamesApp(string text, string appName)
+    {
+        if (string.IsNullOrWhiteSpace(appName)) return false;
+        return Regex.IsMatch(text, @"(?<![A-Za-z0-9])" + Regex.Escape(appName.Trim()) + @"(?![A-Za-z0-9])", RegexOptions.IgnoreCase);
+    }
+
+    private static int CommonPrefix(string a, string b)
+    {
+        var n = 0;
+        while (n < a.Length && n < b.Length && a[n] == b[n]) n++;
+        return n;
+    }
 
     internal static (PipelineOnlyTable? Table, int Score) BestIn(PipelineOnlyApp app, TableUse use)
     {
@@ -202,42 +485,116 @@ public static class QblPipelineOnlyBinder
         return (best, bestScore);
     }
 
-    /// <summary>+2 for every listed field id the table has, -2 for every one it lacks; +3 for every field key it has, -3 for every
-    /// one it lacks. Ids 1-5 and the keys every table has are left out: they fit every table.</summary>
-    internal static int Score(PipelineOnlyTable table, TableUse use)
+    /// <summary>How well a table fits what the steps use: a field key (<c>employee_name</c>) is specific, a field id is not
+    /// (almost every table has fields 6-10), so a found key weighs 3 and a found id 1; a missing key or id weighs 3 and 2.
+    /// Ids 1-5 and the keys every table has are left out: they fit every table.</summary>
+    internal readonly record struct Fit(int Hit, int Miss, int KeyHits)
     {
-        var fids = table.Fields.Select(f => f.Fid).Concat(PartIds(table).Keys).ToHashSet();
-        var score = 0;
-        foreach (var fid in use.Fids.Where(f => f > 5))
-            score += fids.Contains(fid) ? 2 : -2;
-        foreach (var key in use.Keys.Where(k => !BuiltInKeys.Contains(k)))
-            score += FieldByKey(table, key) is not null || AddressPartByKey(table, key) is not null ? 3 : -3;
-        return score;
+        public int Score => Hit - Miss;
+        /// <summary>Enough evidence, nearly all of it found, and at least one field key (ids alone fit nearly any table).</summary>
+        public bool IsStrong => KeyHits > 0 && Hit >= MIN_STRONG_HIT && Miss * 5 <= Hit;
+        public static Fit operator +(Fit a, Fit b) => new(a.Hit + b.Hit, a.Miss + b.Miss, a.KeyHits + b.KeyHits);
     }
+
+    private const int MIN_STRONG_HIT = 4;
+
+    internal static Fit Evidence(PipelineOnlyTable table, TableUse use)
+    {
+        var memo = _evidenceMemo;
+        if (memo is not null && memo.TryGetValue((table, use), out var cached)) return cached;
+        var index = IndexOf(table);
+        int hit = 0, miss = 0, keys = 0;
+        foreach (var fid in use.Fids.Where(f => f > 5))
+            if (index.Fids.Contains(fid)) hit += 1; else miss += 2;
+        foreach (var key in use.Keys.Where(k => !BuiltInKeys.Contains(k)))
+            if (index.HasKey(key))
+            {
+                if (_commonKeys?.IsCommon(key) == true) hit += 1;
+                else { hit += 3; keys++; }
+            }
+            else miss += 3;
+        var fit = new Fit(hit, miss, keys);
+        memo?.TryAdd((table, use), fit);
+        return fit;
+    }
+
+    internal static int Score(PipelineOnlyTable table, TableUse use) => Evidence(table, use).Score;
+
+    /// <summary>How well an app fits all tables of one Quickbase app: each table's best table in the app (a table with no
+    /// usable fit counts all its evidence as missing).</summary>
+    internal static Fit AppFit(PipelineOnlyApp app, IEnumerable<TableUse> uses)
+    {
+        var total = new Fit(0, 0, 0);
+        foreach (var use in uses)
+        {
+            var (table, _) = BestIn(app, use);
+            total += table is not null ? Evidence(table, use) : MissingAll(use);
+        }
+        return total;
+    }
+
+    private static Fit MissingAll(TableUse use) =>
+        new(0, use.Fids.Count(f => f > 5) * 2 + use.Keys.Count(k => !BuiltInKeys.Contains(k)) * 3, 0);
+
+    /// <summary>Two existing apps with the same tables (each a <see cref="SameShape"/> copy): one app imported twice.</summary>
+    private static bool IsCopyOf(PipelineOnlyApp a, PipelineOnlyApp b) =>
+        a.Tables.Count == b.Tables.Count && a.Tables.Count > 0 && a.Tables.All(t => b.Tables.Any(u => SameShape(t, u)));
+
+    /// <summary>Copies of one table (same name, field ids and labels), e.g. an app imported twice.</summary>
+    private static bool SameShape(PipelineOnlyTable a, PipelineOnlyTable b) =>
+        a.Name == b.Name && a.Fields.Select(f => (f.Fid, f.Label)).ToHashSet().SetEquals(b.Fields.Select(f => (f.Fid, f.Label)));
 
     internal static PipelineOnlyField? FieldByKey(PipelineOnlyTable table, string key)
     {
+        var index = IndexOf(table);
         var wanted = QblPipelineConverter.NormalizeKey(key);
-        var compact = wanted.Replace("_", "", StringComparison.Ordinal);
-        string Label(PipelineOnlyField f) => QblPipelineConverter.NormalizeKey(string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label);
-        return table.Fields.FirstOrDefault(f => Label(f) == wanted)
-               ?? table.Fields.FirstOrDefault(f => Label(f).Replace("_", "", StringComparison.Ordinal) == compact);
+        return index.ByLabel.TryGetValue(wanted, out var field) ? field
+            : index.ByCompact.TryGetValue(wanted.Replace("_", "", StringComparison.Ordinal), out field) ? field : null;
     }
 
-    private static PipelineOnlyField? AddressPartByKey(PipelineOnlyTable table, string key)
+    /// <summary>A table's field ids and normalized labels, worked out once per table (normalizing every label on every comparison
+    /// made matching a large file slow). Same answers as scanning the fields in order: the first field with a label wins.</summary>
+    private sealed class TableIndex
     {
-        var compact = QblPipelineConverter.NormalizeKey(key).Replace("_", "", StringComparison.Ordinal);
-        foreach (var address in table.Fields.Where(f => f.TypeCode == "Address"))
-            foreach (var (_, _, label) in AddressParts)
-                if (QblPipelineConverter.NormalizeKey((address.Label ?? address.Name) + " " + label).Replace("_", "", StringComparison.Ordinal) == compact)
-                    return address;
-        return null;
+        public required HashSet<int> Fids { get; init; }
+        public Dictionary<string, PipelineOnlyField> ByLabel { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, PipelineOnlyField> ByCompact { get; } = new(StringComparer.Ordinal);
+        public HashSet<string> AddressParts { get; } = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, bool> _keys = new(StringComparer.Ordinal);
+
+        public bool HasKey(string key)
+        {
+            if (_keys.TryGetValue(key, out var has)) return has;
+            var wanted = QblPipelineConverter.NormalizeKey(key);
+            var compact = wanted.Replace("_", "", StringComparison.Ordinal);
+            has = ByLabel.ContainsKey(wanted) || ByCompact.ContainsKey(compact) || AddressParts.Contains(compact);
+            lock (_keys) _keys[key] = has;
+            return has;
+        }
     }
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<PipelineOnlyTable, TableIndex> Indexes = new();
+
+    private static TableIndex IndexOf(PipelineOnlyTable table) => Indexes.GetValue(table, t =>
+    {
+        var index = new TableIndex { Fids = t.Fields.Select(f => f.Fid).Concat(PartIds(t).Keys).ToHashSet() };
+        foreach (var f in t.Fields)
+        {
+            var label = QblPipelineConverter.NormalizeKey(string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label);
+            index.ByLabel.TryAdd(label, f);
+            index.ByCompact.TryAdd(label.Replace("_", "", StringComparison.Ordinal), f);
+        }
+        foreach (var address in t.Fields.Where(f => f.TypeCode == "Address"))
+            foreach (var (_, _, part) in AddressParts)
+                index.AddressParts.Add(QblPipelineConverter.NormalizeKey((address.Label ?? address.Name) + " " + part).Replace("_", "", StringComparison.Ordinal));
+        return index;
+    });
 
     // --------------------------------------------------------------------------------------------------------------- collecting
 
-    private static void CollectPipeline(YamlMappingNode pipeline, Dictionary<string, TableUse> uses)
+    private static HashSet<string> CollectPipeline(YamlMappingNode pipeline, Dictionary<string, TableUse> uses)
     {
+        var tables = new HashSet<string>(StringComparer.Ordinal);
         var steps = new List<StepInfo>();
         Walk(pipeline, steps);
         var byId = steps.Where(s => s.Id is not null).GroupBy(s => s.Id!).ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
@@ -255,6 +612,7 @@ public static class QblPipelineOnlyBinder
             foreach (var (table, app, fids) in step.Tables)
             {
                 var use = Use(uses, table);
+                tables.Add(table);
                 use.App ??= app;
                 foreach (var fid in fids) use.Fids.Add(fid);
             }
@@ -263,8 +621,10 @@ public static class QblPipelineOnlyBinder
             {
                 var use = Use(uses, table);
                 use.App ??= step.App ?? (step.TargetId is not null && byId.TryGetValue(step.TargetId, out var t) ? t.App : null);
+                tables.Add(table);
                 foreach (var key in step.Keys) use.Keys.Add(key);
             }
+        return tables;
     }
 
     private static TableUse Use(Dictionary<string, TableUse> uses, string table)
@@ -537,6 +897,9 @@ public static class QblPipelineOnlyBinder
             "Formula_ListUser" => "QB::Field::User::Formula",
             "Formula_MultiSelect" => "QB::Field::MultiselectText::Formula",
             "Formula_Time" => "QB::Field::TimeOfDay::Formula",
+            // A Lookup / Summary is calculated (never written): typed as a formula of what it holds, so the converter keeps it
+            // read-only and gives its filters that type's operators (a date lookup compares dates).
+            "Lookup" or "Summary" when field.ResultTypeCode is { } result && ComputedOf(result) is { } computed => computed,
             "Lookup" => "QB::Field::Lookup",
             "Summary" => "QB::Field::Summary",
             "Reference" => "QB::Field::Numeric",
@@ -545,6 +908,30 @@ public static class QblPipelineOnlyBinder
             _ => "QB::Field::Text",
         };
     }
+
+    private static string? ComputedOf(string resultTypeCode) => resultTypeCode switch
+    {
+        "Text" or "TextMultiLine" or "SingleSelect" => "QB::Field::Text::Formula",
+        "RichText" => "QB::Field::RichText::Formula",
+        "MultiSelect" => "QB::Field::MultiselectText::Formula",
+        "Number" or "Rating" or "Reference" => "QB::Field::Numeric::Formula",
+        "Currency" => "QB::Field::Currency::Formula",
+        "Percent" => "QB::Field::Percent::Formula",
+        "Date" => "QB::Field::Date::Formula",
+        "DateTime" => "QB::Field::DateTime::Formula",
+        "Time" => "QB::Field::TimeOfDay::Formula",
+        "Duration" => "QB::Field::Duration::Formula",
+        "Boolean" => "QB::Field::Checkbox::Formula",
+        "Email" => "QB::Field::Email::Formula",
+        "Phone" => "QB::Field::PhoneNumber::Formula",
+        "Url" => "QB::Field::URL::Formula",
+        "User" or "MultiUser" => "QB::Field::User::Formula",
+        _ when resultTypeCode.StartsWith("Formula_", StringComparison.Ordinal) => ComputedOf(resultTypeCode["Formula_".Length..] switch
+        {
+            "Bool" => "Boolean", "ListUser" => "MultiUser", var other => other,
+        }),
+        _ => null,
+    };
 
     // ------------------------------------------------------------------------------------------------------------------ helpers
 

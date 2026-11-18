@@ -194,16 +194,71 @@ public class ImportPreviewQueryHandler
             };
             if (i == 0)
             {
+                item.Warnings.AddRange(prepared.NotImported.Select(p => new PblIssueDto
+                {
+                    Code = "PIPELINE_ONLY_APP_NOT_FOUND",
+                    Message = $"PowerFlow '{p.Name}' is not imported: {p.Reason}",
+                }));
                 item.Warnings.AddRange(prepared.Binding.Notes.Select(n => new PblIssueDto { Code = "PIPELINE_ONLY_NOTE", Message = n }));
                 item.Warnings.AddRange(prepared.Binding.UnmatchedTables.Select(t => new PblIssueDto
                 {
                     Code = "PIPELINE_ONLY_TABLE_NOT_FOUND",
-                    Message = $"No existing table matches Quickbase table '{t}'; its steps are imported without a table.",
+                    Message = $"No existing table matches Quickbase table '{t}'; its steps are skipped.",
                 }));
             }
+            item.Issues = PipelinesOnlyIssues(item);
             return item;
         }).ToList();
         return new ImportPreviewResult { IsValid = true, AppCount = apps.Count, Apps = apps };
+    }
+
+    /// <summary>The same grouped, collapsible report an application file's preview shows: the file's notes under "General" and
+    /// each PowerFlow's step issues in a group of its own (one sub-entry per step).</summary>
+    private static ImportIssueReport PipelinesOnlyIssues(ImportPreviewAppItem item)
+    {
+        var report = new ImportReport
+        {
+            Skipped = item.Warnings.Select(w => new ImportSkippedItem { LogicalRef = "", Name = "", Reason = w.Message, Code = w.Code }).ToList(),
+            Pipelines = item.Pipelines.Where(p => p.Issues.Count > 0).Select(p => new PipelineImportReportItem
+            {
+                LogicalRef = p.LogicalRef,
+                Name = p.Name,
+                Issues = p.Issues.Select(i => new PipelineImportIssueItem { Code = i.Code, Message = i.Message, StepId = i.ElementRef }).ToList(),
+            }).ToList(),
+        };
+        var built = ImportIssueReportBuilder.BuildFromImportReport(item.AppName, report, document: null);
+        var issues = built.Issues.Select(i => i.ElementType != "Pipeline" ? i : new ImportIssue
+        {
+            Severity = i.Severity,
+            ApplicationName = i.ApplicationName,
+            TableName = $"PowerFlow: {i.FieldName}",
+            FieldName = StepOf(i.Description) ?? "PowerFlow",
+            ElementType = i.ElementType,
+            Description = i.Description,
+            OriginalConfiguration = i.OriginalConfiguration,
+            RecommendedAction = i.RecommendedAction,
+            Code = i.Code,
+            TechnicalDetail = i.TechnicalDetail,
+        }).ToList();
+        return new ImportIssueReport
+        {
+            Issues = issues,
+            Summary = new ImportIssueSummary
+            {
+                ErrorCount = built.Summary.ErrorCount,
+                WarningCount = built.Summary.WarningCount,
+                InformationCount = built.Summary.InformationCount,
+                AffectedFieldCount = issues.Where(i => i.Severity != ImportIssueSeverity.Information).Select(i => (i.TableName, i.FieldName)).Distinct().Count(),
+            },
+        };
+    }
+
+    /// <summary>"Step 'Search records' (d): …" → "Step 'Search records' (d)".</summary>
+    private static string? StepOf(string message)
+    {
+        if (!message.StartsWith("Step '", StringComparison.Ordinal)) return null;
+        var end = message.IndexOf("): ", StringComparison.Ordinal);
+        return end > 0 ? message[..(end + 1)] : null;
     }
 
     private static ImportPreviewResult FileError(string code, string message)
