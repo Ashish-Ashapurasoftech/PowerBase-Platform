@@ -16,6 +16,8 @@ namespace PowerBase.QbMigration.Worker;
 public sealed class Commands(Composition c)
 {
     private readonly ILogger _log = c.Logs.CreateLogger("qbm");
+    // Tables the last ContextsAsync skipped because their fields no longer match.
+    private readonly List<string> _blockedTables = [];
     // Matches the queue's maxDeliveryCount (infra/qb-migration/main.bicep).
     private const int MaxDeliveries = 5;
 
@@ -268,6 +270,7 @@ public sealed class Commands(Composition c)
             PercentMultiplier = c.Config.GetValue("Migration:PercentMultiplier", 100m),
             DurationDivisor = c.Config.GetValue("Migration:DurationDivisor", 60000m),
         };
+        _blockedTables.Clear();
         var result = new Dictionary<long, QbmTableContext>();
         foreach (var t in await c.State().TableMapsAsync(run.Id, ct))
         {
@@ -278,7 +281,13 @@ public sealed class Commands(Composition c)
             var mappings = await ReleaseEmptyMissingAsync(t.QbTableId, QbFieldMapper.Map(await qb.GetFieldsAsync(t.QbTableId, ct), pbFields), ct);
             if (!QbFieldMapper.IsLoadable(mappings))
             {
-                _log.LogError("{Table}: fields are blocked now (schema changed since map?); skipped", t.QbTableName);
+                // Skipped, never silently: validate and sync count it as a failure, and the report lists why.
+                var why = string.Join("; ", mappings.Where(m => m.Action == QbFieldAction.Block)
+                    .Select(m => $"field {m.Qb.Id} '{m.Qb.Label}': {m.Reason}"));
+                _log.LogError("{Table}: fields are blocked now (schema changed since map?); skipped. {Why}", t.QbTableName, why);
+                await c.State().AddIssuesAsync(run.Id, t.Id, null, [new("error", "QBM_TABLE_BLOCKED",
+                    $"Skipped: fields no longer match QuickBase (schema changed since map?). {why}")], ct);
+                _blockedTables.Add(t.QbTableName);
                 continue;
             }
             var keyed = references.Where(r => r.ChildTableId == t.PbTableId && r.ParentKey.Fid != QbSystemFids.RecordId).ToList();
@@ -468,15 +477,68 @@ public sealed class Commands(Composition c)
     }
 
     /// <summary>Creates (inactive, no email) or links the PowerBase users the loaded data named but couldn't find.</summary>
-    public async Task UsersAsync(long runId, long appRoleId, long tenantRoleId, bool apply, CancellationToken ct)
+    /// <summary>Users of the app, as in QuickBase (the user migration design approved 2026-11-17): exact role, QuickBase's
+    /// "Registered" status, "None" for users without a role, Super Users as tenant Administrators. No invitation email is sent.
+    /// With --qbl, the built-in Administrator / Participant / Viewer roles get QuickBase's "Manage users" and "Edit app" switches.
+    /// Without --apply nothing is written: every user is listed with what would happen. Run it before the load.</summary>
+    public async Task<int> UsersAsync(long runId, string? qblPath, bool apply, CancellationToken ct)
     {
-        var state = c.State();
-        var run = await state.RunAsync(runId, ct);
-        var emails = await state.UnmappedEmailsAsync(runId, ct);
-        var outcomes = await new QbmUserProvisioner(c.Tenant, c.Control)
-            .ProvisionAsync(c.TenantId, run.PbAppId, appRoleId, tenantRoleId, run.RunAsUserId, emails, dryRun: !apply, ct);
-        foreach (var o in outcomes) _log.LogInformation("{Email}: {Action} {User}", o.Email, o.Action, o.UserId);
-        _log.LogInformation(apply ? "Done. Run the load again: chunks replace their rows, now with these users." : "Dry run. Add --apply to create them.");
+        var dryRun = !apply;
+        var run = await c.State().RunAsync(runId, ct);
+        var provisioner = new QbmUserProvisioner(c.Tenant, c.Control);
+        _log.LogInformation("Step: users and roles of QuickBase app {App}{Dry}", run.QbAppId, dryRun ? " (dry run, nothing is written)" : "");
+        var directory = await c.UserDirectory().ReadAsync(run.QbAppId, ct);
+        _log.LogInformation("QuickBase: {Roles} roles, {Users} user entries", directory.RoleOrder.Count, directory.Users.Count);
+
+        var roles = await provisioner.AppRolesAsync(run.PbAppId, ct);
+        var plan = QbUserPlanner.Plan(directory, roles.Keys.ToList());
+        foreach (var w in plan.Warnings) _log.LogWarning("{Warning}", w);
+
+        _log.LogInformation("Step: built-in roles (Administrator, Participant, Viewer)");
+        if (qblPath is null)
+            _log.LogWarning("No --qbl file: the built-in roles keep PowerBase's permissions (not checked against QuickBase).");
+        else
+        {
+            var qblRoles = QbmBuiltInRoleSync.RolesFromQbl(await File.ReadAllTextAsync(qblPath, ct), await provisioner.AppNameAsync(run.PbAppId, ct));
+            foreach (var ch in await new QbmBuiltInRoleSync(c.Tenant).SyncAsync(run.PbAppId, qblRoles, dryRun, ct))
+            {
+                if (ch.Added.Count == 0 && ch.Removed.Count == 0) _log.LogInformation("{Role}: already as in QuickBase", ch.Role);
+                else _log.LogInformation("{Role}: {Verb} {Added}{Removed}", ch.Role, dryRun ? "would add" : "added",
+                    ch.Added.Count == 0 ? "nothing" : string.Join(", ", ch.Added),
+                    ch.Removed.Count == 0 ? "" : $"; {(dryRun ? "would remove" : "removed")} {string.Join(", ", ch.Removed)}");
+                foreach (var w in ch.Warnings) _log.LogWarning("{Role}: {Warning}", ch.Role, w);
+            }
+        }
+
+        if (!plan.CanApply)
+        {
+            _log.LogError("Roles QuickBase uses that the PowerBase app doesn't have: {Roles}. Nothing was written. Re-run the QBL import (update the app), then run users again.",
+                string.Join(", ", plan.MissingRoles));
+            return ExitGatesFailed;
+        }
+        if (plan.Users.Any(u => u.AppRoleName == QbUserPlanner.NoneRoleName) && !roles.ContainsKey(QbUserPlanner.NoneRoleName))
+        {
+            var id = await provisioner.EnsureNoneRoleAsync(run.PbAppId, run.RunAsUserId, dryRun, ct);
+            roles[QbUserPlanner.NoneRoleName] = id ?? -1;
+            _log.LogInformation("Role 'None' (no permissions, QuickBase's built-in no-access role): {What}", dryRun ? "would be created" : "created");
+        }
+
+        _log.LogInformation("Step: users");
+        var outcomes = await provisioner.ApplyAsync(c.TenantId, run.PbAppId, plan.Users, roles, await provisioner.TenantRolesAsync(c.TenantId, ct),
+            run.RunAsUserId, dryRun, ct);
+        foreach (var o in outcomes)
+        {
+            _log.LogInformation("{Email} | QuickBase: {QbRoles}, {Reg} | PowerBase: {Role}, {Status}{Super} | account {Account} | tenant {Tenant} | app {App}{Note}",
+                o.Plan.Email, o.Plan.QbRoles, o.Plan.IsActive ? "Registered" : "not registered", o.Plan.AppRoleName, o.Plan.IsActive ? "active" : "inactive",
+                o.Plan.IsSuperUser ? ", Super User" : "", o.Account, o.Tenant, o.App, o.Plan.Note is null ? "" : $" | {o.Plan.Note}");
+            if (o.Warning is not null) _log.LogWarning("{Email}: {Warning}", o.Plan.Email, o.Warning);
+        }
+        var changed = outcomes.Count(o => (o.Account != "unchanged" && !o.Account.StartsWith("existing")) || o.Tenant.StartsWith("added")
+                                          || o.Tenant.StartsWith("corrected") || o.App != "unchanged");
+        _log.LogInformation("{Mode}: {Users} users ({Active} active, {Inactive} inactive); {Changes} with changes.", dryRun ? "Dry run" : "Done",
+            outcomes.Count, outcomes.Count(o => o.Plan.IsActive), outcomes.Count(o => !o.Plan.IsActive), changed);
+        if (dryRun) _log.LogInformation("Nothing was written. Add --apply to write it.");
+        return ExitOk;
     }
 
     /// <summary>After loading: per table, RecordCount and identity seed, then the count and id-range gates.</summary>
@@ -531,7 +593,9 @@ public sealed class Commands(Composition c)
         var contexts = await ContextsAsync(run, ct, ["loaded", "validated"]);
         var validator = new QbmValidator(c.QuickBase(), c.Tenant, c.Encryption, c.PowerBase());
         var done = await state.DoneChunksAsync(runId, ct);
-        var allPassed = contexts.Count > 0;
+        var allPassed = contexts.Count > 0 && _blockedTables.Count == 0;
+        if (_blockedTables.Count > 0)
+            _log.LogError("Not validated (fields changed since map): {Tables}", string.Join(", ", _blockedTables));
         foreach (var (tableMapId, ctx) in contexts)
         {
             var ranges = done.Where(d => d.TableMapId == tableMapId).Select(d => new QbRange(d.FromRecordId, d.ToRecordId)).ToList();
@@ -569,6 +633,127 @@ public sealed class Commands(Composition c)
             if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"Backfill for table {t.PbTableId} failed: {(int)response.StatusCode} {body}");
             _log.LogInformation("{Table}: search backfill started ({Status}); check GET admin/search/backfill/status", t.QbTableName, (int)response.StatusCode);
         }
+    }
+
+    /// <summary>Final sync before switch-over (docs/qb-migration/operator-guide.md): loads records created in QuickBase since the
+    /// plan, copies again the records changed since the load (or the last sync), marks deleted the records QuickBase no
+    /// longer has, then finalizes (gates 1 and 2). --dry-run only counts. Safe to run as often as wanted.</summary>
+    public async Task<int> SyncAsync(long runId, bool dryRun, bool deletes, int maxDeletePercent, DateTime? sinceUtc, bool overwritePowerBase,
+        string queue, CancellationToken ct)
+    {
+        await using var runLock = await LockAsync(runId, ct);
+        await ClearStopAsync(runId, ct);
+        var control = Control(runId);
+        var state = c.State();
+        var run = await state.RunAsync(runId, ct);
+        var options = new QbmSyncer.Options(dryRun, deletes, maxDeletePercent, sinceUtc);
+
+        // Before anything is written: what changed in PowerBase since the load would be overwritten by QuickBase.
+        _log.LogInformation("Step: changes made in PowerBase since the load (they would be overwritten)");
+        var conflicts = await ConflictCheckAsync(run, options, ct);
+        if (conflicts && !overwritePowerBase)
+        {
+            if (!dryRun)
+            {
+                _log.LogError("Sync refused, nothing was written: records or fields changed in PowerBase (listed above, and in the report as QBM_SYNC_CONFLICT). " +
+                              "QuickBase is the source until switch-over. Check them with the app owner; to let QuickBase overwrite them, run again with --overwrite-powerbase-changes.");
+                return ExitGatesFailed;
+            }
+            _log.LogWarning("A real sync would stop here until --overwrite-powerbase-changes is given.");
+        }
+        // Where each table's planned ranges ended before this sync: records from there on are the new ones.
+        var newFrom = new Dictionary<long, long>();
+        foreach (var t in await state.TableMapsAsync(runId, ct)) newFrom[t.Id] = await state.PlannedEndAsync(t.Id, ct);
+        if (!dryRun)
+        {
+            _log.LogInformation("Step: records created in QuickBase since the plan");
+            await ExtendAsync(runId, c.Config.GetValue("Migration:RowsPerChunk", 12000), ct);
+            if (!await LoadAsync(runId, queue, reload: false, control, ct))
+            {
+                if (control.Stopped) return ExitStopped;
+                _log.LogError("Run {Run}: some chunks failed; see 'status --run {Run}' and 'retry-dlq --run {Run}', then sync again", runId, runId, runId);
+                return ExitGatesFailed;
+            }
+        }
+
+        _log.LogInformation("Step: {What}", dryRun ? "counting changes (dry run, nothing is written)" : "changed and deleted records");
+        var pending = await state.PendingChunksAsync(runId, ct);
+        var contexts = await ContextsAsync(run, ct, ["loading", "loaded", "validated"]);
+        var syncer = new QbmSyncer(c.QuickBase(), c.Loader(), state, c.PowerBase(), _log);
+        var problems = _blockedTables.Count > 0 || (dryRun && conflicts && !overwritePowerBase);
+        if (_blockedTables.Count > 0) _log.LogError("Not synced (fields changed since map): {Tables}", string.Join(", ", _blockedTables));
+        long changedTotal = 0, deletedTotal = 0, newTotal = 0;
+        foreach (var (tableMapId, ctx) in contexts)
+        {
+            if (!await control.WaitUntilAllowedAsync(ct)) { _log.LogWarning("Run {Run}: stopped during sync", runId); return ExitStopped; }
+            if (pending.Any(p => p.TableMapId == tableMapId))
+            {
+                _log.LogWarning("{Table}: chunks not loaded yet; not synced", ctx.PbTable.Name);
+                problems = true;
+                continue;
+            }
+            var end = await state.PlannedEndAsync(tableMapId, ct);
+            var from = newFrom.GetValueOrDefault(tableMapId, end);
+            var created = (await c.QuickBase().QueryAsync(ctx.QbTableId, [QbSystemFids.RecordId], $"{{3.GTE.{from}}}", 0, 1, ct)).TotalRecords;
+            var r = await syncer.SyncTableAsync(ctx, end, options, ct);
+            changedTotal += r.Changed; deletedTotal += r.Deleted ?? 0; newTotal += created;
+            problems |= r.Blocked is not null;
+            var summary = dryRun
+                ? $"Dry run: {created} new, {r.Changed} changed, {(r.Deleted is { } d ? d.ToString() : "not checked")} deleted in QuickBase since the load."
+                : $"Sync: {r.Changed} changed records copied again, {(r.Deleted is { } x ? $"{x} marked deleted" : "deletes not checked")}.";
+            _log.LogInformation("{Table}: {Summary}", ctx.PbTable.Name, dryRun ? summary : summary + (r.Blocked is null ? "" : " Deletes refused: " + r.Blocked));
+            if (!dryRun && (r.Changed > 0 || r.Deleted > 0 || r.Blocked is not null))
+                await state.AddIssuesAsync(runId, tableMapId, null, [new(r.Blocked is null ? "info" : "error", r.Blocked is null ? "QBM_SYNC" : "QBM_SYNC_DELETES_REFUSED", r.Blocked ?? summary)], ct);
+        }
+        _log.LogInformation(dryRun ? "Dry run: {New} new, {Changed} changed, {Deleted} deleted records across {Tables} tables."
+                                   : "Sync: {New} new, {Changed} changed, {Deleted} deleted records across {Tables} tables.",
+            newTotal, changedTotal, deletedTotal, contexts.Count);
+        if (dryRun) return problems ? ExitGatesFailed : ExitOk;
+
+        _log.LogInformation("Step: finalize");
+        problems |= !await FinalizeCoreAsync(runId, ct);
+        _log.LogInformation("Next: 'validate --run {Run} --sample <0..1>' to compare values again, then 'report --run {Run}'.", runId, runId);
+        return problems ? ExitGatesFailed : ExitOk;
+    }
+
+    /// <summary>Lists, logs and records (QBM_SYNC_CONFLICT) the records and fields changed in PowerBase since each table's load or
+    /// last sync. True when there are any.</summary>
+    private async Task<bool> ConflictCheckAsync(QbmStateStore.RunRow run, QbmSyncer.Options options, CancellationToken ct)
+    {
+        var state = c.State();
+        var contexts = await ContextsAsync(run, ct, ["loading", "loaded", "validated"]);
+        if (contexts.Count == 0) return false;
+        var syncer = new QbmSyncer(c.QuickBase(), c.Loader(), state, c.PowerBase(), _log);
+        var starts = new Dictionary<long, DateTime>();
+        foreach (var (id, ctx) in contexts) starts[id] = await syncer.SinceAsync(ctx, options, ct);
+        var activity = await state.AppActivityAsync(run.PbAppId, starts.Values.Min(), ct);
+        var found = false;
+
+        // Field changes can rewrite values without touching the records' Date Modified (a type change can empty a column).
+        var fieldChanges = activity.Where(a => a.EntityType == "AppField").ToList();
+        if (fieldChanges.Count > 0)
+        {
+            found = true;
+            foreach (var a in fieldChanges)
+                _log.LogWarning("Field changed in PowerBase {When:u} by user {User}: {What}", a.OccurredOn, a.UserId, a.EntityTitle ?? a.Action);
+            await state.AddIssuesAsync(run.Id, null, null, fieldChanges.Select(a => new QbIssue("warning", "QBM_SYNC_CONFLICT",
+                $"Field changed in PowerBase on {a.OccurredOn:u} by user {a.UserId}: {a.EntityTitle ?? a.Action}. Values it changed are not copied " +
+                "again unless the record changes in QuickBase; to copy every record again, sync with --since <the load date>.")).ToList(), ct);
+        }
+
+        foreach (var (tableMapId, ctx) in contexts)
+        {
+            var list = await syncer.ConflictsAsync(ctx, options, activity, ct);
+            if (list.Count == 0) continue;
+            found = true;
+            foreach (var g in list.GroupBy(x => x.Kind))
+                _log.LogWarning("{Table}: {Count} records {What} since {Since:u}, e.g. ids {Ids}", ctx.PbTable.Name, g.Count(),
+                    QbSyncConflicts.Describe(g.Key), starts[tableMapId], string.Join(", ", g.Take(20).Select(x => x.RecordId)));
+            await state.AddIssuesAsync(run.Id, tableMapId, null, list.Take(1000).Select(x => new QbIssue("warning", "QBM_SYNC_CONFLICT",
+                $"Record {QbSyncConflicts.Describe(x.Kind)} after the load; the sync gives it QuickBase's values.", x.RecordId)).ToList(), ct);
+        }
+        if (!found) _log.LogInformation("No changes made in PowerBase since the load.");
+        return found;
     }
 
     // ---------- Operator commands: migrate, pause / resume / stop, status, retry-dlq, report ----------

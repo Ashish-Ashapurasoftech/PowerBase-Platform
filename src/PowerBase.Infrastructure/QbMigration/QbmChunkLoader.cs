@@ -40,9 +40,111 @@ public sealed class QbmChunkLoader(ITenantConnectionFactory connections, IEncryp
         if (rows.Any(r => r.RecordId < range.From || r.RecordId >= range.To))
             throw new InvalidOperationException($"A row is outside chunk range {range.From}..{range.To - 1}.");
 
-        var written = WrittenFields(fields, rows.SelectMany(r => r.Values.Keys));
         await using var conn = await connections.CreateAsync(ct);
         await conn.OpenAsync(ct);
+        var data = await BuildAsync(conn, tenantId, table, fields, rows, ct);
+
+        var checksum = Checksum(rows);
+        var tableName = PhysicalNaming.FullTableName(table.Id);
+        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(ct);
+        try
+        {
+            await conn.ExecuteAsync(new CommandDefinition(
+                $"DELETE FROM {tableName} WHERE Id >= @from AND Id < @to", new { from = range.From, to = range.To }, tx, cancellationToken: ct));
+            await BulkAsync(conn, tx, tableName, data, ct);
+
+            var marked = await conn.ExecuteAsync(new CommandDefinition("""
+                UPDATE qbm.Chunk SET Status = 'done', RowsRead = @count, RowsWritten = @count, Checksum = @checksum,
+                       LastError = NULL, FinishedOn = SYSUTCDATETIME()
+                WHERE Id = @chunkId AND FromRecordId = @from AND ToRecordId = @to
+                """, new { count = rows.Count, checksum, chunkId, from = range.From, to = range.To }, tx, cancellationToken: ct));
+            if (marked != 1) throw new InvalidOperationException($"Chunk {chunkId} for range {range.From}..{range.To - 1} is not in the ledger.");
+
+            await tx.CommitAsync(ct);
+        }
+        catch
+        {
+            await tx.RollbackAsync(CancellationToken.None);
+            throw;
+        }
+        return new Result(rows.Count, checksum);
+    }
+
+    /// <summary>Final sync: replaces the given records (changed in QuickBase since the load) with their current values, keeping
+    /// their Record IDs and PublicIds, in one transaction. A record that isn't in PowerBase yet is added.</summary>
+    public async Task<int> UpsertAsync(long tenantId, AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<QbTransformedRow> rows,
+        CancellationToken ct = default)
+    {
+        if (rows.Count == 0) return 0;
+        if (rows.Select(r => r.RecordId).Distinct().Count() != rows.Count) throw new InvalidOperationException("The same record is in the batch twice.");
+        await using var conn = await connections.CreateAsync(ct);
+        await conn.OpenAsync(ct);
+        var data = await BuildAsync(conn, tenantId, table, fields, rows, ct);
+        var tableName = PhysicalNaming.FullTableName(table.Id);
+        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(ct);
+        try
+        {
+            await conn.ExecuteAsync(new CommandDefinition(
+                $"DELETE FROM {tableName} WHERE Id IN (SELECT CAST([value] AS BIGINT) FROM OPENJSON(@ids))",
+                new { ids = JsonSerializer.Serialize(rows.Select(r => r.RecordId)) }, tx, commandTimeout: 600, cancellationToken: ct));
+            await BulkAsync(conn, tx, tableName, data, ct);
+            await QueueSearchAsync(conn, tx, table, rows.Select(r => StablePublicId(table.Id, r.RecordId)).ToList(), SearchUpsert, ct);
+            await tx.CommitAsync(ct);
+        }
+        catch
+        {
+            await tx.RollbackAsync(CancellationToken.None);
+            throw;
+        }
+        return rows.Count;
+    }
+
+    /// <summary>Final sync: marks records deleted (IsDeleted = 1), the way PowerBase deletes a record, and removes them from
+    /// search. Returns how many changed.</summary>
+    public async Task<int> MarkDeletedAsync(AppTable table, IReadOnlyList<long> ids, CancellationToken ct = default)
+    {
+        if (ids.Count == 0) return 0;
+        await using var conn = await connections.CreateAsync(ct);
+        await conn.OpenAsync(ct);
+        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(ct);
+        try
+        {
+            var deleted = (await conn.QueryAsync<Guid>(new CommandDefinition($"""
+                UPDATE {PhysicalNaming.FullTableName(table.Id)} SET IsDeleted = 1, ModifiedOn = SYSUTCDATETIME()
+                OUTPUT inserted.PublicId
+                WHERE IsDeleted = 0 AND Id IN (SELECT CAST([value] AS BIGINT) FROM OPENJSON(@ids))
+                """, new { ids = JsonSerializer.Serialize(ids) }, tx, commandTimeout: 600, cancellationToken: ct))).AsList();
+            await QueueSearchAsync(conn, tx, table, deleted, SearchDelete, ct);
+            await tx.CommitAsync(ct);
+            return deleted.Count;
+        }
+        catch
+        {
+            await tx.RollbackAsync(CancellationToken.None);
+            throw;
+        }
+    }
+
+    private const byte SearchUpsert = 0, SearchDelete = 1; // IndexAction values, as meta.SearchOutbox stores them
+
+    /// <summary>Asks PowerBase to update search for these records: rows in meta.SearchOutbox, written in the same transaction as the
+    /// records (as a normal record write does), which the API's search outbox relay sends to the indexer. Upserts are re-read from
+    /// the table by the indexer. Does nothing on a database without the outbox (migration 086 not run).</summary>
+    private static async Task QueueSearchAsync(SqlConnection conn, SqlTransaction tx, AppTable table, IReadOnlyList<Guid> publicIds, byte action, CancellationToken ct)
+    {
+        if (publicIds.Count == 0) return;
+        await conn.ExecuteAsync(new CommandDefinition("""
+            IF OBJECT_ID('meta.SearchOutbox') IS NOT NULL
+                INSERT INTO meta.SearchOutbox (TableId, AppId, RecordPublicId, Action, Version)
+                SELECT @tableId, @appId, CAST([value] AS UNIQUEIDENTIFIER), @action, @version FROM OPENJSON(@ids)
+            """, new { tableId = table.Id, appId = table.AppId, action, version = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                       ids = JsonSerializer.Serialize(publicIds) }, tx, commandTimeout: 600, cancellationToken: ct));
+    }
+
+    private async Task<DataTable> BuildAsync(SqlConnection conn, long tenantId, AppTable table, IReadOnlyList<AppField> fields,
+        IReadOnlyList<QbTransformedRow> rows, CancellationToken ct)
+    {
+        var written = WrittenFields(fields, rows.SelectMany(r => r.Values.Keys));
         var enc = await ResolveEncryptionAsync(conn, tenantId, table.AppId, written, ct);
 
         var data = new DataTable();
@@ -74,37 +176,15 @@ public sealed class QbmChunkLoader(ITenantConnectionFactory connections, IEncryp
             }
             data.Rows.Add(dr);
         }
+        return data;
+    }
 
-        var checksum = Checksum(rows);
-        var tableName = PhysicalNaming.FullTableName(table.Id);
-        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(ct);
-        try
-        {
-            await conn.ExecuteAsync(new CommandDefinition(
-                $"DELETE FROM {tableName} WHERE Id >= @from AND Id < @to", new { from = range.From, to = range.To }, tx, cancellationToken: ct));
-
-            using (var bulk = new SqlBulkCopy(conn, SqlBulkCopyOptions.KeepIdentity | SqlBulkCopyOptions.CheckConstraints, tx)
-                   { DestinationTableName = tableName, BulkCopyTimeout = 600, BatchSize = Math.Max(1, data.Rows.Count) })
-            {
-                foreach (DataColumn c in data.Columns) bulk.ColumnMappings.Add(c.ColumnName, c.ColumnName);
-                await bulk.WriteToServerAsync(data, ct);
-            }
-
-            var marked = await conn.ExecuteAsync(new CommandDefinition("""
-                UPDATE qbm.Chunk SET Status = 'done', RowsRead = @count, RowsWritten = @count, Checksum = @checksum,
-                       LastError = NULL, FinishedOn = SYSUTCDATETIME()
-                WHERE Id = @chunkId AND FromRecordId = @from AND ToRecordId = @to
-                """, new { count = rows.Count, checksum, chunkId, from = range.From, to = range.To }, tx, cancellationToken: ct));
-            if (marked != 1) throw new InvalidOperationException($"Chunk {chunkId} for range {range.From}..{range.To - 1} is not in the ledger.");
-
-            await tx.CommitAsync(ct);
-        }
-        catch
-        {
-            await tx.RollbackAsync(CancellationToken.None);
-            throw;
-        }
-        return new Result(rows.Count, checksum);
+    private static async Task BulkAsync(SqlConnection conn, SqlTransaction tx, string tableName, DataTable data, CancellationToken ct)
+    {
+        using var bulk = new SqlBulkCopy(conn, SqlBulkCopyOptions.KeepIdentity | SqlBulkCopyOptions.CheckConstraints, tx)
+            { DestinationTableName = tableName, BulkCopyTimeout = 600, BatchSize = Math.Max(1, data.Rows.Count) };
+        foreach (DataColumn c in data.Columns) bulk.ColumnMappings.Add(c.ColumnName, c.ColumnName);
+        await bulk.WriteToServerAsync(data, ct);
     }
 
     /// <summary>Encryption, failing closed: the app's flag is read here without swallowing errors, and the load stops if

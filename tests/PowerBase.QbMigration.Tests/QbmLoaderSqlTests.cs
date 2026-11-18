@@ -266,4 +266,112 @@ public sealed class QbmLoaderSqlTests : IAsyncLifetime
         await _loader.LoadAsync(1, Table(PlainApp), _fields, chunk, new QbRange(1, 100), [R(5, "x")]);
         (await _state.StartChunkAsync(chunk)).Should().BeFalse();
     }
+
+    // ---------- Final sync ----------
+
+    [SqlFact]
+    public async Task Sync_upsert_replaces_changed_records_and_adds_missing_ones_keeping_ids_and_public_ids()
+    {
+        var chunk = await ChunkAsync(1, 100);
+        await _loader.LoadAsync(1, Table(PlainApp), _fields, chunk, new QbRange(1, 100), [R(3, "old"), R(4, "same"), R(5, "x")]);
+        var before = await RowsAsync();
+
+        var written = await _loader.UpsertAsync(1, Table(PlainApp), _fields, [R(3, "new", 7m), R(6, "added")]);
+
+        written.Should().Be(2);
+        var after = await RowsAsync();
+        ((IEnumerable<dynamic>)after).Select(r => (long)r.Id).Should().Equal(3, 4, 5, 6);
+        ((string)after[0].f_6).Should().Be("new");
+        ((decimal)after[0].f_7).Should().Be(7m);
+        ((Guid)after[0].PublicId).Should().Be((Guid)before[0].PublicId);
+        ((string)after[1].f_6).Should().Be("same");
+        ((Guid)after[3].PublicId).Should().Be(QbmChunkLoader.StablePublicId(_tableId, 6));
+    }
+
+    [SqlFact]
+    public async Task Sync_upsert_encrypts_like_the_load()
+    {
+        await _loader.UpsertAsync(1, Table(EncryptedApp), _fields, [R(3, "a", secret: "s3cret")]);
+        var rows = await RowsAsync();
+        ((string)rows[0].f_8).Should().StartWith("ENC(");
+    }
+
+    [SqlFact]
+    public async Task Sync_marks_records_deleted_and_brings_them_back_when_copied_again()
+    {
+        var chunk = await ChunkAsync(1, 100);
+        await _loader.LoadAsync(1, Table(PlainApp), _fields, chunk, new QbRange(1, 100), [R(3, "a"), R(4, "b"), R(5, "c")]);
+
+        (await _loader.MarkDeletedAsync(Table(PlainApp), [4, 5, 77])).Should().Be(2);
+        (await _loader.MarkDeletedAsync(Table(PlainApp), [4])).Should().Be(0);
+        (await _state.LiveIdsAsync(_tableId)).Should().Equal(3);
+
+        await _loader.UpsertAsync(1, Table(PlainApp), _fields, [R(4, "b2")]);
+        (await _state.LiveIdsAsync(_tableId)).Should().Equal(3, 4);
+    }
+
+    [SqlFact]
+    public async Task Sync_starts_at_the_load_then_at_the_last_finished_sync()
+    {
+        await _state.InitAsync(await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "sql", "003_qbm_sync.sql")));
+        await using var c = new SqlConnection(SqlDb.ConnectionString);
+        await c.ExecuteAsync("DELETE FROM qbm.Sync WHERE TableMapId = @t", new { t = _tableId });
+        (await _state.SyncStartAsync(_tableId)).Should().BeNull("the test table has no table map row");
+
+        var chunk = await ChunkAsync(1, 100);
+        await c.ExecuteAsync("UPDATE qbm.Chunk SET Status = 'done', StartedOn = '2026-11-01T10:00:00' WHERE Id = @chunk", new { chunk });
+        (await _state.SyncStartAsync(_tableId)).Should().Be(new DateTime(2026, 11, 1, 10, 0, 0));
+
+        var dry = await _state.StartSyncAsync(1, _tableId, DateTime.UtcNow, dryRun: true);
+        await _state.FinishSyncAsync(dry, 5, 1, null);
+        var failed = await _state.StartSyncAsync(1, _tableId, DateTime.UtcNow, dryRun: false);
+        await _state.FinishSyncAsync(failed, 0, null, "boom");
+        (await _state.SyncStartAsync(_tableId)).Should().Be(new DateTime(2026, 11, 1, 10, 0, 0), "dry runs and failed syncs don't move the start");
+
+        var real = await _state.StartSyncAsync(1, _tableId, DateTime.UtcNow, dryRun: false);
+        await _state.FinishSyncAsync(real, 2, 0, null);
+        var started = await c.ExecuteScalarAsync<DateTime>("SELECT StartedOn FROM qbm.Sync WHERE Id = @real", new { real });
+        (await _state.SyncStartAsync(_tableId)).Should().Be(started);
+        await c.ExecuteAsync("DELETE FROM qbm.Sync WHERE TableMapId = @t", new { t = _tableId });
+    }
+
+    [SqlFact]
+    public async Task Sync_asks_powerbase_to_update_search_for_changed_and_deleted_records()
+    {
+        await using var c = new SqlConnection(SqlDb.ConnectionString);
+        await c.ExecuteAsync("""
+            IF OBJECT_ID('meta.SearchOutbox') IS NULL
+                CREATE TABLE meta.SearchOutbox (Id BIGINT IDENTITY(1,1) PRIMARY KEY, TableId BIGINT NOT NULL, AppId BIGINT NOT NULL,
+                    RecordPublicId UNIQUEIDENTIFIER NOT NULL, Action TINYINT NOT NULL, Version BIGINT NOT NULL,
+                    CreatedOn DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(), Attempts INT NOT NULL DEFAULT 0, LastAttemptOn DATETIME2(3) NULL, LastError NVARCHAR(400) NULL);
+            DELETE FROM meta.SearchOutbox WHERE TableId = @t;
+            """, new { t = _tableId });
+        var chunk = await ChunkAsync(1, 100);
+        await _loader.LoadAsync(1, Table(PlainApp), _fields, chunk, new QbRange(1, 100), [R(3, "a"), R(4, "b")]);
+        (await c.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM meta.SearchOutbox WHERE TableId = @t", new { t = _tableId }))
+            .Should().Be(0, "the bulk load is indexed by a backfill, not one outbox row per record");
+
+        await _loader.UpsertAsync(1, Table(PlainApp), _fields, [R(3, "a2")]);
+        await _loader.MarkDeletedAsync(Table(PlainApp), [4]);
+
+        var rows = (await c.QueryAsync<(Guid RecordPublicId, byte Action, long AppId)>(
+            "SELECT RecordPublicId, Action, AppId FROM meta.SearchOutbox WHERE TableId = @t ORDER BY Id", new { t = _tableId })).ToList();
+        rows.Should().Equal((QbmChunkLoader.StablePublicId(_tableId, 3), (byte)0, PlainApp), (QbmChunkLoader.StablePublicId(_tableId, 4), (byte)1, PlainApp));
+        await c.ExecuteAsync("DELETE FROM meta.SearchOutbox WHERE TableId = @t", new { t = _tableId });
+    }
+
+    [SqlFact]
+    public async Task Conflict_check_reads_deleted_rows_and_rows_changed_since()
+    {
+        var chunk = await ChunkAsync(1, 100);
+        await _loader.LoadAsync(1, Table(PlainApp), _fields, chunk, new QbRange(1, 100), [R(3, "a"), R(4, "b"), R(5, "c")]);
+        await using var c = new SqlConnection(SqlDb.ConnectionString);
+        await c.ExecuteAsync($"UPDATE data.t_{_tableId} SET ModifiedOn = '2026-01-01' ; UPDATE data.t_{_tableId} SET ModifiedOn = '2026-11-17T10:00:00' WHERE Id = 4");
+        await _loader.MarkDeletedAsync(Table(PlainApp), [5]);
+
+        var rows = await _state.RecentRowsAsync(_tableId, new DateTime(2026, 11, 17, 9, 0, 0));
+        rows.Select(r => (r.Id, r.IsDeleted)).OrderBy(r => r.Id).Should().Equal((4L, false), (5L, true));
+        rows.Single(r => r.Id == 4).PublicId.Should().Be(QbmChunkLoader.StablePublicId(_tableId, 4));
+        (await _state.AppActivityAsync(PlainApp, DateTime.UtcNow.AddDays(1))).Should().BeEmpty();
+    }
 }

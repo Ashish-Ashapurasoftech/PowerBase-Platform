@@ -6,7 +6,7 @@ using PowerBase.QbMigration.Worker;
 //   map      --qb-app <dbid> --pb-app <id> --run-as <userId>
 //   plan     --run <id> [--extend]              --extend plans only records created in QuickBase since the plan
 //   run      --run <id> [--queue local|servicebus] [--reload]   --reload loads done chunks again (after users/fixes)
-//   users    --run <id> --app-role <id> --tenant-role <id> [--apply]
+//   users    --run <id> [--qbl <QBL export file>] [--apply]   users and roles as in QuickBase; run before the load; no emails
 //   finalize --run <id>
 //   validate --run <id> [--sample 1.0]           gates 3, 4, 7 (sample 1 = compare every record)
 //   reindex  --run <id> --api <PowerBase API url>  needs PowerBase:ApiToken (super admin user token)
@@ -19,9 +19,11 @@ using PowerBase.QbMigration.Worker;
 //   pause | resume | stop  --run <id>            the running worker finishes the chunks in progress first
 //   status   --run <id>                          progress, speed, dead letters, chunks to fix first
 //   retry-dlq --run <id> [--list] [--chunk <id,id>] [--no-continue]   retry chunks the queue gave up on, then continue
+//   sync     --run <id> [--dry-run] [--no-deletes] [--max-delete-percent 5] [--since <UTC time>] [--overwrite-powerbase-changes]
+//            final sync: new, changed and deleted QuickBase records since the load (or the last sync), then finalize
 if (args.Length == 0 || args[0] is "-h" or "--help")
 {
-    Console.WriteLine("commands: migrate | pause | resume | stop | status | retry-dlq | report");
+    Console.WriteLine("commands: migrate | pause | resume | stop | status | retry-dlq | report | sync");
     Console.WriteLine("          init | map | plan | run | users | finalize | validate | reindex   (see Program.cs for options)");
     return 0;
 }
@@ -57,7 +59,7 @@ try
         case "map": await commands.MapAsync(Text("qb-app"), Required("pb-app"), Required("run-as"), cts.Token); break;
         case "plan": await commands.PlanAsync(Required("run"), options.ContainsKey("extend"), cts.Token); break;
         case "run": return await commands.RunAsync(Required("run"), options.GetValueOrDefault("queue") ?? "local", options.ContainsKey("reload"), cts.Token) ? 0 : 2;
-        case "users": await commands.UsersAsync(Required("run"), Required("app-role"), Required("tenant-role"), options.ContainsKey("apply"), cts.Token); break;
+        case "users": return await commands.UsersAsync(Required("run"), options.GetValueOrDefault("qbl"), options.ContainsKey("apply"), cts.Token);
         case "finalize": return await commands.FinalizeAsync(Required("run"), cts.Token) ? 0 : 2;
         case "validate": return await commands.ValidateAsync(Required("run"), double.Parse(options.GetValueOrDefault("sample") ?? "1", System.Globalization.CultureInfo.InvariantCulture), cts.Token) ? 0 : 2;
         case "reindex": await commands.ReindexAsync(Required("run"), Text("api"), cts.Token); break;
@@ -71,6 +73,13 @@ try
             return await commands.RetryDeadLettersAsync(Required("run"), options.ContainsKey("list"),
                 options.GetValueOrDefault("chunk") is { Length: > 0 } ids ? ids.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(long.Parse).ToList() : null,
                 !options.ContainsKey("no-continue"), queue, sample, options.GetValueOrDefault("out"), cts.Token);
+        case "sync":
+            return await commands.SyncAsync(Required("run"), options.ContainsKey("dry-run"), !options.ContainsKey("no-deletes"),
+                (int)(Optional("max-delete-percent") ?? 5),
+                options.GetValueOrDefault("since") is { Length: > 0 } since
+                    ? DateTime.Parse(since, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal)
+                    : null,
+                options.ContainsKey("overwrite-powerbase-changes"), queue, cts.Token);
         default: Console.Error.WriteLine($"Unknown command '{args[0]}'."); return 1;
     }
     return 0;

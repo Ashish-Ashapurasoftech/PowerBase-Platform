@@ -48,6 +48,20 @@ public sealed class Composition : IDisposable
         return new QuickBaseHttpClient(http, options, new QbRateLimiter(options.RequestsPerSecond), Logs.CreateLogger<QuickBaseHttpClient>());
     }
 
+    /// <summary>Reads an app's users and roles from QuickBase (its own HttpClient and rate limit; the token goes in request bodies).</summary>
+    public QbUserDirectoryReader UserDirectory()
+    {
+        var options = new QuickBaseClientOptions
+        {
+            RealmHostname = Config["QuickBase:RealmHostname"] ?? "",
+            UserToken = Config["QuickBase:UserToken"] ?? "",
+            RequestsPerSecond = Config.GetValue("QuickBase:RequestsPerSecond", 8.0),
+        };
+        if (string.IsNullOrWhiteSpace(options.RealmHostname) || string.IsNullOrWhiteSpace(options.UserToken))
+            throw new InvalidOperationException("QuickBase realm hostname and user token are required.");
+        return new QbUserDirectoryReader(new HttpClient { Timeout = TimeSpan.FromSeconds(60) }, options, new QbRateLimiter(options.RequestsPerSecond));
+    }
+
     public QbmStateStore State() => new(Tenant);
     public QbmPowerBaseReader PowerBase() => new(Tenant, Control);
     public QbmChunkLoader Loader() => new(Tenant, Encryption);

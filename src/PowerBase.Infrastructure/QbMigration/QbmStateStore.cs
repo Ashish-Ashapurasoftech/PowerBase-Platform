@@ -388,4 +388,72 @@ public sealed class QbmStateStore(ITenantConnectionFactory connections)
             GROUP BY r.Id, r.Status, r.Control
             """, new { runId }, cancellationToken: ct));
     }
+
+    // ---------- Final sync (database/qb-migration/003_qbm_sync.sql) ----------
+
+    /// <summary>Where the next sync of a table starts: the start of the last finished (not dry) sync, else the moment the
+    /// table's load began, else (a table empty when planned) the run's creation. Null for an unknown table.</summary>
+    public async Task<DateTime?> SyncStartAsync(long tableMapId, CancellationToken ct = default)
+    {
+        await using var conn = await connections.CreateAsync(ct);
+        return await conn.ExecuteScalarAsync<DateTime?>(new CommandDefinition("""
+            SELECT COALESCE(
+                (SELECT MAX(StartedOn) FROM qbm.Sync WHERE TableMapId = @tableMapId AND DryRun = 0 AND FinishedOn IS NOT NULL AND LastError IS NULL),
+                (SELECT MIN(StartedOn) FROM qbm.Chunk WHERE TableMapId = @tableMapId AND Status = 'done'),
+                (SELECT r.CreatedOn FROM qbm.TableMap t JOIN qbm.Run r ON r.Id = t.RunId WHERE t.Id = @tableMapId))
+            """, new { tableMapId }, cancellationToken: ct));
+    }
+
+    /// <summary>Records that a sync of the table starts now (the database clock), before anything is read from QuickBase.</summary>
+    public async Task<long> StartSyncAsync(long runId, long tableMapId, DateTime sinceUtc, bool dryRun, CancellationToken ct = default)
+    {
+        await using var conn = await connections.CreateAsync(ct);
+        return await conn.ExecuteScalarAsync<long>(new CommandDefinition("""
+            INSERT INTO qbm.Sync (RunId, TableMapId, SinceUtc, DryRun) OUTPUT INSERTED.Id VALUES (@runId, @tableMapId, @sinceUtc, @dryRun)
+            """, new { runId, tableMapId, sinceUtc, dryRun }, cancellationToken: ct));
+    }
+
+    public async Task FinishSyncAsync(long syncId, int changed, int? deleted, string? error, CancellationToken ct = default)
+    {
+        await using var conn = await connections.CreateAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition("""
+            UPDATE qbm.Sync SET FinishedOn = SYSUTCDATETIME(), Changed = @changed, Deleted = @deleted, LastError = @error WHERE Id = @syncId
+            """, new { syncId, changed, deleted, error }, cancellationToken: ct));
+    }
+
+    /// <summary>The ids of the table's records that are not deleted, ascending.</summary>
+    public async Task<List<long>> LiveIdsAsync(long pbTableId, CancellationToken ct = default)
+    {
+        await using var conn = await connections.CreateAsync(ct);
+        return (await conn.QueryAsync<long>(new CommandDefinition(
+            $"SELECT Id FROM {PhysicalNaming.FullTableName(pbTableId)} WHERE IsDeleted = 0 ORDER BY Id", commandTimeout: 600, cancellationToken: ct))).ToList();
+    }
+
+    /// <summary>Conflict check: the table's rows that are deleted, or created or modified since <paramref name="sinceUtc"/>.</summary>
+    public async Task<List<QbPbRowState>> RecentRowsAsync(long pbTableId, DateTime sinceUtc, CancellationToken ct = default)
+    {
+        await using var conn = await connections.CreateAsync(ct);
+        return (await conn.QueryAsync<QbPbRowState>(new CommandDefinition($"""
+            SELECT Id, PublicId, IsDeleted, ModifiedOn, CreatedOn FROM {PhysicalNaming.FullTableName(pbTableId)}
+            WHERE IsDeleted = 1 OR CreatedOn >= @sinceUtc OR ModifiedOn >= @sinceUtc
+            """, new { sinceUtc }, commandTimeout: 600, cancellationToken: ct))).ToList();
+    }
+
+    public sealed record AuditEntry(string Action, string EntityType, string? EntityId, string? EntityTitle, long? UserId, DateTime OccurredOn);
+
+    /// <summary>Conflict check: what PowerBase's activity log shows people doing in the app since <paramref name="sinceUtc"/> to its
+    /// records and fields. Empty when the database has no activity log.</summary>
+    public async Task<List<AuditEntry>> AppActivityAsync(long pbAppId, DateTime sinceUtc, CancellationToken ct = default)
+    {
+        await using var conn = await connections.CreateAsync(ct);
+        return (await conn.QueryAsync<AuditEntry>(new CommandDefinition("""
+            IF OBJECT_ID('audit.ActivityLog') IS NOT NULL
+                SELECT Action, EntityType, EntityId, EntityTitle, UserId, OccurredOn FROM audit.ActivityLog
+                WHERE AppId = @pbAppId AND OccurredOn >= @sinceUtc AND EntityType IN ('Record', 'AppField')
+                ORDER BY Id
+            ELSE
+                SELECT CAST(NULL AS NVARCHAR(100)) AS Action, CAST(NULL AS NVARCHAR(100)) AS EntityType, CAST(NULL AS NVARCHAR(100)) AS EntityId,
+                       CAST(NULL AS NVARCHAR(MAX)) AS EntityTitle, CAST(NULL AS BIGINT) AS UserId, CAST(NULL AS DATETIME2(3)) AS OccurredOn WHERE 1 = 0
+            """, new { pbAppId, sinceUtc }, commandTimeout: 600, cancellationToken: ct))).ToList();
+    }
 }
