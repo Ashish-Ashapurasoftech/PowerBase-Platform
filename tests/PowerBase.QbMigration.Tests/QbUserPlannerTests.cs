@@ -76,6 +76,30 @@ public class QbUserPlannerTests
     }
 
     [Fact]
+    public void Migrated_users_get_names_unique_in_the_app_and_real_accounts_keep_theirs()
+    {
+        var names = QbmUserProvisioner.UniqueNames(
+        [
+            ("support@ysl.com", "support", true),        // real account: kept
+            ("support@quickbase.com", "support", false), // migration's: gets its domain
+            ("support@other.com", "support", false),
+            ("x@quickbase.com", "support", false),       // domain already used: the part before the @
+            ("dev@ysl.com", "dev", false),
+            ("admin@mail.com", "Admin", true),           // real account sharing a name with someone outside the plan
+            ("noname@ysl.com", "", false),
+        ], ["admin"]);
+
+        names["support@ysl.com"].Should().Be(("support", (string?)null));
+        names["support@quickbase.com"].Name.Should().Be("support (quickbase.com)");
+        names["support@other.com"].Name.Should().Be("support (other.com)");
+        names["x@quickbase.com"].Name.Should().Be("support (x)");
+        names["dev@ysl.com"].Name.Should().Be("dev");
+        names["admin@mail.com"].Name.Should().Be("Admin");
+        names["admin@mail.com"].Warning.Should().Contain("also named 'Admin'");
+        names["noname@ysl.com"].Name.Should().Be("noname@ysl.com");
+    }
+
+    [Fact]
     public void A_viewer_without_edit_app_keeps_powerbases_default_page_access()
     {
         QbmBuiltInRoleSync.EditAppCodes.Should().NotContain("pages:read");

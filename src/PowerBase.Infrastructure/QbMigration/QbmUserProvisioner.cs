@@ -64,9 +64,9 @@ public sealed class QbmUserProvisioner(ITenantConnectionFactory tenant, Func<Sql
     }
 
     private sealed record MemberRow(long? TenantRoleId, bool IsActive);
-    private sealed record AppUserRow(long Id, long AppRoleId, string Status);
+    private sealed record AppUserRow(long Id, long AppRoleId, string Status, string? UserName);
 
-    private sealed record Account(long Id, string? HashedPassword, DateTime? LastLoginOn, bool IsActive, bool IsEmailVerified)
+    private sealed record Account(long Id, string? Name, string? HashedPassword, DateTime? LastLoginOn, bool IsActive, bool IsEmailVerified)
     {
         /// <summary>Created by the migration and never used: no password set, never signed in.</summary>
         public bool OwnedByMigration => string.IsNullOrEmpty(HashedPassword) && LastLoginOn is null;
@@ -76,16 +76,18 @@ public sealed class QbmUserProvisioner(ITenantConnectionFactory tenant, Func<Sql
         (long Administrator, long User) tenantRoles, long addedBy, bool dryRun, CancellationToken ct = default, bool activateMemberships = false)
     {
         var outcomes = new List<Outcome>();
+        var names = await DisplayNamesAsync(appId, plans, ct);
         foreach (var p in plans)
         {
+            var (displayName, nameWarning) = names[p.Email];
             var normalized = p.Email.ToUpperInvariant();
             await using var c = control();
             await c.OpenAsync(ct);
             await using var tx = dryRun ? null : await c.BeginTransactionAsync(ct);
             var existing = await c.QuerySingleOrDefaultAsync<Account>(new CommandDefinition(
-                "SELECT Id, HashedPassword, LastLoginOn, IsActive, IsEmailVerified FROM core.[User] WHERE EmailNormalized = @normalized AND IsDeleted = 0",
+                "SELECT Id, Name, HashedPassword, LastLoginOn, IsActive, IsEmailVerified FROM core.[User] WHERE EmailNormalized = @normalized AND IsDeleted = 0",
                 new { normalized }, tx, cancellationToken: ct));
-            string? warning = null;
+            string? warning = nameWarning;
 
             // Account
             string account;
@@ -97,16 +99,18 @@ public sealed class QbmUserProvisioner(ITenantConnectionFactory tenant, Func<Sql
                     userId = await c.ExecuteScalarAsync<long>(new CommandDefinition("""
                         INSERT INTO core.[User] (Email, EmailNormalized, HashedPassword, Name, FirstName, LastName, IsEmailVerified, IsActive, IsDeleted, CreatedBy)
                         OUTPUT INSERTED.Id VALUES (@email, @normalized, '', @name, @first, @last, @active, @active, 0, @addedBy)
-                        """, new { email = p.Email, normalized, name = p.Name, first = p.FirstName, last = p.LastName, active = p.IsActive, addedBy }, tx, cancellationToken: ct));
+                        """, new { email = p.Email, normalized, name = displayName, first = p.FirstName, last = p.LastName, active = p.IsActive, addedBy }, tx, cancellationToken: ct));
             }
             else if (existing.OwnedByMigration)
             {
                 var changed = existing.IsActive != p.IsActive || existing.IsEmailVerified != p.IsActive;
+                var renamed = !string.Equals(existing.Name, displayName, StringComparison.Ordinal);
                 account = changed ? (p.IsActive ? "status corrected → active" : "status corrected → inactive") : "unchanged";
-                if (changed && !dryRun)
+                if (renamed) account += $"; name '{existing.Name}' → '{displayName}'";
+                if ((changed || renamed) && !dryRun)
                     await c.ExecuteAsync(new CommandDefinition(
-                        "UPDATE core.[User] SET IsActive = @active, IsEmailVerified = @active, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @addedBy WHERE Id = @id",
-                        new { active = p.IsActive, addedBy, id = existing.Id }, tx, cancellationToken: ct));
+                        "UPDATE core.[User] SET IsActive = @active, IsEmailVerified = @active, Name = @displayName, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @addedBy WHERE Id = @id",
+                        new { active = p.IsActive, displayName, addedBy, id = existing.Id }, tx, cancellationToken: ct));
             }
             else
             {
@@ -172,7 +176,7 @@ public sealed class QbmUserProvisioner(ITenantConnectionFactory tenant, Func<Sql
             var status = p.IsActive ? "Active" : "InActive";
             await using var t = await tenant.CreateAsync(ct);
             var appUser = userId == 0 ? null : await t.QuerySingleOrDefaultAsync<AppUserRow>(new CommandDefinition(
-                "SELECT TOP 1 Id, AppRoleId, Status FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0 ORDER BY Id",
+                "SELECT TOP 1 Id, AppRoleId, Status, UserName FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0 ORDER BY Id",
                 new { appId, userId }, cancellationToken: ct));
             string app;
             if (appUser is null)
@@ -182,21 +186,83 @@ public sealed class QbmUserProvisioner(ITenantConnectionFactory tenant, Func<Sql
                     await t.ExecuteAsync(new CommandDefinition("""
                         INSERT INTO meta.AppUser (AppId, UserId, UserEmail, UserName, AppRoleId, Status, AddedBy)
                         VALUES (@appId, @userId, @email, @name, @roleId, @status, @addedBy)
-                        """, new { appId, userId, email = p.Email, name = p.Name, roleId, status, addedBy }, cancellationToken: ct));
+                        """, new { appId, userId, email = p.Email, name = displayName, roleId, status, addedBy }, cancellationToken: ct));
             }
-            else if (appUser.AppRoleId != roleId || !string.Equals(appUser.Status, status, StringComparison.OrdinalIgnoreCase))
+            else
             {
+                // A report's user card finds the user by the name the grid shows (the account's name), so the app user's stored
+                // name must be exactly that.
+                var roleOrStatus = appUser.AppRoleId != roleId || !string.Equals(appUser.Status, status, StringComparison.OrdinalIgnoreCase);
+                var renamed = !string.Equals(appUser.UserName, displayName, StringComparison.Ordinal);
                 var oldRole = roleIds.FirstOrDefault(r => r.Value == appUser.AppRoleId).Key ?? $"#{appUser.AppRoleId}";
-                app = $"corrected ({oldRole}, {appUser.Status} → {p.AppRoleName}, {status})";
-                if (!dryRun)
+                var parts = new List<string>();
+                if (roleOrStatus) parts.Add($"{oldRole}, {appUser.Status} → {p.AppRoleName}, {status}");
+                if (renamed) parts.Add($"name '{appUser.UserName}' → '{displayName}'");
+                app = parts.Count == 0 ? "unchanged" : $"corrected ({string.Join("; ", parts)})";
+                if (parts.Count > 0 && !dryRun)
                     await t.ExecuteAsync(new CommandDefinition(
-                        "UPDATE meta.AppUser SET AppRoleId = @roleId, Status = @status, UpdatedOn = SYSUTCDATETIME() WHERE Id = @id",
-                        new { roleId, status, id = appUser.Id }, cancellationToken: ct));
+                        "UPDATE meta.AppUser SET AppRoleId = @roleId, Status = @status, UserName = @displayName, UpdatedOn = SYSUTCDATETIME() WHERE Id = @id",
+                        new { roleId, status, displayName, id = appUser.Id }, cancellationToken: ct));
             }
-            else app = "unchanged";
 
             outcomes.Add(new Outcome(p, userId, account, tenantAction, app, warning));
         }
         return outcomes;
+    }
+
+    /// <summary>The name each planned user shows under in the app. A real PowerBase account keeps its own name. An account the
+    /// migration creates or owns takes QuickBase's name, made unique within the app: a report's user card finds users by that
+    /// name, so two users sharing one show up as two people.</summary>
+    private async Task<Dictionary<string, (string Name, string? Warning)>> DisplayNamesAsync(long appId, IReadOnlyList<QbUserPlan> plans, CancellationToken ct)
+    {
+        var accounts = new Dictionary<string, Account>(StringComparer.OrdinalIgnoreCase);
+        await using (var c = control())
+            foreach (var batch in plans.Select(p => p.Email.ToUpperInvariant()).Distinct().Chunk(1000))
+                foreach (var row in await c.QueryAsync<AccountByEmail>(new CommandDefinition("""
+                    SELECT EmailNormalized, Id, Name, HashedPassword, LastLoginOn, IsActive, IsEmailVerified FROM core.[User]
+                    WHERE EmailNormalized IN @batch AND IsDeleted = 0
+                    """, new { batch }, cancellationToken: ct)))
+                    accounts[row.EmailNormalized] = new Account(row.Id, row.Name, row.HashedPassword, row.LastLoginOn, row.IsActive, row.IsEmailVerified);
+
+        await using var t = await tenant.CreateAsync(ct);
+        var planned = plans.Select(p => p.Email).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var others = (await t.QueryAsync<(string? Email, string? Name)>(new CommandDefinition(
+                "SELECT UserEmail, UserName FROM meta.AppUser WHERE AppId = @appId AND IsDeleted = 0", new { appId }, cancellationToken: ct)))
+            .Where(o => o.Email is null || !planned.Contains(o.Email))
+            .Select(o => o.Name ?? "")
+            .ToList();
+
+        return UniqueNames(plans.Select(p => accounts.TryGetValue(p.Email, out var a) && !a.OwnedByMigration
+            ? (p.Email, a.Name ?? p.Name, true)
+            : (p.Email, p.Name, false)).ToList(), others);
+    }
+
+    private sealed record AccountByEmail(string EmailNormalized, long Id, string? Name, string? HashedPassword, DateTime? LastLoginOn, bool IsActive, bool IsEmailVerified);
+
+    /// <summary>Unique display names within an app. Fixed names (real accounts) are kept and only reported when shared; the
+    /// others get " (domain)", then " (name before the @)", then " (email)", added when their name is already taken.</summary>
+    public static Dictionary<string, (string Name, string? Warning)> UniqueNames(
+        IReadOnlyList<(string Email, string Name, bool Fixed)> users, IEnumerable<string> takenByOthers)
+    {
+        static string Key(string n) => n.Trim().ToUpperInvariant();
+        var taken = takenByOthers.Select(Key).ToHashSet();
+        var result = new Dictionary<string, (string Name, string? Warning)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var u in users.Where(u => u.Fixed))
+        {
+            var name = string.IsNullOrWhiteSpace(u.Name) ? u.Email : u.Name.Trim();
+            result[u.Email] = (name, taken.Add(Key(name)) ? null
+                : $"Another user in this app is also named '{name}'; report user cards will list both (an existing PowerBase account, so its name was left as it is).");
+        }
+        foreach (var u in users.Where(u => !u.Fixed))
+        {
+            var name = string.IsNullOrWhiteSpace(u.Name) ? u.Email : u.Name.Trim();
+            var at = u.Email.IndexOf('@');
+            string[] candidates = at > 0
+                ? [name, $"{name} ({u.Email[(at + 1)..]})", $"{name} ({u.Email[..at]})", $"{name} ({u.Email})"]
+                : [name, $"{name} ({u.Email})"];
+            name = candidates.FirstOrDefault(n => taken.Add(Key(n))) ?? candidates[^1];
+            result[u.Email] = (name, null);
+        }
+        return result;
     }
 }
