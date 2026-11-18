@@ -30,14 +30,14 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
         bool isValidFirstStep = firstStep.Type == "trigger" ||
             (firstStep.Type == "query" && (firstStep.Subtype == "search-records" || firstStep.Subtype == "look-up-record")) ||
             firstStep.Subtype == "handle-errors" ||
-            (firstStep.Type == "action" && (firstStep.Subtype == "prepare-bulk-upsert" || firstStep.Subtype == "copy-records" || firstStep.Subtype == "make-request" || firstStep.Subtype == "pause" || firstStep.Subtype == "import-with-csv")) ||
+            (firstStep.Type == "action" && (firstStep.Subtype == "prepare-bulk-upsert" || firstStep.Subtype == "copy-records" || firstStep.Subtype == "make-request" || firstStep.Subtype == "pause" || firstStep.Subtype == "import-with-csv" || firstStep.Subtype == JsonHandler.FetchSubtype)) ||
             (firstStep.Type == "email" && (firstStep.Subtype == "send-email" || firstStep.Subtype == "send-email-outlook")) ||
             // As in Quickbase: these actions can start a PowerFlow that is run by hand or on a schedule.
             (firstStep.Type == "action" && firstStep.Subtype is "create-record" or "update-record" or "delete-record" or "call-another-pipeline") ||
             (firstStep.Type == "file" && firstStep.Subtype == "upload-file");
         if (!isValidFirstStep)
         {
-            context.AddFailure("Steps", "A PowerFlow must begin with a Trigger, Search/Query, Make Request, Copy Records, Import with CSV, Handle Errors, Prepare Bulk Record Upsert, Pause, Send Email, Create Record, Update Record, Delete Record, Upload a File or Call Another PowerFlow step.");
+            context.AddFailure("Steps", "A PowerFlow must begin with a Trigger, Search/Query, Make Request, Fetch JSON, Copy Records, Import with CSV, Handle Errors, Prepare Bulk Record Upsert, Pause, Send Email, Create Record, Update Record, Delete Record, Upload a File or Call Another PowerFlow step.");
         }
 
         var stepById = new Dictionary<string, SavePipelineStepDto>();
@@ -144,6 +144,28 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
                         context.AddFailure("Steps", $"Make Request '{step.RefId}': Connect the HTTP account before saving a validated step.");
                 }
                 catch (Exception ex) { context.AddFailure("Steps", $"Make Request '{step.RefId}': {ex.Message}"); }
+            }
+            if (step.Subtype == JsonHandler.FetchSubtype && step.IsValidated)
+            {
+                if (step.Type != "action") context.AddFailure("Steps", $"Fetch JSON '{step.RefId}' must be an action.");
+                foreach (var error in FetchJsonDefinition.Read(step.ConfigJson).Errors())
+                    context.AddFailure("Steps", $"Fetch JSON '{step.RefId}': {error}");
+            }
+            if (step.Subtype == JsonHandler.IterateSubtype)
+            {
+                if (step.Type != "query") context.AddFailure("Steps", $"Iterate over JSON records '{step.RefId}' must be a query.");
+                var iterate = IterateJsonDefinition.Read(step.ConfigJson);
+                if (step.IsValidated)
+                    foreach (var error in iterate.Errors())
+                        context.AddFailure("Steps", $"Iterate over JSON records '{step.RefId}': {error}");
+                var sourceRef = iterate.JsonSourceStepId;
+                if (!string.IsNullOrWhiteSpace(sourceRef))
+                {
+                    if (!traversedRefIds.Contains(sourceRef))
+                        context.AddFailure("Steps", $"Iterate over JSON records '{step.RefId}' refers to a JSON source '{sourceRef}' that is not preceding or does not exist.");
+                    else if (stepById.TryGetValue(sourceRef, out var source) && source.Subtype is not (JsonHandler.FetchSubtype or "webhook"))
+                        context.AddFailure("Steps", $"Iterate over JSON records '{step.RefId}': JSON Source must be a Fetch JSON or Incoming Request step.");
+                }
             }
             if (step.Subtype == "pause" && step.IsValidated)
             {

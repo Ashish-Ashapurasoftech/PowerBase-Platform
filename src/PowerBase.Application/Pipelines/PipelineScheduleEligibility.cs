@@ -38,7 +38,7 @@ public static class PipelineScheduleEligibility
     /// triggers aside): a query, these actions, Send Email, and — naming their record by Record ID — Update / Delete / Upload.</summary>
     public static bool IsRunnableRoot(PipelineStep? step) => step != null && (
         (step.Type == "query" && step.Subtype is "search-records" or "look-up-record") ||
-        (step.Type == "action" && step.Subtype is "prepare-bulk-upsert" or "copy-records" or "make-request" or "pause" or "import-with-csv"
+        (step.Type == "action" && step.Subtype is "prepare-bulk-upsert" or "copy-records" or "make-request" or "fetch-json" or "pause" or "import-with-csv"
             or "create-record" or "update-record" or "delete-record" or "call-another-pipeline") ||
         (step.Type == "email" && step.Subtype is "send-email" or "send-email-outlook") ||
         (step.Type == "file" && step.Subtype == "upload-file"));

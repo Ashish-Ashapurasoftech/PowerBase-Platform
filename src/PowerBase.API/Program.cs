@@ -221,6 +221,14 @@ builder.Services.AddHttpClient("PipelineMakeRequest").ConfigurePrimaryHttpMessag
     ConnectTimeout = TimeSpan.FromSeconds(10),
     AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
 });
+// Fetch JSON with "Disable SSL Certificate Validation": same policy as Make Request, but any server certificate is accepted.
+builder.Services.AddHttpClient("PipelineFetchJsonInsecure").ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+{
+    AllowAutoRedirect = false,
+    ConnectTimeout = TimeSpan.FromSeconds(10),
+    AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate,
+    SslOptions = new System.Net.Security.SslClientAuthenticationOptions { RemoteCertificateValidationCallback = (_, _, _, _) => true }
+});
 builder.Services.AddSingleton<PowerBase.Application.Pipelines.IPipelineApiRequestDispatcher, PowerBase.API.Pipelines.PowerBaseApiRequestDispatcher>();
 builder.Services.AddDataProtection();
 builder.Services.AddScoped<PowerBase.API.Pipelines.RequestConnectionService>();

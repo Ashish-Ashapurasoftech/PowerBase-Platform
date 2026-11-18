@@ -3201,6 +3201,14 @@ public partial class PipelineEngine : IPipelineEngine
         {
             return await ExecuteMakeRequestAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, _serviceProvider, ct);
         }
+        else if (subtype == JsonHandler.FetchSubtype)
+        {
+            return await ExecuteFetchJsonAsync(step, payloadJson, allSteps, executionPath, stepRun, ct);
+        }
+        else if (subtype == JsonHandler.IterateSubtype)
+        {
+            return ExecuteIterateJsonRecords(step, payloadJson, allSteps, stepsDict, executionPath, stepRun);
+        }
         else if (subtype == "prepare-bulk-upsert")
         {
             var config = JsonSerializer.Deserialize<PrepareBulkUpsertConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });

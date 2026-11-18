@@ -680,7 +680,7 @@ public static class QblPipelineConverter
         {
             var first = _pipeline.Steps.FirstOrDefault();
             if (first is null || first.Type == "trigger" || first.Subtype is "search-records" or "look-up-record" or "copy-records" or "prepare-bulk-upsert"
-                    or "pause" or "import-with-csv" or "handle-errors" or "send-email-outlook" or "make-request"
+                    or "pause" or "import-with-csv" or "handle-errors" or "send-email-outlook" or "make-request" or "fetch-json"
                     // As in Quickbase, these actions can start a PowerFlow run by hand or on a schedule.
                     or "create-record" or "update-record" or "delete-record" or "upload-file" or "call-another-pipeline")
                 return;
