@@ -493,10 +493,14 @@ public sealed class Commands(Composition c)
         var roles = await provisioner.AppRolesAsync(run.PbAppId, ct);
         var plan = QbUserPlanner.Plan(directory, roles.Keys.ToList());
         foreach (var w in plan.Warnings) _log.LogWarning("{Warning}", w);
+        var reportIssues = plan.Warnings.Select(w => new QbIssue("warning", "QBM_USERS_WARNING", w)).ToList();
 
         _log.LogInformation("Step: built-in roles (Administrator, Participant, Viewer)");
         if (qblPath is null)
+        {
             _log.LogWarning("No --qbl file: the built-in roles keep PowerBase's permissions (not checked against QuickBase).");
+            reportIssues.Add(new QbIssue("warning", "QBM_ROLE_REVIEW", "Built-in roles (Administrator, Participant, Viewer) were not checked against QuickBase: no QBL file given."));
+        }
         else
         {
             var qblRoles = QbmBuiltInRoleSync.RolesFromQbl(await File.ReadAllTextAsync(qblPath, ct), await provisioner.AppNameAsync(run.PbAppId, ct));
@@ -506,7 +510,11 @@ public sealed class Commands(Composition c)
                 else _log.LogInformation("{Role}: {Verb} {Added}{Removed}", ch.Role, dryRun ? "would add" : "added",
                     ch.Added.Count == 0 ? "nothing" : string.Join(", ", ch.Added),
                     ch.Removed.Count == 0 ? "" : $"; {(dryRun ? "would remove" : "removed")} {string.Join(", ", ch.Removed)}");
-                foreach (var w in ch.Warnings) _log.LogWarning("{Role}: {Warning}", ch.Role, w);
+                foreach (var w in ch.Warnings)
+                {
+                    _log.LogWarning("{Role}: {Warning}", ch.Role, w);
+                    reportIssues.Add(new QbIssue("warning", "QBM_ROLE_REVIEW", $"{ch.Role}: {w}"));
+                }
             }
         }
 
@@ -514,6 +522,8 @@ public sealed class Commands(Composition c)
         {
             _log.LogError("Roles QuickBase uses that the PowerBase app doesn't have: {Roles}. Nothing was written. Re-run the QBL import (update the app), then run users again.",
                 string.Join(", ", plan.MissingRoles));
+            if (apply) await c.State().AddIssuesAsync(runId, null, null, [new("error", "QBM_USERS_ROLE_MISSING",
+                $"Roles missing in PowerBase: {string.Join(", ", plan.MissingRoles)}. Re-run the QBL import, then migrate again.")], ct);
             return ExitGatesFailed;
         }
         if (plan.Users.Any(u => u.AppRoleName == QbUserPlanner.NoneRoleName) && !roles.ContainsKey(QbUserPlanner.NoneRoleName))
@@ -531,13 +541,23 @@ public sealed class Commands(Composition c)
             _log.LogInformation("{Email} | QuickBase: {QbRoles}, {Reg} | PowerBase: {Role}, {Status}{Super} | account {Account} | tenant {Tenant} | app {App}{Note}",
                 o.Plan.Email, o.Plan.QbRoles, o.Plan.IsActive ? "Registered" : "not registered", o.Plan.AppRoleName, o.Plan.IsActive ? "active" : "inactive",
                 o.Plan.IsSuperUser ? ", Super User" : "", o.Account, o.Tenant, o.App, o.Plan.Note is null ? "" : $" | {o.Plan.Note}");
-            if (o.Warning is not null) _log.LogWarning("{Email}: {Warning}", o.Plan.Email, o.Warning);
+            if (o.Warning is not null)
+            {
+                _log.LogWarning("{Email}: {Warning}", o.Plan.Email, o.Warning);
+                reportIssues.Add(new QbIssue("warning", "QBM_USERS_WARNING", $"{o.Plan.Email}: {o.Warning}"));
+            }
         }
         var changed = outcomes.Count(o => (o.Account != "unchanged" && !o.Account.StartsWith("existing")) || o.Tenant.StartsWith("added")
                                           || o.Tenant.StartsWith("corrected") || o.App != "unchanged");
         _log.LogInformation("{Mode}: {Users} users ({Active} active, {Inactive} inactive); {Changes} with changes.", dryRun ? "Dry run" : "Done",
             outcomes.Count, outcomes.Count(o => o.Plan.IsActive), outcomes.Count(o => !o.Plan.IsActive), changed);
         if (dryRun) _log.LogInformation("Nothing was written. Add --apply to write it.");
+        else
+        {
+            reportIssues.Add(new QbIssue("info", "QBM_USERS", $"{outcomes.Count} users as in QuickBase ({outcomes.Count(o => o.Plan.IsActive)} active, " +
+                $"{outcomes.Count(o => !o.Plan.IsActive)} inactive); {changed} added or corrected; no invitation emails."));
+            await c.State().AddIssuesAsync(runId, null, null, reportIssues, ct);
+        }
         return ExitOk;
     }
 
@@ -650,7 +670,8 @@ public sealed class Commands(Composition c)
 
         // Before anything is written: what changed in PowerBase since the load would be overwritten by QuickBase.
         _log.LogInformation("Step: changes made in PowerBase since the load (they would be overwritten)");
-        var conflicts = await ConflictCheckAsync(run, options, ct);
+        var conflictIds = new Dictionary<long, List<long>>();
+        var conflicts = await ConflictCheckAsync(run, options, conflictIds, ct);
         if (conflicts && !overwritePowerBase)
         {
             if (!dryRun)
@@ -695,7 +716,10 @@ public sealed class Commands(Composition c)
             var end = await state.PlannedEndAsync(tableMapId, ct);
             var from = newFrom.GetValueOrDefault(tableMapId, end);
             var created = (await c.QuickBase().QueryAsync(ctx.QbTableId, [QbSystemFids.RecordId], $"{{3.GTE.{from}}}", 0, 1, ct)).TotalRecords;
-            var r = await syncer.SyncTableAsync(ctx, end, options, ct);
+            // With --overwrite-powerbase-changes, records edited or deleted in PowerBase get QuickBase's values back even when
+            // QuickBase itself didn't change them.
+            var recopy = overwritePowerBase ? conflictIds.GetValueOrDefault(tableMapId) ?? [] : [];
+            var r = await syncer.SyncTableAsync(ctx, end, options, ct, recopy);
             changedTotal += r.Changed; deletedTotal += r.Deleted ?? 0; newTotal += created;
             problems |= r.Blocked is not null;
             var summary = dryRun
@@ -718,7 +742,7 @@ public sealed class Commands(Composition c)
 
     /// <summary>Lists, logs and records (QBM_SYNC_CONFLICT) the records and fields changed in PowerBase since each table's load or
     /// last sync. True when there are any.</summary>
-    private async Task<bool> ConflictCheckAsync(QbmStateStore.RunRow run, QbmSyncer.Options options, CancellationToken ct)
+    private async Task<bool> ConflictCheckAsync(QbmStateStore.RunRow run, QbmSyncer.Options options, Dictionary<long, List<long>> idsByTable, CancellationToken ct)
     {
         var state = c.State();
         var contexts = await ContextsAsync(run, ct, ["loading", "loaded", "validated"]);
@@ -744,6 +768,7 @@ public sealed class Commands(Composition c)
         foreach (var (tableMapId, ctx) in contexts)
         {
             var list = await syncer.ConflictsAsync(ctx, options, activity, ct);
+            idsByTable[tableMapId] = list.Where(x => x.Kind != QbConflictKind.CreatedInPowerBase).Select(x => x.RecordId).ToList();
             if (list.Count == 0) continue;
             found = true;
             foreach (var g in list.GroupBy(x => x.Kind))
@@ -764,7 +789,7 @@ public sealed class Commands(Composition c)
     /// report. Running it again continues the same run where it ended (done chunks are skipped). Pause waits between chunks
     /// and between steps; stop ends after the chunks in progress, and the report is still written.</summary>
     public async Task<int> MigrateAsync(long? runId, string? qbAppId, long? pbAppId, long? runAsUserId, bool newRun, string queue, double sample,
-        string? reportOut, CancellationToken ct)
+        string? reportOut, string? qblPath, string? apiUrl, bool skipUsers, CancellationToken ct)
     {
         var state = c.State();
         if (runId is null)
@@ -792,6 +817,15 @@ public sealed class Commands(Composition c)
 
         async Task<int> StepsAsync()
         {
+            // Users first: user fields in the records link to the right PowerBase users on the first load, and a role PowerBase
+            // lacks stops the run before a single record is written.
+            if (skipUsers) _log.LogWarning("Users step skipped (--skip-users).");
+            else
+            {
+                if (!await NextAsync("users")) return ExitStopped;
+                var users = await UsersAsync(id, qblPath, apply: true, ct);
+                if (users != ExitOk) return users;
+            }
             if (!await NextAsync("plan")) return ExitStopped;
             await PlanAsync(id, extend: false, ct);
             if (!await NextAsync("load")) return ExitStopped;
@@ -806,6 +840,19 @@ public sealed class Commands(Composition c)
             var ok = await FinalizeCoreAsync(id, ct);
             if (!await NextAsync("validate")) return ExitStopped;
             ok &= await ValidateCoreAsync(id, sample, ct);
+
+            // Search last, once every record is in: encrypted apps show report rows from the search index.
+            var api = apiUrl ?? c.Config["PowerBase:ApiUrl"];
+            if (!ok)
+                _log.LogWarning("Search not reindexed because some gates failed; fix them, then 'reindex --run {Run} --api <url>'.", id);
+            else if (string.IsNullOrWhiteSpace(api))
+                _log.LogWarning("Search not reindexed: no --api <PowerBase API url>. Reports of encrypted apps show no rows until 'reindex --run {Run} --api <url>'.", id);
+            else
+            {
+                if (!await NextAsync("reindex")) return ExitStopped;
+                await ReindexAsync(id, api, ct);
+                await c.State().AddIssuesAsync(id, null, null, [new("info", "QBM_REINDEX", $"Search reindex started for every loaded table on {DateTime.UtcNow:u}.")], ct);
+            }
             return ok ? ExitOk : ExitGatesFailed;
         }
 
@@ -932,7 +979,8 @@ public sealed class Commands(Composition c)
             _log.LogInformation("Load them with 'migrate --run {Run}'.", runId);
             return ExitOk;
         }
-        return await MigrateAsync(runId, null, null, null, false, queue, sample, reportOut, ct);
+        // Users were set up when the run started; the reindex uses PowerBase:ApiUrl when it is configured.
+        return await MigrateAsync(runId, null, null, null, false, queue, sample, reportOut, null, null, skipUsers: true, ct);
     }
 
     private async Task<int> RemoveDeadLettersAsync(long runId, IReadOnlySet<long> chunkIds, CancellationToken ct)

@@ -14,7 +14,8 @@ using PowerBase.QbMigration.Worker;
 //
 // Operator commands (docs/qb-migration/operator-guide.md):
 //   migrate  --qb-app <dbid> --pb-app <id> --run-as <userId> [--new]   start (or continue the latest run of that app)
-//   migrate  --run <id>                          continue a run: plan -> load -> finalize -> validate -> report
+//   migrate  --run <id>                          continue a run: users -> plan -> load -> finalize -> validate -> reindex -> report
+//            [--qbl <QBL export file>] [--api <PowerBase API url>] [--skip-users]   built-in role switches / search reindex at the end
 //            [--queue local|servicebus] [--sample 1.0] [--out <folder or .xlsx>]
 //   pause | resume | stop  --run <id>            the running worker finishes the chunks in progress first
 //   status   --run <id>                          progress, speed, dead letters, chunks to fix first
@@ -66,7 +67,8 @@ try
         case "report": await commands.ReportAsync(Required("run"), options.GetValueOrDefault("out"), cts.Token); break;
         case "migrate":
             return await commands.MigrateAsync(Optional("run"), options.GetValueOrDefault("qb-app"), Optional("pb-app"), Optional("run-as"),
-                options.ContainsKey("new"), queue, sample, options.GetValueOrDefault("out"), cts.Token);
+                options.ContainsKey("new"), queue, sample, options.GetValueOrDefault("out"),
+                options.GetValueOrDefault("qbl"), options.GetValueOrDefault("api"), options.ContainsKey("skip-users"), cts.Token);
         case "pause" or "resume" or "stop": await commands.SetControlAsync(Required("run"), args[0], cts.Token); break;
         case "status": await commands.StatusAsync(Required("run"), cts.Token); break;
         case "retry-dlq":

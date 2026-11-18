@@ -42,13 +42,16 @@ public sealed class QbmSyncer(IQuickBaseClient client, QbmChunkLoader loader, Qb
         return QbSyncConflicts.Find(rows, id => QbmChunkLoader.StablePublicId(ctx.PbTable.Id, id), qbModified, audited, since);
     }
 
-    public async Task<Result> SyncTableAsync(QbmTableContext ctx, long plannedEnd, Options options, CancellationToken ct = default)
+    /// <param name="recopy">Record IDs to copy from QuickBase even if QuickBase didn't change them (records edited or deleted in
+    /// PowerBase that the operator chose to overwrite).</param>
+    public async Task<Result> SyncTableAsync(QbmTableContext ctx, long plannedEnd, Options options, CancellationToken ct = default,
+        IReadOnlyCollection<long>? recopy = null)
     {
         var since = await SinceAsync(ctx, options, ct);
         var syncId = await store.StartSyncAsync(ctx.RunId, ctx.TableMapId, since, options.DryRun, ct);
         try
         {
-            var changed = await ChangesAsync(ctx, plannedEnd, since, options.DryRun, ct);
+            var changed = await ChangesAsync(ctx, plannedEnd, since, options.DryRun, recopy ?? [], ct);
             int? deleted = null;
             string? blocked = null;
             if (options.Deletes) (deleted, blocked) = await DeletesAsync(ctx, options, ct);
@@ -62,7 +65,7 @@ public sealed class QbmSyncer(IQuickBaseClient client, QbmChunkLoader loader, Qb
         }
     }
 
-    private async Task<int> ChangesAsync(QbmTableContext ctx, long plannedEnd, DateTime since, bool dryRun, CancellationToken ct)
+    private async Task<int> ChangesAsync(QbmTableContext ctx, long plannedEnd, DateTime since, bool dryRun, IReadOnlyCollection<long> recopy, CancellationToken ct)
     {
         var reader = new QbKeysetReader(client);
         var select = ctx.SelectFids.Contains(QbSystemFids.DateModified) ? ctx.SelectFids : [QbSystemFids.DateModified, .. ctx.SelectFids];
@@ -78,6 +81,17 @@ public sealed class QbmSyncer(IQuickBaseClient client, QbmChunkLoader loader, Qb
             }
         }
         count += await WriteAsync(ctx, batch, dryRun, ct);
+
+        // Overwritten PowerBase changes: read those records by id (100 per request) and copy them as QuickBase has them.
+        var copied = new HashSet<long>();
+        foreach (var part in recopy.Where(id => id < plannedEnd).Distinct().Chunk(100))
+        {
+            var where = string.Join("OR", part.Select(id => $"{{{QbSystemFids.RecordId}.EX.{id}}}"));
+            var page = await client.QueryAsync(ctx.QbTableId, select, where, 0, null, ct);
+            var rows = page.Rows.Where(r => copied.Add(r.RecordId)).ToList();
+            if (rows.Count > 0) logger.LogInformation("{Table}: {Count} records changed in PowerBase get QuickBase's values back", ctx.PbTable.Name, rows.Count);
+            count += await WriteAsync(ctx, rows, dryRun, ct);
+        }
         return count;
     }
 
