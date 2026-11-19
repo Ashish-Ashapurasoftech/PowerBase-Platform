@@ -95,6 +95,7 @@ public class ImportPreviewQueryHandler
                 LogicalRef = f.LogicalRef,
                 Name = f.Name,
                 TypeCode = f.TypeCode,
+                ResultTypeCode = PowerBase.Application.Relationships.RelationshipTypeLabel.ValueType(f.TypeCode, f.Settings),
                 IsSupported = PblValidator.IsCreatableFieldType(f.TypeCode),
                 IsPendingValidation = string.Equals(f.TypeCode, PblValidator.FormulaTypeCode, StringComparison.OrdinalIgnoreCase),
             }).ToList(),

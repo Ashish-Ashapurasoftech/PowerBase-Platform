@@ -75,7 +75,7 @@ public sealed class TableReportConfigValidator : IReportConfigValidator
                 var allowed = GroupByModeCategoryHelper.GetAllowedGroupByModes(field.TypeCode);
                 if (!allowed.Contains(level.GroupByMode, StringComparer.OrdinalIgnoreCase))
                     CommonReportValidationHelpers.AddError(errors, "tableSortGroup",
-                        $"groupByMode must be one of: {string.Join(", ", allowed)} for field type '{field.TypeCode}'.");
+                        $"groupByMode must be one of: {string.Join(", ", allowed)} for field type '{PowerBase.Application.Relationships.RelationshipTypeLabel.Of(field)}'.");
             }
         }
     }

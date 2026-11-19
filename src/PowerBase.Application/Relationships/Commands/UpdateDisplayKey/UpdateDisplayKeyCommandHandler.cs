@@ -76,6 +76,9 @@ public class UpdateDisplayKeyCommandHandler
 
         var carryOverResult = await _carryOver.ApplyAsync(rel, parent, child, oldKeyField, newKeyField, ct);
 
+        // A new-field Reference is shown as the type of the key it now shows (see ReferenceResultTypeRefresher).
+        await ReferenceResultTypeRefresher.RefreshForParentAsync(parent, _relRepo, _fieldRepo, ct);
+
         var auditMessage = $"Display key changed for relationship {child.Name} → {parent.Name}";
         if (carryOverResult.CarriedOverLabel is not null)
             auditMessage += $" (kept '{carryOverResult.CarriedOverLabel}' as a lookup field on {child.Name})";

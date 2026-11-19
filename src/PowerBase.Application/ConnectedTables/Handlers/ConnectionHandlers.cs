@@ -216,7 +216,8 @@ public sealed class ConnectionHandlers(
                     ? (false, "Encrypted fields can't be connected from this realm (the sharing approval doesn't allow it).")
                     : (plan.Connectable, plan.Reason);
                 return new SourceFieldResult(f.Fid!.Value, f.Label ?? f.Name, f.TypeCode, f.IsSystem, f.IsEncrypted, connectable, reason,
-                    connectable ? plan.DestinationTypeCode : null, connectable ? plan.Conversion : null);
+                    connectable ? plan.DestinationTypeCode : null, connectable ? plan.Conversion : null,
+                    PowerBase.Application.Relationships.RelationshipTypeLabel.ValueType(f.TypeCode, f.Settings));
             })
             .ToList();
 

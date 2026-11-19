@@ -15,6 +15,10 @@ public sealed class ImportPreviewFieldItem
     public string Name { get; init; } = string.Empty;
     public string TypeCode { get; init; } = string.Empty;
 
+    /// <summary>Reference, Lookup and Summary only: the type the field is shown as, when the file's settings saved one
+    /// (see RelationshipTypeLabel). Null otherwise.</summary>
+    public string? ResultTypeCode { get; init; }
+
     /// <summary>False when this field's type isn't creatable by this import phase; the field
     /// will be skipped (and reported) rather than imported.</summary>
     public bool IsSupported { get; init; }

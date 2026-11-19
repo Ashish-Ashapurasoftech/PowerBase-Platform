@@ -218,7 +218,10 @@ public class CreateRelationshipCommandHandler
             }), ct);
 
         // 3. Lookup fields on the child (first one becomes the proxy).
-        var createdFields = new List<RelationshipFieldDto> { new(refField.PublicId, refField.Fid!.Value, refField.Label ?? refField.Name, "reference", "Reference") };
+        var createdFields = new List<RelationshipFieldDto>
+        {
+            new(refField.PublicId, refField.Fid!.Value, refField.Label ?? refField.Name, "reference", "Reference") { ResultTypeCode = referenceResultTypeCode },
+        };
         // Same precedence as KeyFieldResolver.ResolveDisplayKey (the just-resolved override, else the
         // parent's global Set Key, else Record ID#) — matches what GetAsync returns on a later reload.
         var parentKeyField = KeyFieldResolver.ResolveDisplayKey(
@@ -251,7 +254,7 @@ public class CreateRelationshipCommandHandler
                     SourceSubField = spec.SourceSubField,
                 }, ct);
             firstLookup ??= lookup;
-            createdFields.Add(new(lookup.PublicId, lookup.Fid!.Value, lookup.Label ?? lookup.Name, "lookup", sourceTypeCode));
+            createdFields.Add(new(lookup.PublicId, lookup.Fid!.Value, lookup.Label ?? lookup.Name, "lookup", sourceTypeCode) { ResultTypeCode = resultTypeCode });
             childAddFids.Add(lookup.Fid!.Value);
         }
 
@@ -283,7 +286,10 @@ public class CreateRelationshipCommandHandler
                         target is null ? null : TargetKeyType(target, referenceKeys, lookupSources, spec.Function) ?? FieldValueTypes.Of(target), spec.TargetSubField),
                     TargetSubField = spec.TargetSubField,
                 }, ct);
-            createdFields.Add(new(summary.PublicId, summary.Fid!.Value, summary.Name, "summary"));
+            createdFields.Add(new(summary.PublicId, summary.Fid!.Value, summary.Name, "summary")
+            {
+                ResultTypeCode = PowerBase.Application.Formulas.FormulaTypeMap.ParseSummarySettings(summary.Settings)?.ResultTypeCode,
+            });
             parentAddFids.Add(summary.Fid!.Value);
         }
 
@@ -344,6 +350,8 @@ public class CreateRelationshipCommandHandler
             ParentTableName = parent.Name,
             ChildTablePublicId = child.PublicId,
             ChildTableName = child.Name,
+            ParentSingularLabel = string.IsNullOrWhiteSpace(parent.SingularLabel) ? parent.Name : parent.SingularLabel,
+            ChildSingularLabel = string.IsNullOrWhiteSpace(child.SingularLabel) ? child.Name : child.SingularLabel,
             ReferenceFid = refField.Fid!.Value,
             ReferenceFieldName = refField.Name,
             ProxyFid = firstLookup?.Fid,

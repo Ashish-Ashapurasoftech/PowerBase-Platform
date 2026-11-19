@@ -152,6 +152,10 @@ public sealed class ChangeFieldTypeCommandHandler
         if (_relRepo is not null && PowerBase.Application.Relationships.FieldValueTypes.Of(converted) is { } newValueType)
             await PowerBase.Application.Relationships.FieldValueTypes.RefreshLookupsOfAsync(converted, newValueType, _relRepo, _fieldRepo, ct);
 
+        // When this field is a parent's key, the new-field References showing it follow its new type.
+        if (_relRepo is not null)
+            await PowerBase.Application.Relationships.ReferenceResultTypeRefresher.RefreshForParentAsync(plan.Table, _relRepo, _fieldRepo, ct);
+
         if (keepUnique)
         {
             try
