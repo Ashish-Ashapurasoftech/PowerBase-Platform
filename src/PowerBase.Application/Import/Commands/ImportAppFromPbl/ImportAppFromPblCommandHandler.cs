@@ -2462,6 +2462,13 @@ public class ImportAppFromPblCommandHandler
             {
                 var blockLayouts = new List<FormBlockLayout>();
 
+                // A column's width is a share of the section's 12-column grid (Quickbase: 6 = half the row, the rest left empty).
+                // Without a stored position the designer re-spreads the widths over the whole row, stretching a lone half-width column
+                // to full width, so save where each column sits: left to right, each as wide as its width. Widths that are missing or
+                // add up to more than the grid keep the old proportional layout.
+                var widthsUsable = section.Blocks.Count > 0 && section.Blocks.All(b => b.Width is > 0) && section.Blocks.Sum(b => b.Width!.Value) <= FormGridColumns;
+                var nextColumnStart = 1;
+
                 foreach (var block in section.Blocks)
                 {
                     var elementLayouts = new List<FormElementLayout>();
@@ -2508,12 +2515,17 @@ public class ImportAppFromPblCommandHandler
                             elementGuid, appFieldId, element.ElementType, elementContent,
                             element.LabelMode, Fit(element.CustomLabel, FormTextMaxLength), element.ShowOnAdd, element.ShowOnEdit, element.ShowOnView,
                             element.WidthMode, element.WidthValue, element.HelpTextOverride, element.IsReadOnly, element.IsRequired, element.DisplayAs,
-                            GroupId: groupId));
+                            GroupId: groupId,
+                            ContentWidthMode: element.ContentWidthMode, ContentWidthValue: element.ContentWidthValue, ContentWidthUnit: element.ContentWidthUnit));
                     }
 
                     var blockGuid = Guid.NewGuid();
                     blockGuidByRef[block.LogicalRef] = blockGuid;
-                    blockLayouts.Add(new FormBlockLayout(blockGuid, Fit(block.Heading, FormTextMaxLength), block.BackgroundColor, block.Width, elementLayouts));
+                    var blockColStart = widthsUsable ? nextColumnStart : (int?)null;
+                    var blockColSpan = widthsUsable ? block.Width : null;
+                    if (widthsUsable) nextColumnStart += block.Width!.Value;
+                    blockLayouts.Add(new FormBlockLayout(blockGuid, Fit(block.Heading, FormTextMaxLength), block.BackgroundColor, block.Width, elementLayouts,
+                        ColStart: blockColStart, ColSpan: blockColSpan));
                 }
 
                 var sectionGuid = Guid.NewGuid();
@@ -2873,6 +2885,9 @@ public class ImportAppFromPblCommandHandler
     /// <summary>Form names, section/block headings, element labels and rule names are stored in 200-character columns; a longer
     /// source text (real exports have 200+ character labels) is cut to fit instead of failing the whole import.</summary>
     private const int FormTextMaxLength = 200;
+
+    /// <summary>Columns in a form section's grid (the save handler's own default for <c>GridCols</c>).</summary>
+    private const int FormGridColumns = 12;
 
     private static string? Fit(string? text, int max) =>
         text is null || text.Length <= max ? text : text[..(max - 1)].TrimEnd() + "…";
