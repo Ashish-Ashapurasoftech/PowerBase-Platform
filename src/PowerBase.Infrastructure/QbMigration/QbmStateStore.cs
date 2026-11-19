@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Data;
 using Dapper;
 using Microsoft.Data.SqlClient;
@@ -232,15 +233,37 @@ public sealed class QbmStateStore(ITenantConnectionFactory connections)
             new { runId }, cancellationToken: ct))).ToList();
     }
 
+    /// <summary>Writes a chunk's issues in a few set-based statements inside one transaction (a Sessions chunk logs about 25,000).
+    /// One INSERT per issue forced a log flush per row and, with several workers, hit the database's log-rate limit.</summary>
     public async Task AddIssuesAsync(long runId, long? tableMapId, long? chunkId, IReadOnlyList<QbIssue> issues, CancellationToken ct = default)
     {
         if (issues.Count == 0) return;
         await using var conn = await connections.CreateAsync(ct);
-        await conn.ExecuteAsync(new CommandDefinition("""
-            INSERT INTO qbm.Issue (RunId, TableMapId, ChunkId, QbRecordId, QbFid, Severity, Code, Message)
-            VALUES (@runId, @tableMapId, @chunkId, @QbRecordId, @QbFid, @Severity, @Code, LEFT(@Message, 2000))
-            """, issues.Select(i => new { runId, tableMapId, chunkId, i.QbRecordId, i.QbFid, i.Severity, i.Code, i.Message }), cancellationToken: ct));
+        await conn.OpenAsync(ct);
+        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(ct);
+        try
+        {
+            foreach (var batch in issues.Chunk(IssueBatchSize))
+            {
+                var json = JsonSerializer.Serialize(batch.Select(i => new { r = i.QbRecordId, f = i.QbFid, s = i.Severity, c = i.Code, m = i.Message }));
+                await conn.ExecuteAsync(new CommandDefinition("""
+                    INSERT INTO qbm.Issue (RunId, TableMapId, ChunkId, QbRecordId, QbFid, Severity, Code, Message)
+                    SELECT @runId, @tableMapId, @chunkId, j.QbRecordId, j.QbFid, j.Severity, j.Code, LEFT(j.Message, 2000)
+                    FROM OPENJSON(@json) WITH (
+                        QbRecordId BIGINT '$.r', QbFid INT '$.f', Severity NVARCHAR(8) '$.s', Code NVARCHAR(60) '$.c', Message NVARCHAR(MAX) '$.m') AS j
+                    """, new { runId, tableMapId, chunkId, json }, tx, commandTimeout: 300, cancellationToken: ct));
+            }
+            await tx.CommitAsync(ct);
+        }
+        catch
+        {
+            await tx.RollbackAsync(CancellationToken.None);
+            throw;
+        }
     }
+
+    /// <summary>Issues per statement: big enough that a chunk needs a handful, small enough to keep each statement's JSON modest.</summary>
+    private const int IssueBatchSize = 5_000;
 
     /// <summary>The earliest other run that has already planned or loaded this PowerBase table, if any. A table belongs to one run;
     /// later changes to it go through that run (<c>plan --extend</c>, <c>run --reload</c>).</summary>

@@ -41,6 +41,7 @@ public sealed class Commands(Composition c)
         var runId = await state.CreateRunAsync(c.Config["QuickBase:RealmHostname"]!, qbAppId, pbAppId, runAsUserId, ct);
 
         var matched = new List<(QbTable Qb, QbmPowerBaseReader.PbTable Pb, IReadOnlyList<QbFieldMapping> Fields)>();
+        var fieldCache = new Dictionary<long, IReadOnlyList<AppField>>();
         foreach (var qt in qbTables)
         {
             var pt = MatchTable(qt, pbTables);
@@ -49,13 +50,17 @@ public sealed class Commands(Composition c)
                 await state.AddIssuesAsync(runId, null, null, [new("error", "QBM_TABLE_NOT_FOUND", $"QuickBase table '{qt.Name}' ({qt.Id}) has no PowerBase table.")], ct);
                 continue;
             }
+            var pbFields = fieldCache[pt.Id] = await pb.FieldsAsync(pt.Id, ct);
             var mappings = await ReleaseEmptyMissingAsync(qt.Id,
-                QbFieldMapper.Map(await qb.GetFieldsAsync(qt.Id, ct), await pb.FieldsAsync(pt.Id, ct)), ct);
+                QbFieldMapper.Map(await qb.GetFieldsAsync(qt.Id, ct), pbFields), ct);
             matched.Add((qt, pt, mappings));
         }
 
         // Order only matters for references translated through a parent key; tables in a cycle of those are blocked.
-        var byKey = references.Where(r => r.ParentKey.Fid != QbSystemFids.RecordId).ToList();
+        // A user field that is a relationship's key is matched against QuickBase directly, so it adds no load order.
+        var userReferences = matched.SelectMany(m => m.Fields.Where(QbUserReferenceResolver.IsUserReference).Select(f => (m.Pb.Id, f.PbFid!.Value))).ToHashSet();
+        var byKey = references.Where(r => r.ParentKey.Fid != QbSystemFids.RecordId && !userReferences.Contains((r.ChildTableId, r.ReferenceFid))).ToList();
+        var mappedTables = matched.ToDictionary(m => m.Pb.Id, m => (QbTableId: m.Qb.Id, m.Pb.Name));
         var (tiers, cyclic) = QbTierPlanner.Plan(matched.Select(m => m.Pb.Id), byKey.Select(r => (r.ChildTableId, r.ParentTableId)));
         foreach (var (qt, pt, mappings) in matched)
         {
@@ -63,6 +68,7 @@ public sealed class Commands(Composition c)
             var problems = new List<QbIssue>();
             if (cyclic.Contains(pt.Id))
                 problems.Add(new("error", "QBM_KEY_REFERENCE_CYCLE", $"'{pt.Name}' is in a cycle of references matched by parent key; load order can't be decided."));
+            problems.AddRange((await ResolveUserReferencesAsync(mappings, pt.Id, references, mappedTables, pb, fieldCache, ct)).Problems);
             foreach (var r in byKey.Where(r => r.ChildTableId == pt.Id))
             {
                 if (r.ParentTableId == pt.Id)
@@ -259,6 +265,25 @@ public sealed class Commands(Composition c)
         }
     }
 
+    /// <summary>For the user fields of a table that PowerBase stores as References: the parent table and user field to match them on,
+    /// or why that can't be decided (the table is then blocked rather than loaded with links guessed).</summary>
+    private static async Task<(Dictionary<int, QbUserReferenceSpec> Specs, List<QbIssue> Problems)> ResolveUserReferencesAsync(
+        IReadOnlyList<QbFieldMapping> mappings, long pbTableId, IReadOnlyList<QbmPowerBaseReader.PbReference> references,
+        IReadOnlyDictionary<long, (string QbTableId, string Name)> tables, QbmPowerBaseReader pb,
+        Dictionary<long, IReadOnlyList<AppField>> fieldCache, CancellationToken ct)
+    {
+        var relations = references.Where(r => r.ChildTableId == pbTableId).Select(r => (r.ReferenceFid, r.ParentTableId)).ToList();
+        var parents = new Dictionary<long, QbUserReferenceResolver.Parent>();
+        foreach (var m in mappings.Where(QbUserReferenceResolver.IsUserReference))
+            foreach (var (_, parentId) in relations.Where(r => r.ReferenceFid == m.PbFid))
+                if (!parents.ContainsKey(parentId) && tables.TryGetValue(parentId, out var parent))
+                {
+                    if (!fieldCache.TryGetValue(parentId, out var fields)) fieldCache[parentId] = fields = await pb.FieldsAsync(parentId, ct);
+                    parents[parentId] = new(parent.QbTableId, parent.Name, fields);
+                }
+        return QbUserReferenceResolver.Resolve(mappings, relations, id => parents.GetValueOrDefault(id));
+    }
+
     private async Task<Dictionary<long, QbmTableContext>> ContextsAsync(QbmStateStore.RunRow run, CancellationToken ct, string[]? statuses = null)
     {
         var qb = c.QuickBase();
@@ -272,7 +297,10 @@ public sealed class Commands(Composition c)
         };
         _blockedTables.Clear();
         var result = new Dictionary<long, QbmTableContext>();
-        foreach (var t in await c.State().TableMapsAsync(run.Id, ct))
+        var tableMaps = await c.State().TableMapsAsync(run.Id, ct);
+        var runTables = tableMaps.ToDictionary(t => t.PbTableId, t => (t.QbTableId, Name: t.QbTableName));
+        var fieldCache = new Dictionary<long, IReadOnlyList<AppField>>();
+        foreach (var t in tableMaps)
         {
             statuses ??= ["planned", "loading"];
             if (!statuses.Contains(t.Status)) continue;
@@ -290,7 +318,17 @@ public sealed class Commands(Composition c)
                 _blockedTables.Add(t.QbTableName);
                 continue;
             }
-            var keyed = references.Where(r => r.ChildTableId == t.PbTableId && r.ParentKey.Fid != QbSystemFids.RecordId).ToList();
+            var (userReferences, userProblems) = await ResolveUserReferencesAsync(mappings, t.PbTableId, references, runTables, pb, fieldCache, ct);
+            if (userProblems.Count > 0)
+            {
+                var userWhy = string.Join("; ", userProblems.Select(p => p.Message));
+                _log.LogError("{Table}: user-keyed references can't be resolved; skipped. {Why}", t.QbTableName, userWhy);
+                await c.State().AddIssuesAsync(run.Id, t.Id, null, [new("error", "QBM_TABLE_BLOCKED", $"Skipped: {userWhy}")], ct);
+                _blockedTables.Add(t.QbTableName);
+                continue;
+            }
+            var keyed = references.Where(r => r.ChildTableId == t.PbTableId && r.ParentKey.Fid != QbSystemFids.RecordId
+                                              && !userReferences.ContainsKey(r.ReferenceFid)).ToList();
             // A link whose child field isn't loaded (in QuickBase it is a formula) has no value to match by key; PowerBase
             // computes it, so there is nothing to translate. Report it once instead of failing every chunk of the table.
             foreach (var r in keyed.Where(r => !mappings.Any(m => m.Action == QbFieldAction.Load && m.PbFid == r.ReferenceFid)))
@@ -298,7 +336,7 @@ public sealed class Commands(Composition c)
             var byKey = keyed.Where(r => mappings.Any(m => m.Action == QbFieldAction.Load && m.PbFid == r.ReferenceFid))
                 .ToDictionary(r => r.ReferenceFid, r => r);
             var table = new AppTable { Id = t.PbTableId, AppId = run.PbAppId, Name = t.QbTableName };
-            result[t.Id] = new QbmTableContext(c.TenantId, run.Id, t.Id, t.QbTableId, table, pbFields, mappings, byKey, options, t.Tier);
+            result[t.Id] = new QbmTableContext(c.TenantId, run.Id, t.Id, t.QbTableId, table, pbFields, mappings, byKey, options, t.Tier, userReferences);
             if (t.Status == "planned") await c.State().SetTableStatusAsync(t.Id, "loading", ct);
         }
         return result;

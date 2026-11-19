@@ -9,7 +9,7 @@ namespace PowerBase.Infrastructure.QbMigration;
 public sealed record QbmTableContext(
     long TenantId, long RunId, long TableMapId, string QbTableId, AppTable PbTable, IReadOnlyList<AppField> PbFields,
     IReadOnlyList<QbFieldMapping> Mappings, IReadOnlyDictionary<int, QbmPowerBaseReader.PbReference> ReferencesByKey,
-    QbTransformOptions Options, int Tier = 0)
+    QbTransformOptions Options, int Tier = 0, IReadOnlyDictionary<int, QbUserReferenceSpec>? UserReferences = null)
 {
     /// <summary>The QuickBase fields a query asks for: system fields, stored fields and address parts.</summary>
     public IReadOnlyList<int> SelectFids => Mappings
@@ -24,6 +24,10 @@ public sealed class QbmChunkProcessor(
     IQuickBaseClient client, QbmChunkLoader loader, QbmStateStore store, QbmPowerBaseReader pb, ILogger<QbmChunkProcessor> logger)
 {
     public enum Outcome { Loaded, AlreadyDone, Split }
+
+    // Parent tables of user-keyed references are read from QuickBase once for the whole process, not once per chunk.
+    private readonly QbUserParentIndexes _userParents = new(client);
+    private readonly QbmParentKeyCache _parentKeys = new(pb.ParentKeyMapAsync);
 
     public async Task<Outcome> ProcessAsync(QbmTableContext ctx, long chunkId, QbRange range, CancellationToken ct = default)
     {
@@ -46,7 +50,7 @@ public sealed class QbmChunkProcessor(
                 throw new InvalidOperationException($"Chunk {chunkId} timed out and can't be split further.", ex);
             }
 
-            var lookups = await new QbmLookupLoader(pb).LoadAsync(ctx, rows, ct);
+            var lookups = await new QbmLookupLoader(pb, _userParents, _parentKeys).LoadAsync(ctx, rows, ct);
             var transformer = new QbValueTransformer(ctx.Mappings, lookups, ctx.Options, ctx.ReferencesByKey.Keys.ToList());
             var issues = new List<QbIssue>();
             var transformed = rows.Select(r => transformer.Transform(r, issues)).ToList();

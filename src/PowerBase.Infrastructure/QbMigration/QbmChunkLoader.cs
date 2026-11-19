@@ -50,7 +50,9 @@ public sealed class QbmChunkLoader(ITenantConnectionFactory connections, IEncryp
         try
         {
             await conn.ExecuteAsync(new CommandDefinition(
-                $"DELETE FROM {tableName} WHERE Id >= @from AND Id < @to", new { from = range.From, to = range.To }, tx, cancellationToken: ct));
+                // A replay clears the chunk's earlier rows first. On a wide table (Sessions: 163 columns, 39 indexes) 12,000 rows take longer
+                // than SQL's 30 s default when several chunks run at once and the database throttles log writes.
+                $"DELETE FROM {tableName} WHERE Id >= @from AND Id < @to", new { from = range.From, to = range.To }, tx, commandTimeout: 600, cancellationToken: ct));
             await BulkAsync(conn, tx, tableName, data, ct);
 
             var marked = await conn.ExecuteAsync(new CommandDefinition("""

@@ -34,7 +34,8 @@ public static class QbFieldMapper
         ["phone"] = ["Phone", "Text"],
         ["url"] = ["Url", "Text"],
         ["address"] = ["Address"],
-        ["user"] = ["User"],
+        // A user field can be the foreign key of a relationship; PowerBase then stores it as a Reference (QbUserReferenceResolver).
+        ["user"] = ["User", "Reference"],
         ["multiuser"] = ["MultiUser"],
         ["file"] = ["File"],
     };

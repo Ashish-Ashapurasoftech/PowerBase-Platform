@@ -5,7 +5,7 @@ namespace PowerBase.Infrastructure.QbMigration;
 
 /// <summary>Loads, for one chunk of QuickBase rows, the PowerBase user ids and parent record ids the transformer needs.
 /// Used by the loader and by validation, so both resolve values the same way.</summary>
-public sealed class QbmLookupLoader(QbmPowerBaseReader pb)
+public sealed class QbmLookupLoader(QbmPowerBaseReader pb, QbUserParentIndexes? userParents = null, QbmParentKeyCache? parentKeys = null)
 {
     /// <summary>Users and parent keys the chunk refers to, fetched in one go per chunk.</summary>
     public async Task<IQbValueLookups> LoadAsync(QbmTableContext ctx, IReadOnlyList<QbRow> rows, CancellationToken ct)
@@ -20,15 +20,29 @@ public sealed class QbmLookupLoader(QbmPowerBaseReader pb)
                     foreach (var email in Emails(v)) emails.Add(email);
         var users = await pb.UserIdsAsync(ctx.TenantId, emails, ct);
 
-        var references = new Dictionary<int, Dictionary<string, long>>();
+        var references = new Dictionary<int, IReadOnlyDictionary<string, long>>();
         foreach (var (pbFid, rel) in ctx.ReferencesByKey)
         {
+            // The parent's keys are read once for the process; asking per chunk scans the parent every time (see QbmParentKeyCache).
+            if (parentKeys is not null)
+            {
+                references[pbFid] = await parentKeys.GetAsync(rel.ParentTableId, rel.ParentKey, ctx.TenantId, ctx.PbTable.AppId, ct);
+                continue;
+            }
             var qbFid = ctx.Mappings.First(m => m.Action == QbFieldAction.Load && m.PbFid == pbFid).Qb.Id;
             var keys = rows.Select(r => r.Values.TryGetValue(qbFid, out var v) ? KeyText(v) : null)
                 .Where(k => !string.IsNullOrEmpty(k)).Select(k => k!).Distinct().ToList();
             references[pbFid] = await pb.ParentIdsByKeyAsync(rel.ParentTableId, rel.ParentKey, keys, ct);
         }
-        return new Lookups(users, references);
+
+        // User-keyed references: the parent table's user field, read from QuickBase (cached for the process).
+        var parents = new Dictionary<int, QbUserParentIndex>();
+        if (ctx.UserReferences is { Count: > 0 } specs)
+        {
+            if (userParents is null) throw new InvalidOperationException("The table has user-keyed references but no parent index was provided.");
+            foreach (var (pbFid, spec) in specs) parents[pbFid] = await userParents.GetAsync(spec);
+        }
+        return new Lookups(users, references, parents);
     }
 
     private static IEnumerable<string> Emails(JsonElement v) => v.ValueKind switch
@@ -45,8 +59,12 @@ public sealed class QbmLookupLoader(QbmPowerBaseReader pb)
         _ => null,
     };
 
-    private sealed class Lookups(Dictionary<string, long> users, Dictionary<int, Dictionary<string, long>> references) : IQbValueLookups
+    private sealed class Lookups(Dictionary<string, long> users, Dictionary<int, IReadOnlyDictionary<string, long>> references,
+        Dictionary<int, QbUserParentIndex> userParents) : IQbValueLookups
     {
+        public long? UserParentId(int pbFid, string? qbUserId, string? email) =>
+            userParents.TryGetValue(pbFid, out var index) ? index.Find(qbUserId, email) : null;
+
         public long? UserId(string email) => users.TryGetValue(email.Trim().ToUpperInvariant(), out var id) ? id : null;
         public long? ReferenceId(int pbFid, string key) =>
             references.TryGetValue(pbFid, out var map) && map.TryGetValue(key, out var id) ? id : null;

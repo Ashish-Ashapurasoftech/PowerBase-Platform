@@ -18,6 +18,8 @@ namespace PowerBase.Infrastructure.QbMigration;
 public sealed class QbmValidator(IQuickBaseClient client, ITenantConnectionFactory connections, IEncryptionService encryption, QbmPowerBaseReader pb)
 {
     private const int MaxIssuesPerTable = 500;
+    private readonly QbUserParentIndexes _userParents = new(client);
+    private readonly QbmParentKeyCache _parentKeys = new(pb.ParentKeyMapAsync);
 
     public sealed record TableResult(int Records, int Compared, int Mismatches, int Missing, int Extra, int NotEncrypted, IReadOnlyList<QbIssue> Issues)
     {
@@ -42,7 +44,7 @@ public sealed class QbmValidator(IQuickBaseClient client, ITenantConnectionFacto
         var fieldsByFid = ctx.PbFields.Where(f => f.Fid.HasValue).ToDictionary(f => f.Fid!.Value);
         var columns = loaded.Select(m => PhysicalNaming.ColumnName(m.PbFid!.Value)).Distinct().ToList();
         var reader = new QbChunkReader(client);
-        var lookups = new QbmLookupLoader(pb);
+        var lookups = new QbmLookupLoader(pb, _userParents, _parentKeys);
 
         foreach (var range in picked)
         {
@@ -119,7 +121,7 @@ public sealed class QbmValidator(IQuickBaseClient client, ITenantConnectionFacto
                 WHERE c.IsDeleted = 0 AND c.{col} IS NOT NULL
                   AND NOT EXISTS (SELECT 1 FROM {PhysicalNaming.FullTableName(r.ParentTableId)} p WHERE p.Id = c.{col} AND p.IsDeleted = 0)
                 ORDER BY c.Id
-                """, cancellationToken: ct))).ToList();
+                """, commandTimeout: 900, cancellationToken: ct))).ToList(); // an anti-join over a table of millions of rows outlasts SQL's 30 s default
             issues.AddRange(orphans.Select(o => new QbIssue("error", "QBM_GATE4_ORPHAN_REFERENCE",
                 $"Field {r.ReferenceFid} points to record {o.Ref}, which doesn't exist in the parent table (also orphaned in QuickBase?).", o.Id, r.ReferenceFid)));
         }

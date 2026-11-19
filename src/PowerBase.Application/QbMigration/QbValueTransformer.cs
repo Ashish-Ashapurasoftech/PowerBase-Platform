@@ -11,6 +11,10 @@ public interface IQbValueLookups
 
     /// <summary>For a Reference whose QuickBase parent key is not Record ID#: the parent record's Id for that key value, or null.</summary>
     long? ReferenceId(int pbFid, string key);
+
+    /// <summary>For a Reference whose QuickBase value is a user (see <see cref="QbUserReferenceSpec"/>): the Record ID# of the
+    /// parent record that names that user (by QuickBase user id, else e-mail), or null.</summary>
+    long? UserParentId(int pbFid, string? qbUserId, string? email) => null;
 }
 
 /// <summary>Format choices that depend on how PowerBase stores a type. Defaults follow the code as read in Stage 0;
@@ -141,6 +145,8 @@ public sealed class QbValueTransformer
     private long? Reference(JsonElement raw, QbFieldMapping m, long recordId, List<QbIssue> issues)
     {
         var fid = m.PbFid!.Value;
+        if (QbUserReferenceResolver.IsUserReference(m))
+            return UserReference(raw, m, recordId, issues);
         if (!_referenceByKey.Contains(fid))
             return RecordIdOf(raw);
 
@@ -148,6 +154,17 @@ public sealed class QbValueTransformer
         var parent = _lookups.ReferenceId(fid, key);
         if (parent is null)
             issues.Add(new("warning", "QBM_REFERENCE_NOT_FOUND", $"'{m.Qb.Label}': no parent record with key '{Shorten(raw)}'; stored empty.", recordId, m.Qb.Id));
+        return parent;
+    }
+
+    private long? UserReference(JsonElement raw, QbFieldMapping m, long recordId, List<QbIssue> issues)
+    {
+        var (userId, email) = QbUserParentIndex.Describe(raw);
+        if (userId is null && email is null) return null;
+        var parent = _lookups.UserParentId(m.PbFid!.Value, userId, email);
+        if (parent is null && _reportedUsers.Add((m.Qb.Id, (email ?? userId)!.ToUpperInvariant())))
+            issues.Add(new("warning", "QBM_REFERENCE_NOT_FOUND",
+                $"'{m.Qb.Label}': no parent record names user {email ?? userId}; stored empty (first record in this chunk; others not listed).", recordId, m.Qb.Id));
         return parent;
     }
 

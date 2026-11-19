@@ -1,14 +1,16 @@
 using Dapper;
 using Microsoft.Data.SqlClient;
+using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Infrastructure.Persistence;
+using PowerBase.Infrastructure.Services;
 
 namespace PowerBase.Infrastructure.QbMigration;
 
 /// <summary>Read-only access to the PowerBase metadata the migration needs (tables, fields, relationships, users).
 /// Plain SQL against the same tables the repositories read, so the worker doesn't need the API's service graph.</summary>
-public sealed class QbmPowerBaseReader(ITenantConnectionFactory tenant, Func<SqlConnection> control)
+public sealed class QbmPowerBaseReader(ITenantConnectionFactory tenant, Func<SqlConnection> control, IEncryptionService? encryption = null)
 {
     public sealed record PbTable(long Id, long AppId, string Name, string? Alias, long? KeyFieldId);
 
@@ -72,6 +74,50 @@ public sealed class QbmPowerBaseReader(ITenantConnectionFactory tenant, Func<Sql
             foreach (var (k, id) in hits) found[k] = id;
         }
         return found;
+    }
+
+    /// <summary>Every non-deleted parent's key and Id, in one pass over the parent table (see <see cref="QbmParentKeyCache"/>).
+    /// For a duplicated key the highest Id wins. In an encrypted app (or for an encrypted field) the key column holds ciphertext, so
+    /// the keys are decrypted first; comparing ciphertext with a child's plain key matches nothing and the links would all be empty.
+    /// The read stops, instead of returning a map that can't match, when the keys can't be decrypted.</summary>
+    public async Task<IReadOnlyDictionary<string, long>> ParentKeyMapAsync(long parentTableId, AppField key, long tenantId, long appId, CancellationToken ct = default)
+    {
+        var column = PhysicalNaming.GetPhysicalColumnName(key);
+        await using var conn = await tenant.CreateAsync(ct);
+        await conn.OpenAsync(ct);
+        var appEncrypted = await conn.QuerySingleOrDefaultAsync<bool?>(new CommandDefinition(
+            "SELECT IsEncrypted FROM meta.App WHERE Id = @appId AND IsDeleted = 0", new { appId }, cancellationToken: ct)) ?? false;
+        var rows = (await conn.QueryAsync<(string Key, long Id)>(new CommandDefinition(
+            $"SELECT CAST({column} AS NVARCHAR(MAX)) AS [Key], Id FROM {PhysicalNaming.FullTableName(parentTableId)} WHERE IsDeleted = 0 AND {column} IS NOT NULL ORDER BY Id",
+            commandTimeout: 900, cancellationToken: ct))).ToList();
+
+        FieldEncryptionContext? decryptor = null;
+        if (FieldEncryptionContext.StoresCiphertext(key, appEncrypted))
+        {
+            if (encryption is null)
+                throw new InvalidOperationException($"Parent key '{key.Label ?? key.Name}' is encrypted but no encryption service is available; its links can't be matched.");
+            decryptor = await FieldEncryptionContext.ResolveAsync(conn, appId, tenantId, encryption, null, ct);
+            if (!decryptor.IsActive)
+                throw new InvalidOperationException($"Parent key '{key.Label ?? key.Name}' is encrypted but the app has no active encryption key; its links can't be matched.");
+        }
+
+        var map = new Dictionary<string, long>(StringComparer.Ordinal);
+        var decrypted = 0;
+        foreach (var (k, id) in rows)
+        {
+            var text = k;
+            if (decryptor is not null)
+            {
+                // DecryptValueAsync returns the input when it can't decrypt (legacy plaintext rows are tolerated), so a changed
+                // value is the proof that decryption worked.
+                text = await decryptor.DecryptValueAsync(k, ct);
+                if (!ReferenceEquals(text, k) && text != k) decrypted++;
+            }
+            map[text] = id;
+        }
+        if (decryptor is not null && rows.Count > 0 && decrypted == 0)
+            throw new InvalidOperationException($"The {rows.Count:N0} keys of '{key.Label ?? key.Name}' could not be decrypted (none changed); its links can't be matched.");
+        return map;
     }
 
     /// <summary>PowerBase user ids for emails, limited to members of the tenant (active or not).</summary>

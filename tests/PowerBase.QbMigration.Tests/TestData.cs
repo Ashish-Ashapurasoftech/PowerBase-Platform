@@ -33,9 +33,17 @@ internal static class TestData
         new(3, "Record ID#", "recordid", null, []), new(4, "Record Owner", "user", null, []), new(5, "Last Modified By", "user", null, []),
     ];
 
-    public sealed class Lookups(Dictionary<string, long>? users = null, Dictionary<(int, string), long>? refs = null) : IQbValueLookups
+    public sealed class Lookups(Dictionary<string, long>? users = null, Dictionary<(int, string), long>? refs = null,
+        Dictionary<(int, string), long>? userParents = null) : IQbValueLookups
     {
         public long? UserId(string email) => users is not null && users.TryGetValue(email, out var id) ? id : null;
         public long? ReferenceId(int pbFid, string key) => refs is not null && refs.TryGetValue((pbFid, key), out var id) ? id : null;
+        public long? UserParentId(int pbFid, string? qbUserId, string? email)
+        {
+            if (userParents is null) return null;
+            if (qbUserId is not null && userParents.TryGetValue((pbFid, qbUserId), out var byId)) return byId;
+            if (email is not null && userParents.TryGetValue((pbFid, email), out var byEmail)) return byEmail;
+            return null;
+        }
     }
 }

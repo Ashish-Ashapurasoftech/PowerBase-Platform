@@ -63,7 +63,7 @@ public sealed class Composition : IDisposable
     }
 
     public QbmStateStore State() => new(Tenant);
-    public QbmPowerBaseReader PowerBase() => new(Tenant, Control);
+    public QbmPowerBaseReader PowerBase() => new(Tenant, Control, Encryption);
     public QbmChunkLoader Loader() => new(Tenant, Encryption);
 
     public void Dispose() => Logs.Dispose();
