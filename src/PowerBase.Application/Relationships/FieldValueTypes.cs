@@ -40,6 +40,22 @@ public static class FieldValueTypes
         return OfTypeCode(field.TypeCode, field.Settings);
     }
 
+    /// <summary>The type a new Reference field is shown as (<see cref="ReferenceSettings.ResultTypeCode"/>): the type of
+    /// the parent's key field <paramref name="parentKeyField"/> — Number when that is Record ID# (null or fid 3), what a
+    /// formula / lookup / summary key produces otherwise.</summary>
+    public static string ForNewReference(AppField? parentKeyField) =>
+        parentKeyField is null || parentKeyField.Fid == RecordIdFid
+            ? nameof(Domain.Enums.FieldTypeCode.Number)
+            : Of(parentKeyField) ?? parentKeyField.TypeCode;
+
+    /// <summary>The type an existing child field converted into a Reference is shown as
+    /// (<see cref="ReferenceSettings.ResultTypeCode"/>): that field's own type, as the type of value it holds — a
+    /// "Formula - text" field as Text.</summary>
+    public static string ForConvertedReference(AppField existingField) =>
+        Of(existingField) ?? existingField.TypeCode;
+
+    private const int RecordIdFid = 3;
+
     /// <summary>The type of value a summary target holds: a lookup through its source (<paramref name="lookupSources"/>,
     /// see <see cref="SummaryLookupSources.LoadAsync"/>) when known, anything else as <see cref="Of"/>.</summary>
     public static string? OfTarget(AppField target, IReadOnlyDictionary<long, AppField>? lookupSources)

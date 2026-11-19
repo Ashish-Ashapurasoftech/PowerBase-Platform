@@ -129,9 +129,14 @@ public class CreateRelationshipCommandHandler
         string? conversionWarning = null;
         int? originalFid = null;
         string? originalTypeCode = null, originalSettings = null;
+        // The type the Reference is shown as (ReferenceSettings.ResultTypeCode): a new field takes the parent key's
+        // type, an existing child field keeps its own.
+        string referenceResultTypeCode;
         var referenceIsExistingField = command.ReferenceFieldFid is not null;
         if (!referenceIsExistingField)
         {
+            referenceResultTypeCode = FieldValueTypes.ForNewReference(KeyFieldResolver.ResolveDisplayKey(
+                new Relationship { DisplayKeyFieldId = displayKeyFieldId }, parent, parentFields));
             refField = await _fieldFactory.CreateAsync(
                 child, FieldTypeCodeNames.Reference, command.ReferenceFieldLabel!.Trim(),
                 command.IsReferenceRequired,
@@ -155,6 +160,9 @@ public class CreateRelationshipCommandHandler
                 {
                     ["referenceFieldFid"] = [$"The reference field must be an existing, non-system field on the child table whose type matches the parent's key field ({keyTypeCode})."],
                 });
+
+            // Read before the field is turned into a Reference below.
+            referenceResultTypeCode = FieldValueTypes.ForConvertedReference(existing);
 
             var refType = await _fieldTypeRepo.GetByCodeAsync(FieldTypeCodeNames.Reference, ct)
                 ?? throw new NotFoundException("FieldType", "Reference");
@@ -206,6 +214,7 @@ public class CreateRelationshipCommandHandler
             {
                 RelationshipId = relId, ParentTableId = parent.Id, OriginalFid = originalFid,
                 OriginalTypeCode = originalTypeCode, OriginalSettings = originalSettings,
+                ResultTypeCode = referenceResultTypeCode,
             }), ct);
 
         // 3. Lookup fields on the child (first one becomes the proxy).
