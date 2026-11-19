@@ -1320,4 +1320,66 @@ public class QblPipelineMoreStepsTests
         OnlySearchRule(pipeline)["value"].Should().Be("2026-01-01");
         pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_FILTER_TIME_ZONE");
     }
+
+    // ---- operators PowerFlows writes as other rules: between, relative dates, Jinja "today" ----
+
+    [Fact]
+    public void Between_OnADate_IsOnOrAfterTheFirstAndOnOrBeforeTheSecond()
+    {
+        var pipeline = Convert(Trigger(), Search(Relational("date_created", "between", "['2026-01-01', '2026-01-31']")));
+
+        var rules = Rules(Step(pipeline, "ref_ab").Config["filterGroups"]);
+        rules.Select(r => (r["operator"], r["value"])).Should().Equal(("is-on-or-after", (object?)"2026-01-01"), ("is-on-or-before", (object?)"2026-01-31"));
+        pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_FILTER_OPERATOR");
+    }
+
+    [Fact]
+    public void NotBetween_IsBeforeTheFirstOrAfterTheSecond()
+    {
+        var pipeline = Convert(Trigger(), Search(Relational("id", "!between", "[5, 10]")));
+
+        var groups = ((List<object?>)Step(pipeline, "ref_ab").Config["filterGroups"]!).Cast<Dictionary<string, object?>>().ToList();
+        groups.Should().HaveCount(2);
+        Rules(Step(pipeline, "ref_ab").Config["filterGroups"]).Select(r => r["operator"]).Should().Equal("less_than", "greater_than");
+    }
+
+    [Theory]
+    [InlineData("more-than", "[2, days, past, '']", "is-before", "@relative-date|past|2|UTC")]
+    [InlineData("less-than", "[30, days, past, '']", "is-after", "@relative-date|past|30|UTC")]
+    [InlineData("less-than", "[1, days, future, '']", "is-before", "@relative-date|future|1|UTC")]
+    [InlineData("more-than", "[2, weeks, future, '']", "is-after", "@relative-date|future|14|UTC")]
+    [InlineData("after", "[2, days, past, '']", "is-after", "@relative-date|past|2|UTC")]
+    [InlineData("before", "'{{(time.today - time.delta(days=30))|date_ymd}}'", "is-before", "@relative-date|past|30|UTC")]
+    [InlineData("after", "'{{time.today}}'", "is-after", "@relative-date|today|0|UTC")]
+    [InlineData("before", "'{{time.now|date_mdy}}'", "is-before", "@relative-date|today|0|UTC")]
+    public void RelativeDates_BecomePowerFlowsRelativeDates(string op, string value, string expectedOp, string expectedValue)
+    {
+        var pipeline = Convert(Trigger(), Search(Relational("date_created", op, value)));
+
+        var rule = OnlySearchRule(pipeline);
+        rule["operator"].Should().Be(expectedOp);
+        rule["value"].Should().Be(expectedValue);
+        pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_FILTER_OPERATOR" || i.Code == "PIPELINE_FILTER_NOT_VERIFIED");
+    }
+
+    [Fact]
+    public void OnDate_TodayInAZone_IsTodayInThatZone()
+    {
+        var pipeline = Convert(Trigger(), Search(Relational("date_created", "on_date", "['{{time.today}}', America/New_York]")));
+
+        var rule = OnlySearchRule(pipeline);
+        rule["operator"].Should().Be("is");
+        rule["value"].Should().Be("@relative-date|today|0|America/New_York");
+    }
+
+    [Fact]
+    public void RelativeHours_BecomeAFormula_NotAnEmptyFilter()
+    {
+        var pipeline = Convert(Trigger(), Search(Relational("date_created", "more-than", "[42, hours, future, '']")));
+
+        var rule = OnlySearchRule(pipeline);
+        rule["operator"].Should().Be("is-after");
+        rule["value"]!.ToString().Should().NotBeNullOrEmpty();
+        pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_FILTER_OPERATOR");
+    }
 }

@@ -168,10 +168,11 @@ public class ReportsController : ControllerBase
         [FromQuery] string? search = null,
         [FromQuery] string sortBy = "name",
         [FromQuery] string sortDirection = "asc",
+        [FromQuery] bool includeHidden = false,
         CancellationToken ct = default)
     {
         var sortDesc = string.Equals(sortDirection, "desc", StringComparison.OrdinalIgnoreCase);
-        var result = await _listByTablePagedHandler.HandleAsync(new ListReportsByTablePagedQuery(tableId, page, pageSize, search, sortBy, sortDesc), ct);
+        var result = await _listByTablePagedHandler.HandleAsync(new ListReportsByTablePagedQuery(tableId, page, pageSize, search, sortBy, sortDesc, includeHidden), ct);
         var items = result.Items.Select(MapToListItemResponse).ToList();
         return Ok(new ApiListResponse<ReportListItemResponse>(items, result.Total, result.Page, result.PageSize));
     }

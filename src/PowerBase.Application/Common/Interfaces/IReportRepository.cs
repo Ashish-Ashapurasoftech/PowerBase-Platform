@@ -29,12 +29,12 @@ public interface IReportRepository
     /// <summary>Slim, paged, searchable (by Name), sortable listing for the reports grid — same
     /// role-based Visibility filtering as <see cref="ListByTableAsync"/>, just paginated.</summary>
     Task<IReadOnlyList<ReportListItemDto>> ListByTablePagedAsync(
-        Guid tablePublicId, int page, int pageSize, string? search, string sortBy, bool sortDesc, CancellationToken ct = default);
+        Guid tablePublicId, int page, int pageSize, string? search, string sortBy, bool sortDesc, CancellationToken ct = default, bool includeHidden = false);
     /// <summary>Every report on the table the caller may pick for embedding — includes Hidden ones.</summary>
     Task<IReadOnlyList<PowerBase.Application.Common.Models.ReportPickerItemDto>> ListPickerByTableAsync(Guid tablePublicId, CancellationToken ct = default);
     /// <summary>Public ids of the live reports auto-created for a relationship (see Report.RelationshipId).</summary>
     Task<IReadOnlyList<Guid>> ListPublicIdsByRelationshipAsync(Guid relationshipPublicId, CancellationToken ct = default);
-    Task<int> CountByTableAsync(Guid tablePublicId, string? search, CancellationToken ct = default);
+    Task<int> CountByTableAsync(Guid tablePublicId, string? search, CancellationToken ct = default, bool includeHidden = false);
     Task<Report?> GetDefaultByTableAsync(Guid tablePublicId, CancellationToken ct = default);
     /// <summary>The hidden, per-table row backing "Default Report Settings" — see
     /// <see cref="Report.IsDefaultSettingsRecord"/>. Null only if migration
