@@ -225,6 +225,13 @@ builder.Services.AddSingleton<PowerBase.Application.Pipelines.IPipelineApiReques
 builder.Services.AddDataProtection();
 builder.Services.AddScoped<PowerBase.API.Pipelines.RequestConnectionService>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.IRequestConnectionService>(services => services.GetRequiredService<PowerBase.API.Pipelines.RequestConnectionService>());
+// Microsoft Outlook accounts for the PowerFlows "Send an Email" step.
+builder.Services.AddHttpClient(PowerBase.API.Pipelines.OutlookConnectionService.HTTP_CLIENT_NAME, client => client.Timeout = TimeSpan.FromSeconds(30));
+builder.Services.AddHttpClient(PowerBase.Infrastructure.Services.OutlookGraphMailSender.HTTP_CLIENT_NAME, client => client.Timeout = TimeSpan.FromSeconds(100));
+builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IMicrosoftConnectionRepository, PowerBase.Infrastructure.Repositories.MicrosoftConnectionRepository>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Outlook.IOutlookGraphMailSender, PowerBase.Infrastructure.Services.OutlookGraphMailSender>();
+builder.Services.AddScoped<PowerBase.API.Pipelines.OutlookConnectionService>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Outlook.IOutlookConnectionService>(services => services.GetRequiredService<PowerBase.API.Pipelines.OutlookConnectionService>());
 var executionSection = builder.Configuration.GetSection("PipelineExecution");
 builder.Services.Configure<PowerBase.Application.Common.Configurations.PipelineExecutionOptions>(executionSection);
 

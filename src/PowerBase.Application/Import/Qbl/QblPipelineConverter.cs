@@ -877,7 +877,7 @@ public static class QblPipelineConverter
                     return;
                 var channel = accountRef["PipelineChannelAccount"] is { } accountKey && reader._accountChannels.TryGetValue(accountKey, out var found) ? found : null;
                 if (step.Subtype == "send-email-outlook" && channel == "microsoft-outlook")
-                    reader.Note(source, "PIPELINE_EMAIL_PLATFORM_SMTP", "The Outlook account is not imported: PowerFlows sends this email through the platform email service (SMTP).", changesExecution: false);
+                    reader.Note(source, "PIPELINE_EMAIL_PLATFORM_SMTP", "The Outlook account is not imported: select or connect a Microsoft Outlook account in the Send an Email step. Until then PowerFlows sends this email through the platform email service (SMTP).", changesExecution: false);
                 else if (step.Subtype == "make-request" && channel == "http")
                     return; // MakeRequest() asks for the HTTP connection.
                 else if (channel != "quickbase")

@@ -638,6 +638,7 @@ public class PipelinesController : ControllerBase
     public async Task<IActionResult> GetActivity(
         Guid appId,
         [FromServices] GetPipelineActivityQueryHandler handler,
+        [FromServices] IAppAccessService appAccessService,
         [FromQuery] Guid? pipelinePublicId = null,
         [FromQuery] DateTime? fromDate = null,
         [FromQuery] DateTime? toDate = null,
@@ -645,6 +646,18 @@ public class PipelinesController : ControllerBase
         [FromQuery] int pageSize = 10,
         CancellationToken ct = default)
     {
+        if (pipelinePublicId is Guid filterPipelineId)
+        {
+            try
+            {
+                await appAccessService.RequirePermissionByPipelinePublicIdAsync(filterPipelineId, PermissionCodes.PowerFlowsRead, ct);
+            }
+            catch (PowerBase.Domain.Exceptions.UnauthorizedActionException ex)
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, new { error = new { code = "FORBIDDEN", message = ex.Message } });
+            }
+        }
+
         var query = new GetPipelineActivityQuery(appId, pipelinePublicId, fromDate, toDate, page, pageSize);
         var result = await handler.HandleAsync(query, ct);
         return Ok(new ApiListResponse<AppPipelineRunDto>(result.Items, result.TotalCount, result.Page, result.PageSize));
