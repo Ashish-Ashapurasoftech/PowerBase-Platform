@@ -54,13 +54,32 @@ public partial class PipelineEngine
         var document = DocumentOf(source);
         string Resolve(string? value) => EvaluateTokens(value, payloadJson, executionPath, allSteps);
         var records = JsonRecordsIterator.Iterate(document, config, Resolve);
-        stepRun.InputContext = SerializeAndSanitizeAudit(new { JsonSource = sourceRef, config.JsonRecordsPath, config.Limit, config.Filters, ItemCount = records.Count });
+        // Filters as plain text: a JsonNode's Parent points back up the tree, which the audit sanitizer would walk forever.
+        var filters = config.Filters.Select(group => group.Select(rule => new
+        {
+            field = rule.Field, condition = rule.Condition, value = rule.Value?.ToJsonString(), value2 = rule.Value2?.ToJsonString()
+        }).ToList()).ToList();
+        stepRun.InputContext = SerializeAndSanitizeAudit(new { JsonSource = sourceRef, config.JsonRecordsPath, config.Limit, Filters = filters, ItemCount = records.Count });
         return new JsonObject
         {
             ["records"] = records,
             ["count"] = records.Count,
             ["_metadata"] = JsonSerializer.SerializeToNode(SearchMetadata(records.Count))
         }.ToJsonString();
+    }
+
+    /// <summary>Condition type category of a JSON Handler field: number / boolean from the Schema Sample, text otherwise.</summary>
+    private static string JsonFieldTypeCategory(PipelineStep step, string field)
+    {
+        if (step.Subtype == JsonHandler.FetchSubtype) return field == "status" ? "NUMBER" : "TEXT";
+        JsonRecordsIterator.TryParseSample(IterateJsonDefinition.Read(step.ConfigJson).JsonSchemaSample, out var schema);
+        if (schema == null || !schema.TryGetPropertyValue(field, out var sample) || sample is not JsonValue value) return "TEXT";
+        return value.GetValueKind() switch
+        {
+            JsonValueKind.Number => "NUMBER",
+            JsonValueKind.True or JsonValueKind.False => "BOOLEAN",
+            _ => "TEXT"
+        };
     }
 
     /// <summary>The JSON text a source step carries: Fetch JSON's fetched document, an Incoming Request's body, or the step's own output.</summary>

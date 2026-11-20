@@ -4946,6 +4946,10 @@ public partial class PipelineEngine : IPipelineEngine
             sourceStep = collectionStep;
         }
 
+        // JSON Handler steps read no table: a field's type comes from Iterate's JSON Schema Sample (Fetch JSON: status is a number).
+        if (JsonHandler.IsJsonSubtype(sourceStep.Subtype))
+            return (JsonFieldTypeCategory(sourceStep, fieldRef), null);
+
         Guid tablePublicId = Guid.Empty;
         string? connectionPublicId = null;
         using (var doc = JsonDocument.Parse(sourceStep.ConfigJson))
