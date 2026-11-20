@@ -12,8 +12,9 @@ namespace PowerBase.Infrastructure.QbMigration;
 /// migration created earlier (no password, never signed in) is brought to QuickBase's status. A real PowerBase account (has a
 /// password or has signed in) is never changed.</item>
 /// <item>Tenant membership: added if missing with the same status; tenant "User" role, or tenant "Administrator" for a QuickBase
-/// Super User. A membership of a real account is never changed, except that with --activate-tenant-members an inactive one is
-/// activated when QuickBase says Registered (role never changed, never deactivated).</item>
+/// Super User. A membership of a real account is never changed, except that (a) with --activate-tenant-members an inactive one is
+/// activated when QuickBase says Registered (role never changed, never deactivated), and (b) for a QuickBase Super User it is raised
+/// to tenant Administrator (and activated when Registered), because Super User is tenant Administrator.</item>
 /// <item>App membership: the exact role and status, added or corrected.</item>
 /// </list></summary>
 public sealed class QbmUserProvisioner(ITenantConnectionFactory tenant, Func<SqlConnection> control)
@@ -142,14 +143,30 @@ public sealed class QbmUserProvisioner(ITenantConnectionFactory tenant, Func<Sql
                         "UPDATE meta.TenantUser SET IsActive = @active, TenantRoleId = @wantRole WHERE TenantId = @tenantId AND UserId = @userId",
                         new { active = p.IsActive, wantRole, tenantId, userId }, tx, cancellationToken: ct));
             }
+            else if (p.IsSuperUser)
+            {
+                // A real account that QuickBase lists as a Super User. Super User is tenant Administrator (confirmed policy), so this
+                // tenant's membership is raised to Administrator, and activated when QuickBase says Registered (Super User implies
+                // access). It is never deactivated. The account itself (password, platform Super Admin flag) and the account's other
+                // tenants are never touched.
+                var promote = member.TenantRoleId != tenantRoles.Administrator;
+                var activate = p.IsActive && !member.IsActive;
+                var parts = new List<string>();
+                if (promote) parts.Add("role to Administrator");
+                if (activate) parts.Add("activated");
+                // Starts with "corrected" so the user summary counts it as a change.
+                tenantAction = parts.Count == 0 ? "existing membership (not changed)" : $"corrected ({string.Join(", ", parts)}; QuickBase Super User)";
+                if ((promote || activate) && !dryRun)
+                    await c.ExecuteAsync(new CommandDefinition(
+                        "UPDATE meta.TenantUser SET TenantRoleId = @administrator, IsActive = CASE WHEN @activate = 1 THEN 1 ELSE IsActive END WHERE TenantId = @tenantId AND UserId = @userId",
+                        new { administrator = tenantRoles.Administrator, activate, tenantId, userId }, tx, cancellationToken: ct));
+            }
             else if (p.IsActive && !member.IsActive && !activateMemberships)
             {
                 // Someone may have deactivated this person in PowerBase on purpose: only an explicit operator flag re-activates.
                 tenantAction = "inactive in PowerBase (not changed)";
                 warning = (warning is null ? "" : warning + " ") +
                     "QuickBase says Registered but the tenant membership is inactive; left as it is (--activate-tenant-members activates it).";
-                if (p.IsSuperUser && member.TenantRoleId != tenantRoles.Administrator)
-                    warning += " QuickBase Super User, but not a tenant Administrator in PowerBase; left as it is.";
             }
             else if (p.IsActive && !member.IsActive)
             {
@@ -160,14 +177,10 @@ public sealed class QbmUserProvisioner(ITenantConnectionFactory tenant, Func<Sql
                     await c.ExecuteAsync(new CommandDefinition(
                         "UPDATE meta.TenantUser SET IsActive = 1 WHERE TenantId = @tenantId AND UserId = @userId AND IsActive = 0",
                         new { tenantId, userId }, tx, cancellationToken: ct));
-                if (p.IsSuperUser && member.TenantRoleId != tenantRoles.Administrator)
-                    warning = (warning is null ? "" : warning + " ") + "QuickBase Super User, but not a tenant Administrator in PowerBase; left as it is.";
             }
             else
             {
                 tenantAction = "existing membership (not changed)";
-                if (p.IsSuperUser && member.TenantRoleId != tenantRoles.Administrator)
-                    warning = (warning is null ? "" : warning + " ") + "QuickBase Super User, but not a tenant Administrator in PowerBase; left as it is.";
             }
             if (tx is not null) await tx.CommitAsync(ct);
 
