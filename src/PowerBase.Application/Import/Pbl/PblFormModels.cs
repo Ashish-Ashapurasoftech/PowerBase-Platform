@@ -178,6 +178,11 @@ public sealed class PblFormElement
     /// <summary>One of: Auto, Half, Full, Fixed.</summary>
     public string WidthMode { get; set; } = "Auto";
     public int? WidthValue { get; set; }
+
+    /// <summary>A width the form author chose in the designer: "custom" with a value and a unit ("px", or "%" of the row — a group's members share a row); null = automatic.</summary>
+    public string? ContentWidthMode { get; set; }
+    public int? ContentWidthValue { get; set; }
+    public string? ContentWidthUnit { get; set; }
     public string? HelpTextOverride { get; set; }
     public bool IsReadOnly { get; set; }
     public bool IsRequired { get; set; }

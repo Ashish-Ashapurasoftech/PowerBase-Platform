@@ -37,7 +37,7 @@ public static class QblCriteriaTranslator
     };
 
     /// <param name="allowPrompts">Report filters may ask the viewer for a value (<c>_ask1_</c>); role record filters may not.</param>
-    /// <param name="allowRelativeDates">Report filters resolve "today"/"yesterday"/"tomorrow" when the report runs; summaries and role filters do not.</param>
+    /// <param name="allowRelativeDates">Report and summary filters resolve relative dates ("today", "yesterday", "tomorrow", "N days ago", "N days from now", periods) when they run; role record filters do not.</param>
     public static QblCriteriaResult Translate(string? criteria, Func<int, string?> resolveField, bool allowPrompts = false, bool allowRelativeDates = false)
     {
         if (string.IsNullOrWhiteSpace(criteria))
@@ -88,6 +88,10 @@ public static class QblCriteriaTranslator
         private readonly bool _allowPrompts;
         private readonly bool _allowRelativeDates;
         private int _i;
+
+        private static readonly System.Text.RegularExpressions.Regex RelativeDays = new(
+            @"^\s*(?<n>-?\d+)\s+days?\s+(?<dir>ago|from\s+now)\s*$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
         public Parser(string s, Func<int, string?> resolve, bool allowPrompts, bool allowRelativeDates)
         {
@@ -203,6 +207,18 @@ public static class QblCriteriaTranslator
                     throw new CriteriaException($"the relative date '{value}' has no PowerBase equivalent here");
                 condition.ValueMode = value!.ToLowerInvariant();
                 condition.Value = null;
+            }
+            else if (RelativeDays.Match(value ?? "") is { Success: true } daysMatch)
+            {
+                // "9 days ago", "-35650 days ago", "5 days from now": the runtime resolves pastDays / futureDays (a day count in Value)
+                // to a real date on every read. Left as text it would reach SQL as a date and fail the whole report or summary.
+                if (!_allowRelativeDates)
+                    throw new CriteriaException($"the relative date '{value}' has no PowerBase equivalent here");
+                if (!int.TryParse(daysMatch.Groups["n"].Value, System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out var days))
+                    throw new CriteriaException($"the relative date '{value}' has a day count that is too large");
+                var ago = daysMatch.Groups["dir"].Value.StartsWith("ago", StringComparison.OrdinalIgnoreCase);
+                condition.ValueMode = (ago ? days >= 0 : days < 0) ? "pastDays" : "futureDays";
+                condition.Value = Math.Abs((long)days).ToString(System.Globalization.CultureInfo.InvariantCulture);
             }
 
             if (!string.Equals(value, CURRENT_USER, StringComparison.OrdinalIgnoreCase))

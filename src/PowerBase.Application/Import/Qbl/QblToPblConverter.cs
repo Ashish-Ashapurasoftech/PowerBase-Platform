@@ -2708,9 +2708,12 @@ public static class QblToPblConverter
             }
         }
 
+        // Every element on the form (fields, static text, embedded reports), for rule actions that name one element.
+        var formElementRefs = form.Sections.SelectMany(sec => sec.Blocks).SelectMany(b => b.Elements).Select(e => e.LogicalRef).ToHashSet(StringComparer.Ordinal);
+
         foreach (var (ruleRef, ruleNode) in formNode.ChildMap("Rules"))
         {
-            var rule = ConvertFormRule(ruleRef, ruleNode, qualifiedFormRef, fieldNameByRef, roleNameByRef, fieldTypeByName, elementRefByFieldName, qualifiedSectionRefByRaw, qualifiedBlockRefByRaw, pageTargetByRaw, issues);
+            var rule = ConvertFormRule(ruleRef, ruleNode, qualifiedFormRef, fieldNameByRef, roleNameByRef, fieldTypeByName, elementRefByFieldName, qualifiedSectionRefByRaw, qualifiedBlockRefByRaw, pageTargetByRaw, formElementRefs, issues);
             if (rule is not null)
                 form.Rules.Add(rule);
         }
@@ -2752,6 +2755,8 @@ public static class QblToPblConverter
             var block = ConvertFormBlock(columnRef, columnNode, qualifiedSectionRef, fieldNameByRef, issues);
             section.Blocks.Add(block);
             qualifiedBlockRefByRaw[columnRef] = block.LogicalRef;
+            // Column keys repeat in every section ("FormV2Column_1"), so the bare key only reaches the last section's column.
+            qualifiedBlockRefByRaw[ScopedColumnKey(sectionRef, columnRef)] = block.LogicalRef;
         }
 
         if (section.Blocks.Count == 0)
@@ -2768,6 +2773,8 @@ public static class QblToPblConverter
 
         return section;
     }
+
+    private static string ScopedColumnKey(string sectionRef, string columnRef) => $"{sectionRef}/{columnRef}";
 
     private static PblFormBlock ConvertFormBlock(string columnRef, QblResourceNode columnNode, string qualifiedSectionRef, Dictionary<string, string> fieldNameByRef, List<PblIssue> issues)
     {
@@ -2822,6 +2829,7 @@ public static class QblToPblConverter
                 }
 
                 var (widthMode, widthValue) = ParseElementWidth(elementNode);
+                var (contentWidthMode, contentWidthValue, contentWidthUnit) = ParseContentWidth(elementNode);
                 var (showOnAdd, showOnEdit, showOnView) = ParseModesToShowIn(elementNode);
 
                 result.Add(new PblFormElement
@@ -2836,6 +2844,9 @@ public static class QblToPblConverter
                     ShowOnView = showOnView,
                     WidthMode = widthMode,
                     WidthValue = widthValue,
+                    ContentWidthMode = contentWidthMode,
+                    ContentWidthValue = contentWidthValue,
+                    ContentWidthUnit = contentWidthUnit,
                     HelpTextOverride = NullIfBlank(ResolveScalar(elementNode, "HelpText")),
                     IsReadOnly = elementNode.PropertyBool("ForceReadOnlyOnForm"),
                     IsRequired = elementNode.PropertyBool("ForceRequireOnForm"),
@@ -2917,6 +2928,20 @@ public static class QblToPblConverter
         return mapped.Count == 0 ? null : string.Join(",", mapped);
     }
 
+    /// <summary>A Quickbase element width like "28%" (of the row) or "400px" becomes a custom width, which is what lets a group's members
+    /// keep their different widths ("Default" stays automatic and shares the row equally with its neighbours).</summary>
+    private static (string? Mode, int? Value, string? Unit) ParseContentWidth(QblResourceNode elementNode)
+    {
+        var raw = ResolveScalar(elementNode, "Width")?.Trim();
+        if (string.IsNullOrEmpty(raw)) return (null, null, null);
+
+        string? unit = raw.EndsWith('%') ? "%" : raw.EndsWith("px", StringComparison.OrdinalIgnoreCase) ? "px" : null;
+        if (unit is null) return (null, null, null);
+
+        var number = raw[..^unit.Length].Trim();
+        return int.TryParse(number, out var value) && value > 0 ? ("custom", value, unit) : (null, null, null);
+    }
+
     private static (string WidthMode, int? WidthValue) ParseElementWidth(QblResourceNode elementNode)
     {
         var raw = ResolveScalar(elementNode, "Width");
@@ -2962,6 +2987,7 @@ public static class QblToPblConverter
         Dictionary<string, string> qualifiedSectionRefByRaw,
         Dictionary<string, string> qualifiedBlockRefByRaw,
         IReadOnlyDictionary<string, PageTarget> pageTargetByRaw,
+        IReadOnlySet<string> formElementRefs,
         List<PblIssue> issues)
     {
         var name = ResolveScalar(ruleNode, "Name") ?? ruleRef;
@@ -3095,7 +3121,7 @@ public static class QblToPblConverter
                 continue;
             }
 
-            var action = ConvertFormRuleAction(actionNode, fieldNameByRef, fieldTypeByName, elementRefByFieldName, qualifiedSectionRefByRaw, qualifiedBlockRefByRaw, actionOrder, name, ruleRef, issues);
+            var action = ConvertFormRuleAction(actionNode, fieldNameByRef, fieldTypeByName, elementRefByFieldName, qualifiedSectionRefByRaw, qualifiedBlockRefByRaw, formElementRefs, actionOrder, name, ruleRef, issues);
             if (action is null)
                 continue;
 
@@ -3657,6 +3683,7 @@ public static class QblToPblConverter
         Dictionary<string, string> elementRefByFieldName,
         Dictionary<string, string> qualifiedSectionRefByRaw,
         Dictionary<string, string> qualifiedBlockRefByRaw,
+        IReadOnlySet<string> formElementRefs,
         int order,
         string ruleName,
         string ruleRef,
@@ -3731,6 +3758,32 @@ public static class QblToPblConverter
             targetFieldName = fieldName;
             targetType = "Field";
         }
+        // Quickbase lists a target's whole address: an element comes with its column and section, a column with its section. The narrowest
+        // reference is the target; the wider ones only say where it sits. Reading the wider one would show/lock/require the whole section.
+        else if (target["FormV2Element"] is { } elementKey)
+        {
+            if (target["FormV2Section"] is not { } elSection || target["FormV2Column"] is not { } elColumn
+                || !qualifiedBlockRefByRaw.TryGetValue(ScopedColumnKey(elSection, elColumn), out var elBlockRef)
+                || Qualify(elBlockRef, elementKey) is not { } candidate || !formElementRefs.Contains(candidate))
+            {
+                issues.Add(Warning("QBL_FORM_RULE_ACTION_TARGET_UNAVAILABLE", $"Form rule '{ruleName}' action targets a form element that was not imported (for example an unsupported element type); skipped.", ruleRef));
+                return null;
+            }
+            targetElementRef = candidate;
+            targetType = "Field";
+        }
+        else if (target["FormV2Column"] is { } columnRef)
+        {
+            var found = target["FormV2Section"] is { } colSection
+                ? qualifiedBlockRefByRaw.TryGetValue(ScopedColumnKey(colSection, columnRef), out targetBlockRef)
+                : qualifiedBlockRefByRaw.TryGetValue(columnRef, out targetBlockRef);
+            if (!found)
+            {
+                issues.Add(Warning("QBL_FORM_RULE_ACTION_TARGET_UNAVAILABLE", $"Form rule '{ruleName}' action targets a column not on this form; skipped.", ruleRef));
+                return null;
+            }
+            targetType = "Block";
+        }
         else if (target["FormV2Section"] is { } sectionRef)
         {
             if (!qualifiedSectionRefByRaw.TryGetValue(sectionRef, out targetSectionRef))
@@ -3739,15 +3792,6 @@ public static class QblToPblConverter
                 return null;
             }
             targetType = "Section";
-        }
-        else if (target["FormV2Column"] is { } columnRef)
-        {
-            if (!qualifiedBlockRefByRaw.TryGetValue(columnRef, out targetBlockRef))
-            {
-                issues.Add(Warning("QBL_FORM_RULE_ACTION_TARGET_UNAVAILABLE", $"Form rule '{ruleName}' action targets a column not on this form; skipped.", ruleRef));
-                return null;
-            }
-            targetType = "Block";
         }
         else
         {
