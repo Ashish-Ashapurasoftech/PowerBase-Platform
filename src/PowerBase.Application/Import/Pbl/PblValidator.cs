@@ -593,7 +593,7 @@ public class PblValidator
             var needsNoTarget = action.ActionType is "DisplayMessage" or "PreventSave" && action.TargetElementRef is null && action.TargetSectionRef is null && action.TargetBlockRef is null;
             var resolved = needsNoTarget || action.TargetType switch
             {
-                "Field" => action.TargetElementRef is not null && elementRefs.Contains(action.TargetElementRef),
+                "Field" => action.TargetElementRef is not null ? elementRefs.Contains(action.TargetElementRef) : !string.IsNullOrWhiteSpace(action.TargetFieldName),
                 "Section" => action.TargetSectionRef is not null && sectionRefs.Contains(action.TargetSectionRef),
                 "Block" => action.TargetBlockRef is not null && blockRefs.Contains(action.TargetBlockRef),
                 "Page" => action.TargetPageRef is not null && form.Pages.Any(pg => string.Equals(pg.LogicalRef, action.TargetPageRef, StringComparison.OrdinalIgnoreCase)),

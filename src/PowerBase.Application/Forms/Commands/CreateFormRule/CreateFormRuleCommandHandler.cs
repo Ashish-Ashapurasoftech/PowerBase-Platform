@@ -100,6 +100,7 @@ public class CreateFormRuleCommandHandler
             TargetSectionPublicId = a.TargetSectionPublicId,
             TargetBlockPublicId   = a.TargetBlockPublicId,
             TargetPagePublicId    = a.TargetPagePublicId,
+            TargetFieldId         = a.TargetFieldId,
             ActionValue         = a.ActionValue,
             RunOnceOnActivation = a.RunOnceOnActivation,
             ValueSource         = a.ValueSource,

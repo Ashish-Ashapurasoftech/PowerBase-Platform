@@ -37,4 +37,5 @@ public record FormRuleActionSpec(
     string? ValueSource = null,
     long? SourceFieldId = null,
     string? MessageType = null,
-    string? MessageSeverity = null);
+    string? MessageSeverity = null,
+    long? TargetFieldId = null);
