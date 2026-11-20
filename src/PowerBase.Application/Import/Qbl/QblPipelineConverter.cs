@@ -1766,11 +1766,11 @@ public static class QblPipelineConverter
                 Config["triggerOnModified"] = !source.Meta.TryGetValue("On_Modify_Record", out var modified) || IsTrue(modified);
                 Config["triggerOnDeleted"] = source.Meta.TryGetValue("On_Delete_Record", out var deleted) && IsTrue(deleted);
                 // The single-event triggers ("Record Created" / "Record Updated") are an On New Event for that one event.
-                if (source.Selector is "on_create" or "on_update")
+                if (source.Selector is "on_create" or "on_update" or "on_delete")
                 {
                     Config["triggerOnAdded"] = source.Selector == "on_create";
                     Config["triggerOnModified"] = source.Selector == "on_update";
-                    Config["triggerOnDeleted"] = false;
+                    Config["triggerOnDeleted"] = source.Selector == "on_delete";
                 }
                 if (Config["triggerOnAdded"] is false && Config["triggerOnModified"] is false && Config["triggerOnDeleted"] is false)
                     Incomplete("PIPELINE_TRIGGER_NO_EVENT", "No event (added, modified or deleted) was imported for the trigger; choose one before turning the PowerFlow on.");

@@ -59,6 +59,9 @@ public class PipelineOnlyImportService(
                 && pipeline.Issues.Any(i => i.Code == "PIPELINE_NO_VALID_START"))
                 notImported.Add((pipeline.Name, "Its trigger / first step uses a table that is not in your apps (a Quickbase app that was not imported, or a clone of one), so the steps on your tables cannot start a PowerFlow. "
                     + string.Join(" ", pipeline.Issues.Where(i => i.Code is "PIPELINE_STEP_TABLE_NOT_MATCHED").Select(i => $"Skipped: '{i.StepName}'.").Distinct().Take(5))));
+            else if (pipeline.AppRef is not null && appRefs.Contains(pipeline.AppRef, StringComparer.Ordinal)
+                     && PipelineCompleteness.Reason(pipeline) is { } incomplete)
+                notImported.Add((pipeline.Name, incomplete));
             else if (pipeline.AppRef is not null && appRefs.Contains(pipeline.AppRef, StringComparer.Ordinal))
                 kept.Add(pipeline);
             else
