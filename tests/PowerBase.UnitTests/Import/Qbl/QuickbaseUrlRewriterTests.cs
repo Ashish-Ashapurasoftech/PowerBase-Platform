@@ -33,6 +33,8 @@ public class QuickbaseUrlRewriterTests
     // APIs outside a request: on the PowerBase API address.
     [InlineData("https://api.quickbase.com/v1/fields?tableId=bwcrtu9k5", "{P}/v1/fields?tableId={T:bwcrtu9k5}")]
     [InlineData("https://ysl.quickbase.com/db/bwcrtu9k5?a=API_EditRecord&rid={{aa.id}}&_fid_6={{aa.name}}&usertoken=secret", "{P}/db/{T:bwcrtu9k5}?a=API_EditRecord&rid={{aa.id}}&_fid_6={{aa.name}}")]
+    [InlineData("https://ysl.quickbase.com/db/bwcrtu9k5?a=API_DoQuery&ticket=auth_ticket&apptoken=abc&qid=1&fmt=structured", "{P}/db/{T:bwcrtu9k5}?a=API_DoQuery&qid=1&fmt=structured")]
+    [InlineData("https://ysl.quickbase.com/db/bwcrtu9k5?a=API_DoQueryCount&query={3.GT.0}&usertoken=secret", "{P}/db/{T:bwcrtu9k5}?a=API_DoQueryCount&query=%7B3.GT.0%7D")]
     public void Rewrite_KnownAddresses(string url, string expected)
     {
         var result = Run(url);
@@ -72,7 +74,7 @@ public class QuickbaseUrlRewriterTests
     [InlineData("https://ysl.quickbase.com/db/bwcrtu9k5?a=dr&rid=12", "Quickbase number")]
     [InlineData("https://ysl.quickbase.com/db/zzzzzzzzz?a=dr&rid={{aa.id}}", "not imported")]
     [InlineData("https://ysl.quickbase.com/db/{{aa.dbid}}?a=dr&rid={{aa.id}}", "run time")]
-    [InlineData("https://ysl.quickbase.com/db/bwcrtu9k5?a=API_DoQuery&query={3.GT.0}", "API_DoQuery")]
+    [InlineData("https://ysl.quickbase.com/db/bwcrtu9k5?a=API_GetSchema", "API_GetSchema")]
     [InlineData("https://api.quickbase.com/v1/docTemplates/1/generate?tableId=bwcrtu9k5", "no endpoint")]
     [InlineData("https://ysl.quickbase.com/up/bwcrtu9k5/a/r1/e9/v0/file.pdf", "no equivalent")]
     [InlineData("https://ysl.quickbase.com/db/bwcrtu9k5?a=dbpage&pageID=3", "no equivalent")]

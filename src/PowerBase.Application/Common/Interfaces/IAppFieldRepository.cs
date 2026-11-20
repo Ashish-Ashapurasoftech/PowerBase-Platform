@@ -9,6 +9,8 @@ public interface IAppFieldRepository
 {
     Task<AppField> GetByIdInTableAsync(long fieldId, long tableId, CancellationToken ct = default);
     Task<IReadOnlyList<AppField>> ListByTableAsync(long tableId, CancellationToken ct = default);
+    /// <summary>Every live field of every live table of the app, in one query (not cached; callers get their own objects).</summary>
+    Task<IReadOnlyList<AppField>> ListByAppAsync(long appId, CancellationToken ct = default);
 
     /// <summary>
     /// Gives every search-eligible field of the table that has no Azure AI Search slot one (see

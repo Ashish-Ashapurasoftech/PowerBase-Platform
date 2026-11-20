@@ -22,6 +22,9 @@ public sealed class SendEmailStepConfig
     public string? Body { get; set; }
     public string? EmailBody { get; set; }
     public string? SharedMailbox { get; set; }
+    /// <summary>meta.MicrosoftConnection.PublicId of the Outlook account used by "send-email-outlook".</summary>
+    public string? OutlookConnectionId { get; set; }
+    public Guid? OutlookConnectionGuid => Guid.TryParse(OutlookConnectionId, out var id) ? id : null;
     public string? ContentType { get; set; }
     public string? Importance { get; set; }
     public string? SaveToSentItems { get; set; }

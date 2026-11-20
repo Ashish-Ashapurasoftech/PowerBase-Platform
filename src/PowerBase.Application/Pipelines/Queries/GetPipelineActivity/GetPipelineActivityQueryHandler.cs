@@ -42,8 +42,11 @@ public class GetPipelineActivityQueryHandler
         if (query.PipelinePublicId is Guid pipelinePublicId)
         {
             var pipeline = await _pipelineRepo.GetByPublicIdAsync(pipelinePublicId, ct);
-            if (pipeline == null || pipeline.AppId != appId)
+            if (pipeline == null || pipeline.IsDeleted)
                 return new PipelineActivityResult(Array.Empty<AppPipelineRunDto>(), 0, query.Page < 1 ? 1 : query.Page, query.PageSize is < 1 or > 100 ? 10 : query.PageSize);
+            // The builder can open a PowerFlow from any app's route, so a single-PowerFlow history
+            // is scoped by the PowerFlow's own app (access to it is checked by the controller).
+            appId = pipeline.AppId;
             pipelineId = pipeline.Id;
         }
 

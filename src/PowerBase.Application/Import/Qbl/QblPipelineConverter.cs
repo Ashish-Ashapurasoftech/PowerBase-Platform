@@ -83,7 +83,24 @@ public static class QblPipelineConverter
     /// <see cref="ReadPipelineResources"/>).</summary>
     /// <param name="skipStepsWithUnmatchedTable">Pipeline-only import: a step whose Quickbase table matched no existing table
     /// (it is still a bare Quickbase id) is skipped and reported instead of imported without a table.</param>
-    public static IReadOnlyList<PblPipeline> ConvertAll(QblDocument qbl, string content, bool skipStepsWithUnmatchedTable = false)
+    /// <summary>The file read as plain YAML, as <see cref="ConvertAll"/> reads it. Done ahead by a caller that wants to read it
+    /// while it deserializes the same file (the two reads are independent).</summary>
+    public static object? ReadRaw(string content)
+    {
+        try { return RawDeserializer.Deserialize<object>(content); }
+        catch (YamlException)
+        {
+            var sanitized = QblRawTextSanitizer.TryStripUnsupportedPagesBlock(content);
+            if (sanitized is null) throw;
+            return RawDeserializer.Deserialize<object>(sanitized);
+        }
+    }
+
+    public static IReadOnlyList<PblPipeline> ConvertAll(QblDocument qbl, string content, bool skipStepsWithUnmatchedTable = false) =>
+        ConvertAll(qbl, content, skipStepsWithUnmatchedTable, raw: null);
+
+    /// <param name="raw">The file already read by <see cref="ReadRaw"/>; null reads it here.</param>
+    public static IReadOnlyList<PblPipeline> ConvertAll(QblDocument qbl, string content, bool skipStepsWithUnmatchedTable, Func<object?>? raw)
     {
         var pipelineRefs = qbl.Resources.Where(r => r.Value.Type == PIPELINE_TYPE).Select(r => r.Key).ToList();
         if (pipelineRefs.Count == 0)
@@ -92,7 +109,7 @@ public static class QblPipelineConverter
         Dictionary<string, QblResourceNode> resources;
         try
         {
-            resources = ReadPipelineResources(content, qbl.ParameterDefinitions);
+            resources = ReadPipelineResources(raw is null ? ReadRaw(content) : raw(), qbl.ParameterDefinitions);
         }
         catch (Exception ex)
         {
@@ -106,22 +123,24 @@ public static class QblPipelineConverter
         var accountAliases = resources
             .Where(r => r.Value.Type == CHANNEL_ACCOUNT_TYPE && !string.IsNullOrWhiteSpace(Scalar(r.Value.Properties, "Alias")))
             .ToDictionary(r => r.Key, r => Scalar(r.Value.Properties, "Alias")!.Trim(), StringComparer.Ordinal);
-        var result = new List<PblPipeline>();
-        FieldIndex? index = null;
-        foreach (var pipelineRef in pipelineRefs)
+        // Each pipeline is read on its own (the index and the lookups are only read), so a file of 1000+ pipelines is read in
+        // parallel; the result keeps the file's order.
+        var index = FieldIndex.Build(qbl);
+        var result = new PblPipeline[pipelineRefs.Count];
+        Parallel.For(0, pipelineRefs.Count, i =>
         {
+            var pipelineRef = pipelineRefs[i];
             try
             {
                 if (!resources.TryGetValue(pipelineRef, out var node))
                     throw new InvalidOperationException("the pipeline was not found when the file was read again");
-                index ??= FieldIndex.Build(qbl);
-                result.Add(new PipelineReader(pipelineRef, node, accountChannels, index, accountAliases, skipStepsWithUnmatchedTable).Read());
+                result[i] = new PipelineReader(pipelineRef, node, accountChannels, index, accountAliases, skipStepsWithUnmatchedTable).Read();
             }
             catch (Exception ex)
             {
-                result.Add(Unreadable(pipelineRef, qbl.Resources[pipelineRef], ex.Message));
+                result[i] = Unreadable(pipelineRef, qbl.Resources[pipelineRef], ex.Message);
             }
-        }
+        });
         return result;
     }
 
@@ -139,21 +158,8 @@ public static class QblPipelineConverter
     /// pipeline step's Properties carry one (<c>Type: pipe</c>, <c>loop</c>, <c>branch</c>, <c>stop</c>) — read that way the step's id,
     /// channel, inputs and target are lost. Reading them separately leaves the application import untouched.
     /// </summary>
-    private static Dictionary<string, QblResourceNode> ReadPipelineResources(string content, IReadOnlyDictionary<string, object?> parameters)
+    private static Dictionary<string, QblResourceNode> ReadPipelineResources(object? raw, IReadOnlyDictionary<string, object?> parameters)
     {
-        object? raw;
-        try
-        {
-            raw = RawDeserializer.Deserialize<object>(content);
-        }
-        catch (YamlException)
-        {
-            // The same recovery the shared reader applies to a corrupted code page block.
-            var sanitized = QblRawTextSanitizer.TryStripUnsupportedPagesBlock(content);
-            if (sanitized is null)
-                throw;
-            raw = RawDeserializer.Deserialize<object>(sanitized);
-        }
 
         var result = new Dictionary<string, QblResourceNode>(StringComparer.Ordinal);
         if (raw is IDictionary<object, object> document && document.TryGetValue("Resources", out var resources) && resources is IDictionary<object, object> map)
@@ -877,7 +883,7 @@ public static class QblPipelineConverter
                     return;
                 var channel = accountRef["PipelineChannelAccount"] is { } accountKey && reader._accountChannels.TryGetValue(accountKey, out var found) ? found : null;
                 if (step.Subtype == "send-email-outlook" && channel == "microsoft-outlook")
-                    reader.Note(source, "PIPELINE_EMAIL_PLATFORM_SMTP", "The Outlook account is not imported: PowerFlows sends this email through the platform email service (SMTP).", changesExecution: false);
+                    reader.Note(source, "PIPELINE_EMAIL_PLATFORM_SMTP", "The Outlook account is not imported: select or connect a Microsoft Outlook account in the Send an Email step. Until then PowerFlows sends this email through the platform email service (SMTP).", changesExecution: false);
                 else if (step.Subtype == "make-request" && channel == "http")
                     return; // MakeRequest() asks for the HTTP connection.
                 else if (channel != "quickbase")
@@ -1766,11 +1772,11 @@ public static class QblPipelineConverter
                 Config["triggerOnModified"] = !source.Meta.TryGetValue("On_Modify_Record", out var modified) || IsTrue(modified);
                 Config["triggerOnDeleted"] = source.Meta.TryGetValue("On_Delete_Record", out var deleted) && IsTrue(deleted);
                 // The single-event triggers ("Record Created" / "Record Updated") are an On New Event for that one event.
-                if (source.Selector is "on_create" or "on_update")
+                if (source.Selector is "on_create" or "on_update" or "on_delete")
                 {
                     Config["triggerOnAdded"] = source.Selector == "on_create";
                     Config["triggerOnModified"] = source.Selector == "on_update";
-                    Config["triggerOnDeleted"] = false;
+                    Config["triggerOnDeleted"] = source.Selector == "on_delete";
                 }
                 if (Config["triggerOnAdded"] is false && Config["triggerOnModified"] is false && Config["triggerOnDeleted"] is false)
                     Incomplete("PIPELINE_TRIGGER_NO_EVENT", "No event (added, modified or deleted) was imported for the trigger; choose one before turning the PowerFlow on.");
