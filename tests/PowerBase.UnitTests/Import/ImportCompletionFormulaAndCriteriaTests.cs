@@ -146,4 +146,48 @@ public class ImportCompletionFormulaAndCriteriaTests
 
         result.Filter!.Conditions.Single().ValueMode.Should().Be("today");
     }
+
+    // "N days ago" used to fall through every branch and was saved as the literal text "9 days ago" with no mode; the runtime
+    // only resolves pastDays / futureDays, so the text reached SQL and a Summary or report crashed with a date-conversion error.
+    [Theory]
+    [InlineData("OAF", "9 days ago", "gte", "pastDays", "9")]
+    [InlineData("AF", "365 days ago", "gt", "pastDays", "365")]
+    [InlineData("OBF", "7 days ago", "lte", "pastDays", "7")]
+    [InlineData("BF", "1 day ago", "lt", "pastDays", "1")]
+    [InlineData("OAF", "0 days ago", "gte", "pastDays", "0")]
+    [InlineData("OAF", "9 Days AGO", "gte", "pastDays", "9")]
+    [InlineData("BF", "-35650 days ago", "lt", "futureDays", "35650")]
+    [InlineData("OAF", "5 days from now", "gte", "futureDays", "5")]
+    [InlineData("BF", "1 day from now", "lt", "futureDays", "1")]
+    public void Criteria_DaysAgoOrFromNow_BecomesPastOrFutureDaysWithTheNumber(string op, string value, string pbOperator, string mode, string number)
+    {
+        var result = QblCriteriaTranslator.Translate($"{{'11'.{op}.'{value}'}}", Resolve, allowRelativeDates: true);
+
+        result.Succeeded.Should().BeTrue(result.Problem);
+        var c = result.Filter!.Conditions.Single();
+        c.Operator.Should().Be(pbOperator);
+        c.ValueMode.Should().Be(mode);
+        c.Value.Should().Be(number);
+    }
+
+    [Fact]
+    public void Criteria_DaysAgo_WhereRelativeDatesAreNotAllowed_IsRefusedNotSavedAsText()
+    {
+        var result = QblCriteriaTranslator.Translate("{'11'.OAF.'9 days ago'}", Resolve, allowRelativeDates: false);
+
+        result.Succeeded.Should().BeFalse();
+        result.Problem.Should().Contain("no PowerBase equivalent");
+    }
+
+    [Fact]
+    public void Criteria_DaysAgoInsideALargerQuery_IsConvertedWhereItStands()
+    {
+        var result = QblCriteriaTranslator.Translate("{'8'.EX.'a'} AND {'11'.OAF.'30 days ago'}", Resolve, allowRelativeDates: true);
+
+        result.Succeeded.Should().BeTrue(result.Problem);
+        result.Filter!.Conditions.Should().HaveCount(2);
+        result.Filter.Conditions[0].ValueMode.Should().BeNull();
+        result.Filter.Conditions[1].ValueMode.Should().Be("pastDays");
+        result.Filter.Conditions[1].Value.Should().Be("30");
+    }
 }

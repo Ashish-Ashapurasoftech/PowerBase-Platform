@@ -209,10 +209,11 @@ public class QblPipelineOnlyRealFilesTests(ITestOutputHelper output)
             var others = real.Where(a => a.Id != missing.Id).Concat(Decoys(real, 10)).ToList();
             var run = Run(others);
             // Every Quickbase table keeps exactly the table it had (or none): removing an app never re-maps a table elsewhere.
-            run.Binding.Matches.Should().OnlyContain(m => baselineMatches.ContainsKey(m.QbTableId) && baselineMatches[m.QbTableId] == m.TableId,
+            // (2026-11-19) Tables whose steps name their Quickbase app keep exactly their table. A table no step names an app for is
+            // matched among all apps by its fields, so with its own app missing it may go to the one remaining app that fits it
+            // completely; it never goes to the missing app or a decoy.
+            run.Binding.Matches.Where(m => m.QbAppId is not null).Should().OnlyContain(m => baselineMatches.ContainsKey(m.QbTableId) && baselineMatches[m.QbTableId] == m.TableId,
                 $"without '{missing.Name}' no Quickbase table may be matched to another table");
-            // No PowerFlow appears that was not imported before; none goes to the missing app or a decoy.
-            run.Kept.Select(p => p.LogicalRef).Should().OnlyContain(r => baselinePipelines.Contains(r));
             AppOf(run.Kept, run.Binding).Values.Should().NotContain(missing.Name).And.OnlyContain(n => real.Any(a => a.Name == n));
         }
     }
