@@ -227,7 +227,7 @@ public class ImportPreviewQueryHandler
             }).ToList(),
         };
         var built = ImportIssueReportBuilder.BuildFromImportReport(item.AppName, report, document: null);
-        var issues = built.Issues.Select(i => i.ElementType != "Pipeline" ? i : new ImportIssue
+        var issues = built.Issues.Select(i => i.ElementType != "Pipeline" ? Regrouped(i) : new ImportIssue
         {
             Severity = i.Severity,
             ApplicationName = i.ApplicationName,
@@ -250,6 +250,29 @@ public class ImportPreviewQueryHandler
                 InformationCount = built.Summary.InformationCount,
                 AffectedFieldCount = issues.Where(i => i.Severity != ImportIssueSeverity.Information).Select(i => (i.TableName, i.FieldName)).Distinct().Count(),
             },
+        };
+    }
+
+    /// <summary>A file-level entry in a group of its own instead of one long "General" list: a PowerFlow left out gets its
+    /// PowerFlow's group (like the step issues of the imported ones), an unmatched Quickbase table the tables' group.</summary>
+    private static ImportIssue Regrouped(ImportIssue i)
+    {
+        const string PREFIX = "PowerFlow '", MIDDLE = "' is not imported: ";
+        // The report builder drops the code of these entries, so they are told apart by their (fixed) message.
+        (string? table, string? field) = i.Description switch
+        {
+            var d when d.StartsWith(PREFIX, StringComparison.Ordinal) && d.IndexOf(MIDDLE, StringComparison.Ordinal) is var end and > 0
+                => ($"PowerFlow: {d[PREFIX.Length..end]}", "Not imported"),
+            var d when d.StartsWith("No existing table matches Quickbase table '", StringComparison.Ordinal)
+                => ("Quickbase tables not found", "Table"),
+            _ => (null, null),
+        };
+        if (table is null) return i;
+        return new ImportIssue
+        {
+            Severity = i.Severity, ApplicationName = i.ApplicationName, TableName = table, FieldName = field,
+            ElementType = i.ElementType, Description = i.Description, OriginalConfiguration = i.OriginalConfiguration,
+            RecommendedAction = i.RecommendedAction, Code = i.Code, TechnicalDetail = i.TechnicalDetail,
         };
     }
 

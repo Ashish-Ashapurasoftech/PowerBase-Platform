@@ -98,9 +98,11 @@ public static class QblPipelineOnlyBinder
     {
         var previous = _commonKeys;
         var previousMemo = _evidenceMemo;
+        var previousPrepared = _prepared;
         _evidenceMemo = null;
+        _prepared = new Dictionary<TableUse, PreparedUse>(ReferenceEqualityComparer.Instance);
         try { return BindCore(content, candidates); }
-        finally { _commonKeys = previous; _evidenceMemo = previousMemo; }
+        finally { _commonKeys = previous; _evidenceMemo = previousMemo; _prepared = previousPrepared; }
     }
 
     /// <summary>Evidence(table, use) of the current Bind: every use is collected before matching starts, so a pair's fit never
@@ -367,13 +369,22 @@ public static class QblPipelineOnlyBinder
             if (node is YamlMappingNode resource && Scalar(resource, "Type") == "QB::Pipeline")
                 RewriteDataSources(resource, tableOf, appByQbId, appRefs, binding);
 
+        // Only the tables the rewritten pipelines name (or that a Quickbase table was matched to) go into the file: adding every
+        // table of every matched app made the file 2-3 times larger and every later read of it that much slower.
+        var named = new HashSet<long>();
+        foreach (var (_, node) in resources.Children)
+            if (node is YamlMappingNode resource && Scalar(resource, "Type") == "QB::Pipeline")
+                foreach (var scalar in AllScalars(resource))
+                    foreach (Match m in PbTableRef.Matches(scalar))
+                        if (long.TryParse(m.Groups[1].Value, out var id)) named.Add(id);
+
         foreach (var app in candidates.Where(a => appRefs.ContainsKey(a.Id)))
         {
             var appRef = appRefs[app.Id];
             var qbTables = tableOf.Where(kv => kv.Value.App.Id == app.Id)
                 .GroupBy(kv => kv.Value.Table.Id).ToDictionary(g => g.Key, g => string.Join(",", g.Select(kv => kv.Key)));
             var qbApps = string.Join(",", appByQbId.Where(kv => kv.Value.Id == app.Id).Select(kv => kv.Key));
-            resources.Children[new YamlScalarNode(appRef)] = AppNode(app, qbApps, qbTables);
+            resources.Children[new YamlScalarNode(appRef)] = AppNode(app with { Tables = app.Tables.Where(t => named.Contains(t.Id) || qbTables.ContainsKey(t.Id)).ToList() }, qbApps, qbTables);
             binding.Apps.Add((appRef, app));
         }
 
@@ -530,8 +541,12 @@ public static class QblPipelineOnlyBinder
     internal static bool NamesApp(string text, string appName)
     {
         if (string.IsNullOrWhiteSpace(appName)) return false;
-        return Regex.IsMatch(text, @"(?<![A-Za-z0-9])" + Regex.Escape(appName.Trim()) + @"(?![A-Za-z0-9])", RegexOptions.IgnoreCase);
+        var regex = NameRegexes.GetOrAdd(appName.Trim(), n => new Regex(@"(?<![A-Za-z0-9])" + Regex.Escape(n) + @"(?![A-Za-z0-9])", RegexOptions.IgnoreCase | RegexOptions.Compiled));
+        return regex.IsMatch(text);
     }
+
+    /// <summary>One regex per app name: Regex.IsMatch's own cache holds 15 patterns, so with many apps every call rebuilt it.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Regex> NameRegexes = new(StringComparer.Ordinal);
 
     private static int CommonPrefix(string a, string b)
     {
@@ -573,19 +588,41 @@ public static class QblPipelineOnlyBinder
         var memo = _evidenceMemo;
         if (memo is not null && memo.TryGetValue((table, use), out var cached)) return cached;
         var index = IndexOf(table);
+        var prepared = PreparedOf(use);
         int hit = 0, miss = 0, keys = 0;
-        foreach (var fid in use.Fids.Where(f => f > 5))
+        foreach (var fid in prepared.Fids)
             if (index.Fids.Contains(fid)) hit += 1; else miss += 2;
-        foreach (var key in use.Keys.Where(k => !BuiltInKeys.Contains(k)))
-            if (index.HasKey(key))
+        foreach (var (wanted, compact, common) in prepared.Keys)
+            if (index.HasNormalized(wanted, compact))
             {
-                if (_commonKeys?.IsCommon(key) == true) hit += 1;
+                if (common) hit += 1;
                 else { hit += 3; keys++; }
             }
             else miss += 3;
         var fit = new Fit(hit, miss, keys);
         memo?.TryAdd((table, use), fit);
         return fit;
+    }
+
+    /// <summary>A use's field ids and keys, normalized once per Bind (normalizing them for every table made a file of many
+    /// apps take minutes to match). The same values Evidence used to work out on every call.</summary>
+    private sealed record PreparedUse(int[] Fids, (string Wanted, string Compact, bool Common)[] Keys);
+
+    [ThreadStatic] private static Dictionary<TableUse, PreparedUse>? _prepared;
+
+    private static PreparedUse PreparedOf(TableUse use)
+    {
+        if (_prepared is not null && _prepared.TryGetValue(use, out var p)) return p;
+        p = new PreparedUse(
+            use.Fids.Where(f => f > 5).ToArray(),
+            use.Keys.Where(k => !BuiltInKeys.Contains(k)).Select(k =>
+            {
+                var wanted = QblPipelineConverter.NormalizeKey(k);
+                return (wanted, wanted.Replace("_", "", StringComparison.Ordinal), _commonKeys?.IsCommon(k) == true);
+            }).ToArray());
+        // Cached only while a Bind runs (_commonKeys is set for it): outside one the common keys may differ.
+        if (_prepared is not null && _commonKeys is not null) _prepared[use] = p;
+        return p;
     }
 
     internal static int Score(PipelineOnlyTable table, TableUse use) => Evidence(table, use).Score;
@@ -641,6 +678,9 @@ public static class QblPipelineOnlyBinder
             lock (_keys) _keys[key] = has;
             return has;
         }
+
+        public bool HasNormalized(string wanted, string compact) =>
+            ByLabel.ContainsKey(wanted) || ByCompact.ContainsKey(compact) || AddressParts.Contains(compact);
     }
 
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<PipelineOnlyTable, TableIndex> Indexes = new();
@@ -870,6 +910,8 @@ public static class QblPipelineOnlyBinder
     // ------------------------------------------------------------------------------------------------------------ synthetic app
 
     private static string TableRef(PipelineOnlyTable table) => $"$Table_PB_{table.Id}";
+
+    private static readonly Regex PbTableRef = new(@"\$Table_PB_(\d+)", RegexOptions.Compiled);
 
     /// <summary>The Quickbase ids of address parts. Quickbase gives an Address field's six parts the next six field ids
     /// (Address 37 → Street 1 38, Street 2 39, City 40, State 41, Postal Code 42, Country 43); PowerBase keeps them inside the
