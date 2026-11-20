@@ -20,6 +20,7 @@ public sealed class QbmValidator(IQuickBaseClient client, ITenantConnectionFacto
     private const int MaxIssuesPerTable = 500;
     private readonly QbUserParentIndexes _userParents = new(client);
     private readonly QbmParentKeyCache _parentKeys = new(pb.ParentKeyMapAsync);
+    private readonly QbKeyIndexes _selfKeys = new(client);
 
     public sealed record TableResult(int Records, int Compared, int Mismatches, int Missing, int Extra, int NotEncrypted, IReadOnlyList<QbIssue> Issues)
     {
@@ -44,7 +45,7 @@ public sealed class QbmValidator(IQuickBaseClient client, ITenantConnectionFacto
         var fieldsByFid = ctx.PbFields.Where(f => f.Fid.HasValue).ToDictionary(f => f.Fid!.Value);
         var columns = loaded.Select(m => PhysicalNaming.ColumnName(m.PbFid!.Value)).Distinct().ToList();
         var reader = new QbChunkReader(client);
-        var lookups = new QbmLookupLoader(pb, _userParents, _parentKeys);
+        var lookups = new QbmLookupLoader(pb, _userParents, _parentKeys, _selfKeys);
 
         foreach (var range in picked)
         {

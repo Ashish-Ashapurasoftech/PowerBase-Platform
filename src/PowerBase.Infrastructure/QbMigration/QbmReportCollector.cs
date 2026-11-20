@@ -11,7 +11,7 @@ namespace PowerBase.Infrastructure.QbMigration;
 /// number of records holding a file in attachment fields that were not migrated.</summary>
 public sealed class QbmReportCollector(ITenantConnectionFactory tenant, Func<SqlConnection> control, IQuickBaseClient quickBase)
 {
-    private const int Timeout = 600;
+    private const int Timeout = 1800; // the issue log of a big app holds millions of rows; every report query over it gets 30 minutes
 
     public async Task<QbmReport> CollectAsync(long runId, long tenantId, IReadOnlyList<QbmReport.DeadLetter> deadLetters, int rowCap = 200_000,
         CancellationToken ct = default)
@@ -122,7 +122,7 @@ public sealed class QbmReportCollector(ITenantConnectionFactory tenant, Func<Sql
             new { cap = rowCap, chosenIds, valueCodes }, commandTimeout: Timeout, cancellationToken: ct)))
             .Select(ToIssue).ToList();
         var notFound = (await conn.QueryAsync<string>(new CommandDefinition(
-            "SELECT DISTINCT Message FROM qbm.Issue WHERE RunId IN @runIds AND Code = 'QBM_TABLE_NOT_FOUND'", new { runIds }, cancellationToken: ct)))
+            "SELECT DISTINCT Message FROM qbm.Issue WHERE RunId IN @runIds AND Code = 'QBM_TABLE_NOT_FOUND'", new { runIds }, commandTimeout: Timeout, cancellationToken: ct))) // scans every issue row of the app (millions); SQL's 30 s default timed the report out
             .Select(m => m.Split('\'') is { Length: > 2 } p ? p[1] : m)
             .Where(name => !chosen.Any(c => string.Equals(c.QbTableName, name, StringComparison.OrdinalIgnoreCase)))
             .Distinct().ToList();

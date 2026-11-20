@@ -59,7 +59,9 @@ public sealed class Commands(Composition c)
         // Order only matters for references translated through a parent key; tables in a cycle of those are blocked.
         // A user field that is a relationship's key is matched against QuickBase directly, so it adds no load order.
         var userReferences = matched.SelectMany(m => m.Fields.Where(QbUserReferenceResolver.IsUserReference).Select(f => (m.Pb.Id, f.PbFid!.Value))).ToHashSet();
-        var byKey = references.Where(r => r.ParentKey.Fid != QbSystemFids.RecordId && !userReferences.Contains((r.ChildTableId, r.ReferenceFid))).ToList();
+        // A table pointing at itself by key (Client Weeks) is matched against QuickBase's keys too (QbKeyIndex), so it adds no load order either.
+        var byKey = references.Where(r => r.ParentKey.Fid != QbSystemFids.RecordId && !userReferences.Contains((r.ChildTableId, r.ReferenceFid))
+                                          && r.ParentTableId != r.ChildTableId).ToList();
         var mappedTables = matched.ToDictionary(m => m.Pb.Id, m => (QbTableId: m.Qb.Id, m.Pb.Name));
         var (tiers, cyclic) = QbTierPlanner.Plan(matched.Select(m => m.Pb.Id), byKey.Select(r => (r.ChildTableId, r.ParentTableId)));
         foreach (var (qt, pt, mappings) in matched)
@@ -69,10 +71,13 @@ public sealed class Commands(Composition c)
             if (cyclic.Contains(pt.Id))
                 problems.Add(new("error", "QBM_KEY_REFERENCE_CYCLE", $"'{pt.Name}' is in a cycle of references matched by parent key; load order can't be decided."));
             problems.AddRange((await ResolveUserReferencesAsync(mappings, pt.Id, references, mappedTables, pb, fieldCache, ct)).Problems);
+            // The self-key link needs its key field loaded, to read the keys from QuickBase.
+            foreach (var r in references.Where(r => r.ChildTableId == pt.Id && r.ParentTableId == pt.Id && r.ParentKey.Fid != QbSystemFids.RecordId
+                                                    && !userReferences.Contains((r.ChildTableId, r.ReferenceFid))))
+                if (!mappings.Any(m => m.Action == QbFieldAction.Load && m.PbFid == r.ParentKey.Fid))
+                    problems.Add(new("error", "QBM_SELF_KEY_REFERENCE", $"Field {r.ReferenceFid} references its own table by key '{r.ParentKey.Label ?? r.ParentKey.Name}', which is not loaded from QuickBase; the links can't be matched."));
             foreach (var r in byKey.Where(r => r.ChildTableId == pt.Id))
             {
-                if (r.ParentTableId == pt.Id)
-                    problems.Add(new("error", "QBM_SELF_KEY_REFERENCE", $"Field {r.ReferenceFid} references its own table by key; not supported in the POC."));
                 if (r.ParentKey.IsEncrypted)
                     problems.Add(new("error", "QBM_ENCRYPTED_PARENT_KEY", $"Field {r.ReferenceFid}: the parent key field is encrypted, so it can't be matched."));
             }

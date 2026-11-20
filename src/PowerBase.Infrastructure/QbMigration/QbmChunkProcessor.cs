@@ -28,6 +28,7 @@ public sealed class QbmChunkProcessor(
     // Parent tables of user-keyed references are read from QuickBase once for the whole process, not once per chunk.
     private readonly QbUserParentIndexes _userParents = new(client);
     private readonly QbmParentKeyCache _parentKeys = new(pb.ParentKeyMapAsync);
+    private readonly QbKeyIndexes _selfKeys = new(client); // a table that points at itself by key (Client Weeks)
 
     public async Task<Outcome> ProcessAsync(QbmTableContext ctx, long chunkId, QbRange range, CancellationToken ct = default)
     {
@@ -50,7 +51,7 @@ public sealed class QbmChunkProcessor(
                 throw new InvalidOperationException($"Chunk {chunkId} timed out and can't be split further.", ex);
             }
 
-            var lookups = await new QbmLookupLoader(pb, _userParents, _parentKeys).LoadAsync(ctx, rows, ct);
+            var lookups = await new QbmLookupLoader(pb, _userParents, _parentKeys, _selfKeys).LoadAsync(ctx, rows, ct);
             var transformer = new QbValueTransformer(ctx.Mappings, lookups, ctx.Options, ctx.ReferencesByKey.Keys.ToList());
             var issues = new List<QbIssue>();
             var transformed = rows.Select(r => transformer.Transform(r, issues)).ToList();

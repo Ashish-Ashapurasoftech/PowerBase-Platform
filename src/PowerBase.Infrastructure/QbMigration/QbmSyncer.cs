@@ -10,6 +10,7 @@ public sealed class QbmSyncer(IQuickBaseClient client, QbmChunkLoader loader, Qb
 {
     private readonly QbUserParentIndexes _userParents = new(client);
     private readonly QbmParentKeyCache _parentKeys = new(pb.ParentKeyMapAsync);
+    private readonly QbKeyIndexes _selfKeys = new(client);
 
     /// <summary>Records written per transaction.</summary>
     public const int BatchSize = 2_000;
@@ -101,7 +102,7 @@ public sealed class QbmSyncer(IQuickBaseClient client, QbmChunkLoader loader, Qb
     private async Task<int> WriteAsync(QbmTableContext ctx, List<QbRow> rows, bool dryRun, CancellationToken ct)
     {
         if (rows.Count == 0 || dryRun) return rows.Count;
-        var lookups = await new QbmLookupLoader(pb, _userParents, _parentKeys).LoadAsync(ctx, rows, ct);
+        var lookups = await new QbmLookupLoader(pb, _userParents, _parentKeys, _selfKeys).LoadAsync(ctx, rows, ct);
         var transformer = new QbValueTransformer(ctx.Mappings, lookups, ctx.Options, ctx.ReferencesByKey.Keys.ToList());
         var issues = new List<QbIssue>();
         var transformed = rows.Select(r => transformer.Transform(r, issues)).ToList();

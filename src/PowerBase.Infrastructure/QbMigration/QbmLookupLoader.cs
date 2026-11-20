@@ -5,7 +5,8 @@ namespace PowerBase.Infrastructure.QbMigration;
 
 /// <summary>Loads, for one chunk of QuickBase rows, the PowerBase user ids and parent record ids the transformer needs.
 /// Used by the loader and by validation, so both resolve values the same way.</summary>
-public sealed class QbmLookupLoader(QbmPowerBaseReader pb, QbUserParentIndexes? userParents = null, QbmParentKeyCache? parentKeys = null)
+public sealed class QbmLookupLoader(QbmPowerBaseReader pb, QbUserParentIndexes? userParents = null, QbmParentKeyCache? parentKeys = null,
+    QbKeyIndexes? selfKeys = null)
 {
     /// <summary>Users and parent keys the chunk refers to, fetched in one go per chunk.</summary>
     public async Task<IQbValueLookups> LoadAsync(QbmTableContext ctx, IReadOnlyList<QbRow> rows, CancellationToken ct)
@@ -23,6 +24,14 @@ public sealed class QbmLookupLoader(QbmPowerBaseReader pb, QbUserParentIndexes? 
         var references = new Dictionary<int, IReadOnlyDictionary<string, long>>();
         foreach (var (pbFid, rel) in ctx.ReferencesByKey)
         {
+            // A table pointing at itself by key: its parent may not be loaded yet, so the keys come from QuickBase (see QbKeyIndex).
+            if (selfKeys is not null && rel.ParentTableId == ctx.PbTable.Id)
+            {
+                var keyMapping = ctx.Mappings.FirstOrDefault(m => m.Action == QbFieldAction.Load && m.PbFid == rel.ParentKey.Fid)
+                    ?? throw new InvalidOperationException($"'{ctx.PbTable.Name}' points at itself by key '{rel.ParentKey.Label ?? rel.ParentKey.Name}', which is not a loaded field; its links can't be matched.");
+                references[pbFid] = await selfKeys.GetAsync(new QbKeyIndexSpec(ctx.QbTableId, keyMapping.Qb.Id));
+                continue;
+            }
             // The parent's keys are read once for the process; asking per chunk scans the parent every time (see QbmParentKeyCache).
             if (parentKeys is not null)
             {
