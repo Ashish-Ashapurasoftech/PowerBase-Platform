@@ -83,6 +83,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
             ShowBuiltInFields = @showBuiltInFields,
             SaveOptions      = @saveOptions,
             IsQuickPeekForm  = ISNULL(@isQuickPeekForm, IsQuickPeekForm),
+            IsQuickPeekDefault = CASE WHEN @isQuickPeekForm = 0 THEN 0 ELSE IsQuickPeekDefault END,
             ModifiedOn       = SYSUTCDATETIME(),
             ModifiedBy       = @modifiedBy
         WHERE PublicId  = @publicId
@@ -112,6 +113,8 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
     private const string SetQuickPeekFormSql = """
         UPDATE meta.Form
         SET IsQuickPeekForm = @enabled,
+            -- Un-flagging also drops the default flag (the caller then promotes another Quick Peek form, if any).
+            IsQuickPeekDefault = CASE WHEN @enabled = 1 THEN IsQuickPeekDefault ELSE 0 END,
             AutoAddNewFields = CASE WHEN @enabled = 1 THEN 0 ELSE AutoAddNewFields END,
             ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
         WHERE PublicId = @formPublicId AND IsDeleted = 0
@@ -152,6 +155,16 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         SET IsQuickPeekForm = 1, IsQuickPeekDefault = 1, AutoAddNewFields = 0,
             ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
         WHERE PublicId = @formPublicId AND IsDeleted = 0
+        """;
+
+    /// <summary>After the default Quick Peek form is removed: the next Quick Peek form on the table (by display order)
+    /// becomes the default. With none left the table simply has no Quick Peek form.</summary>
+    private const string PromoteNextQuickPeekDefaultSql = """
+        UPDATE meta.Form
+        SET IsQuickPeekDefault = 1, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+        WHERE Id = (SELECT TOP 1 Id FROM meta.Form
+                    WHERE AppTableId = @appTableId AND IsQuickPeekForm = 1 AND IsDeleted = 0 AND PublicId <> @formPublicId
+                    ORDER BY DisplayOrder, Id)
         """;
 
     private const string HasQuickPeekDefaultSql = """
@@ -457,8 +470,10 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
 
     private sealed record QuickPeekState(long AppTableId, bool IsQuickPeekForm, bool IsQuickPeekDefault);
 
-    private static BadRequestException DefaultQuickPeekLocked() => new("QUICK_PEEK_DEFAULT_LOCKED",
-        "The default Quick Peek form cannot be removed. Make another Quick Peek form the default first.");
+    private async Task PromoteNextQuickPeekDefaultAsync(System.Data.Common.DbConnection conn, System.Data.Common.DbTransaction tx,
+        long appTableId, Guid formPublicId, CancellationToken ct) =>
+        await conn.ExecuteAsync(new CommandDefinition(PromoteNextQuickPeekDefaultSql,
+            new { appTableId, formPublicId, modifiedBy = QueryContext.UserId }, transaction: tx, cancellationToken: ct));
 
     private async Task MakeQuickPeekDefaultAsync(System.Data.Common.DbConnection conn, System.Data.Common.DbTransaction tx,
         long appTableId, Guid formPublicId, CancellationToken ct)
@@ -481,8 +496,6 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                 new CommandDefinition(GetQuickPeekStateSql, new { formPublicId = publicId }, transaction: tx, cancellationToken: ct))
                 ?? throw new NotFoundException("Form", publicId);
 
-            // Like the main default form, the default Quick Peek form can't be un-flagged.
-            if (isQuickPeekForm == false && state.IsQuickPeekDefault) throw DefaultQuickPeekLocked();
 
             var rows = await conn.ExecuteAsync(
                 new CommandDefinition(UpdateSettingsSql, new
@@ -496,6 +509,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
             {
                 await conn.ExecuteAsync(new CommandDefinition(ClearReportQuickPeekPinsSql,
                     new { formPublicId = publicId }, transaction: tx, cancellationToken: ct));
+                if (state.IsQuickPeekDefault) await PromoteNextQuickPeekDefaultAsync(conn, tx, state.AppTableId, publicId, ct);
             }
             else if (isQuickPeekForm != false)
             {
@@ -1019,11 +1033,12 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
             }
             else
             {
-                if (state.IsQuickPeekDefault) throw DefaultQuickPeekLocked();
                 await conn.ExecuteAsync(new CommandDefinition(SetQuickPeekFormSql,
                     new { formPublicId, enabled = false, modifiedBy = QueryContext.UserId }, transaction: tx, cancellationToken: ct));
                 await conn.ExecuteAsync(new CommandDefinition(ClearReportQuickPeekPinsSql,
                     new { formPublicId }, transaction: tx, cancellationToken: ct));
+                // Removing the default Quick Peek form is allowed: the next Quick Peek form (if any) takes over.
+                if (state.IsQuickPeekDefault) await PromoteNextQuickPeekDefaultAsync(conn, tx, state.AppTableId, formPublicId, ct);
             }
             await tx.CommitAsync(ct);
         }

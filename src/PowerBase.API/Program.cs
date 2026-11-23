@@ -673,6 +673,8 @@ builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateRe
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateProxyField.UpdateProxyFieldCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateParentLink.UpdateParentLinkCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.AddFormSection.AddRelationshipFormSectionCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateLookupSource.UpdateLookupSourceCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetLookupSourceOptionsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.RelationshipFieldFactory>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.RelationshipKeyCarryOverService>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.IReferenceRelinkService, PowerBase.Application.Relationships.ReferenceRelinkService>();
