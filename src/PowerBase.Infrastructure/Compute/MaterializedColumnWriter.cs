@@ -323,7 +323,12 @@ public static class MaterializedColumnWriter
     private static async Task FillEncryptedSummaryValuesAsync(SqlConnection connection, SummaryPlan plan, string sqlType, long[] ids,
         ComputeSchema schema, ComputeDecryptor decryptor, CancellationToken ct)
     {
-        var childFields = schema.FieldsOf(plan.ChildTableId);
+        // Only the columns the summary reads (the reference, the target, the criteria fields): a child table can have millions of rows and
+        // dozens of long encrypted text columns, so reading every column of every child of a batch runs the worker out of memory.
+        var needed = new HashSet<int> { plan.ReferenceFid };
+        if (plan.TargetFid is int tf) needed.Add(tf);
+        CollectCriteriaFids(plan.Filter, needed);
+        var childFields = schema.FieldsOf(plan.ChildTableId).Where(f => f.Fid is int fid && needed.Contains(fid)).ToList();
         var refCol = PhysicalNaming.ColumnName(plan.ReferenceFid);
         // A chained target (a stored calculated field of the child) is read from its c_ column under its f_ name, as a plain field of its value type.
         var aggregateFields = childFields.ToList();
@@ -345,28 +350,51 @@ public static class MaterializedColumnWriter
             WHERE c.IsDeleted = 0 AND c.{refCol} BETWEEN @lo AND @hi AND c.{refCol} IN {IdsInSql}
             ORDER BY c.Id
             """;
-        var rows = await ReadRowsAsync(connection, sql, new { ids = JsonSerializer.Serialize(ids), lo = ids.Min(), hi = ids.Max() }, ct);
-        await decryptor.DecryptRowsAsync(connection, plan.DecryptAppId!.Value, rows, PhysicalFields(childFields), ct);
 
-        var keys = ids.ToDictionary(id => id.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        var aggregated = PowerBase.Application.Relationships.EncryptedSummaryAggregator.Aggregate(
-            rows.Select(r => (IReadOnlyDictionary<string, object?>)(Dictionary<string, object?>)r).ToList(),
-            aggregateFields, plan.Function, plan.ReferenceFid, plan.TargetFid, plan.TargetSubField,
-            keys.Keys.ToHashSet(), plan.Filter, options: null, format: v => Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture));
-
+        // Parents a few at a time: a parent's children are always read together (the aggregate needs all of them), but a batch of
+        // thousands of parents over a table of millions of children never sits in memory at once.
         var values = new List<(long Id, object? Value)>(ids.Length);
-        foreach (var (key, id) in keys)
+        foreach (var chunk in ids.Chunk(EncryptedSummaryParentsPerRead))
         {
-            object? value = aggregated.TryGetValue(key, out var v) ? v : null;
-            value ??= plan.Function switch
+            var rows = await ReadRowsAsync(connection, sql, new { ids = JsonSerializer.Serialize(chunk), lo = chunk.Min(), hi = chunk.Max() }, ct);
+            await decryptor.DecryptRowsAsync(connection, plan.DecryptAppId!.Value, rows, PhysicalFields(childFields), ct);
+
+            var keys = chunk.ToDictionary(id => id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            var aggregated = PowerBase.Application.Relationships.EncryptedSummaryAggregator.Aggregate(
+                rows.Select(r => (IReadOnlyDictionary<string, object?>)(Dictionary<string, object?>)r).ToList(),
+                aggregateFields, plan.Function, plan.ReferenceFid, plan.TargetFid, plan.TargetSubField,
+                keys.Keys.ToHashSet(), plan.Filter, options: null, format: v => Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture));
+            rows.Clear();
+
+            foreach (var (key, id) in keys)
             {
-                SummaryFunctions.Count or SummaryFunctions.DistinctCount => 0,
-                SummaryFunctions.Exists => false,
-                _ => null
-            };
-            values.Add((id, value));
+                object? value = aggregated.TryGetValue(key, out var v) ? v : null;
+                value ??= plan.Function switch
+                {
+                    SummaryFunctions.Count or SummaryFunctions.DistinctCount => 0,
+                    SummaryFunctions.Exists => false,
+                    _ => null
+                };
+                values.Add((id, value));
+            }
         }
         await CopyValuesAsync(connection, sqlType, values, ct);
+    }
+
+    /// <summary>Parents whose children are read (and decrypted) in one go by an encrypted summary.</summary>
+    internal const int EncryptedSummaryParentsPerRead = 100;
+
+    /// <summary>Every field a criteria tree reads (the field it filters on and the one it compares to).</summary>
+    private static void CollectCriteriaFids(PowerBase.Application.Reports.FilterGroup? group, HashSet<int> into)
+    {
+        if (group is null) return;
+        foreach (var node in group.Nodes)
+        {
+            if (node.Group is { } sub) CollectCriteriaFids(sub, into);
+            if (node.Condition is not { } c) continue;
+            into.Add((int)c.FieldId);
+            if (c.ValueFieldId is long other) into.Add((int)other);
+        }
     }
 
     /// <summary>The table's own stored (non-calculated) fields: the only columns that can hold ciphertext.</summary>
