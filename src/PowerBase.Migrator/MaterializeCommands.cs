@@ -8,6 +8,7 @@ namespace PowerBase.Migrator;
 ///   materialize --id N on    --field ID       switch a field on (the worker checks the rules, builds it, then keeps it up to date)
 ///   materialize --id N off   --field ID       switch it off (reads use the dynamic path; the c_ column stays until a clean-up drops it)
 ///   materialize --id N reset --field ID       a Failed field back to "not built", so the worker tries again
+///   materialize --id N why [tableId]          why fields cannot be stored (the worker's rules, run now), with counts per reason
 /// Which fields to switch on is a product decision (design open question Q3); nothing is switched on automatically.
 /// </summary>
 public static class MaterializeCommands
@@ -21,6 +22,9 @@ public static class MaterializeCommands
         {
             case ["status"]:
                 await StatusAsync(conn);
+                return 0;
+            case ["why", ..] when rest.Length <= 2:
+                await WhyAsync(tenantConnectionString, rest.Length == 2 && long.TryParse(rest[1], out var t) ? t : null);
                 return 0;
             case [var action and ("on" or "off" or "reset"), "--field", var idText] when long.TryParse(idText, out var fieldId):
                 var sql = action switch
@@ -38,9 +42,36 @@ public static class MaterializeCommands
                 }
                 return 0;
             default:
-                Console.WriteLine("Usage: materialize --id N status | on --field ID | off --field ID | reset --field ID");
+                Console.WriteLine("Usage: materialize --id N status | why [tableId] | on --field ID | off --field ID | reset --field ID");
                 return 1;
         }
+    }
+
+    private sealed class Connections(string cs) : PowerBase.Infrastructure.Persistence.ITenantConnectionFactory
+    {
+        public Task<SqlConnection> CreateAsync(CancellationToken ct = default) => Task.FromResult(new SqlConnection(cs));
+    }
+
+    /// <summary>
+    /// Why fields cannot be stored: the worker's own rules (ComputeModel) run on the tenant's metadata right now, so the answer is current
+    /// even for fields marked Not allowed long ago. Prints the reasons with their counts, then each refused field (optionally one table).
+    /// </summary>
+    private static async Task WhyAsync(string tenantConnectionString, long? tableId)
+    {
+        var context = new PowerBase.Infrastructure.Services.QueryContext();
+        var schema = await new PowerBase.Infrastructure.Compute.ComputeSchemaRepository(new Connections(tenantConnectionString), context).LoadAsync();
+        var model = new PowerBase.Infrastructure.Compute.ComputeModel(schema);
+        var refused = model.Decisions.Values
+            .Where(d => d.Decision.Outcome != PowerBase.Application.Compute.MaterializeOutcome.Allowed)
+            .Where(d => tableId is null || d.Field.AppTableId == tableId)
+            .ToList();
+        static string Kind(string? reason) => System.Text.RegularExpressions.Regex.Replace(reason ?? "(none)", "'[^']*'", "'…'");
+        Console.WriteLine($"{refused.Count} field(s) cannot be stored{(tableId is null ? "" : $" in table {tableId}")}. Reasons:");
+        foreach (var g in refused.GroupBy(d => Kind(d.Decision.Reason)).OrderByDescending(g => g.Count()))
+            Console.WriteLine($"{g.Count(),6}  {g.Key}");
+        Console.WriteLine();
+        foreach (var d in refused.OrderBy(d => d.Field.AppTableId).ThenBy(d => d.Field.Fid))
+            Console.WriteLine($"{d.Field.Id,8} t{d.Field.AppTableId,-5} fid {d.Field.Fid,-5} {d.Field.TypeCode,-16} {d.Field.Name,-30} {d.Decision.Reason}");
     }
 
     private static async Task StatusAsync(SqlConnection conn)
