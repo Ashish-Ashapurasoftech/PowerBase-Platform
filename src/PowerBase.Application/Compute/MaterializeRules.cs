@@ -23,26 +23,31 @@ public enum MaterializeOutcome
 }
 
 /// <summary>What the writer does for one stored field.</summary>
-public abstract record MaterializePlan(long TableId, int Fid, long FieldId)
+/// <param name="DecryptAppId">Set when a column the field reads holds ciphertext: the app whose key decrypts it. The worker then reads the
+/// rows, decrypts them, works the value out in C# and stores it as plain text in c_ (never encrypted, so it sorts and filters in SQL).</param>
+public abstract record MaterializePlan(long TableId, int Fid, long FieldId, long? DecryptAppId = null)
 {
     public FieldKey Key => new(TableId, Fid);
 }
 
 /// <summary>child.c_L = parent.f_Source through child.f_Ref (a deleted parent gives NULL), exactly as LookupColumnExpr reads it.</summary>
-public sealed record LookupPlan(long ChildTableId, int LookupFid, long FieldId, int ReferenceFid, long ParentTableId, int SourceFid, string SourceColumn)
-    : MaterializePlan(ChildTableId, LookupFid, FieldId);
+public sealed record LookupPlan(long ChildTableId, int LookupFid, long FieldId, int ReferenceFid, long ParentTableId, int SourceFid, string SourceColumn,
+    long? DecryptAppId = null)
+    : MaterializePlan(ChildTableId, LookupFid, FieldId, DecryptAppId);
 
 /// <summary>parent.c_S = aggregate over live children (child.f_Ref = parent.Id) matching the criteria, exactly as AggregateByReferenceAsync.
-/// <paramref name="TargetIsStored"/>: the target is itself a stored calculated field (a chain): its c_ column is aggregated.</summary>
+/// <paramref name="TargetIsStored"/>: the target is itself a stored calculated field (a chain): its c_ column is aggregated.
+/// With <paramref name="DecryptAppId"/> (the target or the criteria read ciphertext) the children are decrypted and aggregated in C# by
+/// EncryptedSummaryAggregator, exactly as the dynamic read of an encrypted summary does.</summary>
 public sealed record SummaryPlan(long ParentTableId, int SummaryFid, long FieldId, long ChildTableId, int ReferenceFid, string Function,
-    int? TargetFid, string? TargetSubField, FilterGroup? Filter, bool TargetIsStored = false)
-    : MaterializePlan(ParentTableId, SummaryFid, FieldId);
+    int? TargetFid, string? TargetSubField, FilterGroup? Filter, bool TargetIsStored = false, long? DecryptAppId = null)
+    : MaterializePlan(ParentTableId, SummaryFid, FieldId, DecryptAppId);
 
 /// <summary>row.c_F = the formula evaluated in C# (the API's formula engine) from the row's own fields and the stored values of the calculated
 /// fields it reads (<paramref name="StoredReads"/>). <paramref name="IsUnique"/>: enforced by a filtered UNIQUE index and computed in the save.</summary>
 public sealed record FormulaPlan(long FormulaTableId, int FormulaFid, long FieldId, string Expression, PowerBase.Formula.Types.FormulaType ResultType,
-    IReadOnlyList<int> PhysicalReads, IReadOnlyList<int> StoredReads, bool IsUnique)
-    : MaterializePlan(FormulaTableId, FormulaFid, FieldId);
+    IReadOnlyList<int> PhysicalReads, IReadOnlyList<int> StoredReads, bool IsUnique, long? DecryptAppId = null)
+    : MaterializePlan(FormulaTableId, FormulaFid, FieldId, DecryptAppId);
 
 public sealed record MaterializeDecision(MaterializeOutcome Outcome, string? Reason, MaterializePlan? Plan)
 {
@@ -55,7 +60,8 @@ public sealed record MaterializeDecision(MaterializeOutcome Outcome, string? Rea
 /// Which fields may keep a stored column (design section 8.1). Deliberately conservative: a field is stored only when the set-based SQL
 /// produces exactly the value today's dynamic path shows. Anything in doubt is refused and simply stays on the dynamic path, which is
 /// always correct. Never stored: Today()/Now()/User()/UserRoles()/GetRecords-family formulas, current-user or relative-date criteria,
-/// fields reading encrypted data, fields in a dependency cycle, and (in this version) fields reading other calculated fields.
+/// fields in a dependency cycle, and fields reading calculated fields that are not stored themselves. Encrypted data IS stored: the worker
+/// decrypts what it reads (plan.DecryptAppId) and keeps the computed value as plain text in c_, so it sorts and filters in SQL.
 /// </summary>
 public static class MaterializeRules
 {
@@ -133,8 +139,7 @@ public static class MaterializeRules
             return MaterializeDecision.Deny($"{field.TypeCode} fields have no value to store.");
         if (inCycle?.Contains(new FieldKey(field.AppTableId, fid)) == true)
             return MaterializeDecision.Deny("The field is part of a dependency cycle.");
-        if (schema.IsAppEncrypted(field.AppTableId) || field.IsEncrypted)
-            return MaterializeDecision.Deny("The field's app is encrypted; a stored value would have to be encrypted too and could not be sorted.");
+        // An encrypted app (or a field flagged encrypted) is NOT refused: what it reads is decrypted by the worker, and the value is stored plain.
 
         if (field.TypeCode == "Lookup") return EvaluateLookup(field, fid, schema);
         if (field.TypeCode == "Summary") return EvaluateSummary(field, fid, schema);
@@ -158,12 +163,13 @@ public static class MaterializeRules
         var byFid = schema.FieldsByFid(field.AppTableId);
         var physical = new List<int>();
         var stored = new List<int>();
+        var readsCiphertext = false;
         foreach (var read in info.Reads.Distinct())
         {
             if (read == fid) continue;
             if (read is >= 1 and <= 5) { physical.Add((int)read); continue; }   // system fields (Record ID#, dates, users)
             if (!byFid.TryGetValue(read, out var input)) return MaterializeDecision.Deny("The formula reads a field that no longer exists.");
-            if (input.IsEncrypted) return MaterializeDecision.Deny("The formula reads an encrypted field.");
+            if (schema.StoresCiphertext(input)) readsCiphertext = true;
             if (PhysicalNaming.IsComputedTypeCode(input.TypeCode))
             {
                 if (!IsStoredChainInput(input))
@@ -178,8 +184,13 @@ public static class MaterializeRules
         // Design section 5: a unique formula must be computable inside the save, from the record alone.
         if (field.IsUnique && stored.Count > 0)
             return MaterializeDecision.Deny("A unique formula may only read fields of the same record (not lookups, summaries or other formulas).");
+        // The save computes a unique formula from the values it writes, and in an encrypted app those are already ciphertext there.
+        if (field.IsUnique && readsCiphertext)
+            return MaterializeDecision.Deny("A unique formula that reads encrypted fields is worked out on read (the save only has their ciphertext).");
 
-        return MaterializeDecision.Allow(new FormulaPlan(field.AppTableId, fid, field.Id, info.Expression, info.ResultType, physical, stored, field.IsUnique));
+        var decryptApp = readsCiphertext ? schema.AppIdOf(field.AppTableId) : null;
+        return MaterializeDecision.Allow(new FormulaPlan(field.AppTableId, fid, field.Id, info.Expression, info.ResultType, physical, stored, field.IsUnique,
+            decryptApp));
     }
 
     internal static string? FormulaExpression(string? settingsJson)
@@ -203,19 +214,20 @@ public static class MaterializeRules
             return MaterializeDecision.Deny("The lookup's settings are incomplete.");
         if (!string.IsNullOrWhiteSpace(s.SourceSubField))
             return MaterializeDecision.Deny("Lookups of an Address part are not stored in this version.");
-        if (schema.Field(field.AppTableId, refFid) is not { TypeCode: "Reference" } reference || reference.IsEncrypted)
+        // A Reference column is never encrypted (it holds the parent's Record ID#), in an encrypted app too.
+        if (schema.Field(field.AppTableId, refFid) is not { TypeCode: "Reference" })
             return MaterializeDecision.Deny("The lookup's reference field is missing.");
         if (!schema.TableExists(parentId)) return MaterializeDecision.Deny("The lookup's parent table is missing.");
-        if (schema.IsAppEncrypted(parentId)) return MaterializeDecision.Deny("The lookup reads an encrypted app.");
 
         string column;
+        long? decryptApp = null;
         if (SystemColumns.TryGetValue(sourceFid, out var systemColumn))
             column = systemColumn;
         else
         {
             var source = schema.Field(parentId, sourceFid);
             if (source is null) return MaterializeDecision.Deny("The lookup's source field is missing.");
-            if (source.IsEncrypted) return MaterializeDecision.Deny("The lookup reads an encrypted field.");
+            if (schema.StoresCiphertext(source)) decryptApp = schema.AppIdOf(parentId);
             if (PhysicalNaming.IsComputedTypeCode(source.TypeCode))
             {
                 // A chain: the parent's own stored value, when it is stored and exact.
@@ -231,7 +243,7 @@ public static class MaterializeRules
             }
         }
 
-        return MaterializeDecision.Allow(new LookupPlan(field.AppTableId, fid, field.Id, refFid, parentId, sourceFid, column));
+        return MaterializeDecision.Allow(new LookupPlan(field.AppTableId, fid, field.Id, refFid, parentId, sourceFid, column, decryptApp));
     }
 
     private static MaterializeDecision EvaluateSummary(AppField field, int fid, ComputeSchema schema)
@@ -243,12 +255,12 @@ public static class MaterializeRules
         if (function == SummaryFunctions.CombinedText)
             return MaterializeDecision.Deny("Combined Text summaries are not stored (long text, ordering rules).");
         if (!schema.TableExists(childId)) return MaterializeDecision.Deny("The summary's child table is missing.");
-        if (schema.IsAppEncrypted(childId)) return MaterializeDecision.Deny("The summary reads an encrypted app.");
         if (schema.Field(childId, refFid) is not { TypeCode: "Reference" })
             return MaterializeDecision.Deny("The summary's reference field is missing.");
 
         var childFields = schema.FieldsByFid(childId);
         var targetIsStored = false;
+        var readsCiphertext = false;
         if (s.TargetFid is int targetFid && childFields.TryGetValue(targetFid, out var chained) && PhysicalNaming.IsComputedTypeCode(chained.TypeCode))
         {
             // A chain (e.g. Sum of the children's "Sum of Hours"): the children's own stored value, when it is stored and exact.
@@ -260,7 +272,7 @@ public static class MaterializeRules
         else if (s.TargetFid is int plainFid)
         {
             if (!childFields.TryGetValue(plainFid, out var target)) return MaterializeDecision.Deny("The summary's target field is missing.");
-            if (target.IsEncrypted) return MaterializeDecision.Deny("The summary reads an encrypted field.");
+            if (schema.StoresCiphertext(target)) readsCiphertext = true;
             if (target.TypeCode == "Reference") return MaterializeDecision.Deny("Summaries of a Reference (shown as its key) are not stored.");
             if (!string.IsNullOrWhiteSpace(s.TargetSubField))
                 return MaterializeDecision.Deny("Summaries of an Address part are not stored in this version.");
@@ -278,10 +290,28 @@ public static class MaterializeRules
             try { filter = JsonSerializer.Deserialize<FilterGroup>(s.FilterTree, FilterJson); }
             catch (JsonException) { return MaterializeDecision.Deny("The summary's criteria cannot be read."); }
             if (CriteriaProblem(filter, childFields) is { } problem) return MaterializeDecision.Deny(problem);
+            if (CriteriaReadCiphertext(filter, childFields, schema)) readsCiphertext = true;
         }
 
+        // Decrypted and aggregated in C#: a chained target is read from the children's c_ column there too (see the writer).
+        var decryptApp = readsCiphertext ? schema.AppIdOf(childId) : null;
         return MaterializeDecision.Allow(new SummaryPlan(field.AppTableId, fid, field.Id, childId, refFid, function, s.TargetFid,
-            s.TargetSubField, FilterGroup.NullIfEmpty(filter), targetIsStored));
+            s.TargetSubField, FilterGroup.NullIfEmpty(filter), targetIsStored, decryptApp));
+    }
+
+    /// <summary>True when a criteria condition reads a column that holds ciphertext (the field it filters on, or the one it compares to).</summary>
+    internal static bool CriteriaReadCiphertext(FilterGroup? group, IReadOnlyDictionary<long, AppField> childFields, ComputeSchema schema)
+    {
+        if (group is null) return false;
+        foreach (var node in group.Nodes)
+        {
+            if (node.Group is { } sub && CriteriaReadCiphertext(sub, childFields, schema)) return true;
+            if (node.Condition is not { } c) continue;
+            if (childFields.TryGetValue(c.FieldId, out var f) && schema.StoresCiphertext(f)) return true;
+            if (string.Equals(c.ValueMode?.Trim(), "field", StringComparison.OrdinalIgnoreCase) && c.ValueFieldId is long other
+                && childFields.TryGetValue(other, out var o) && schema.StoresCiphertext(o)) return true;
+        }
+        return false;
     }
 
     /// <summary>Null when every criteria condition can be evaluated from stored child values alone; otherwise why not.</summary>
@@ -312,7 +342,7 @@ public static class MaterializeRules
         if (fid is >= 1 and <= 5) return null;   // system fields are plain columns
         if (!childFields.TryGetValue(fid, out var f)) return "The criteria name a field that no longer exists.";
         if (PhysicalNaming.IsComputedTypeCode(f.TypeCode)) return "The criteria read a calculated field.";
-        if (f.IsEncrypted) return "The criteria read an encrypted field.";
+        // An encrypted field is fine: the worker decrypts the children and applies the criteria in C# (CriteriaReadCiphertext).
         if (f.TypeCode is "Reference" or "User" or "MultiUser")
             return $"The criteria read a {f.TypeCode} field, whose value is resolved per viewer or shown as a key.";
         return null;

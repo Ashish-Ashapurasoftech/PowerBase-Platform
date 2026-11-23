@@ -427,21 +427,22 @@ public class StoredFormulaAndChainTests : IClassFixture<ComputeSqlFixture>, IAsy
     }
 
     [Fact]
-    public async Task A_field_that_loses_its_stored_column_leaves_no_derived_values_behind_when_its_source_becomes_encrypted()
+    public async Task A_field_whose_source_is_switched_to_encrypted_stays_stored_and_is_rebuilt()
     {
         await Worker().Builder.BuildPendingAsync(_options, CancellationToken.None);
         await using var conn = await OpenAsync();
         (await conn.ExecuteScalarAsync<int>($"SELECT COUNT(c_12) FROM data.t_{Emp}")).Should().BeGreaterThan(0, "Annual = Salary x 12 is stored in plain text");
 
-        // The Salary field is switched to encrypted: a value derived from it may not stay in plain text in c_12.
+        // The Salary field is switched to encrypted. Stored values of encrypted data are kept PLAIN in c_ (that is what makes them sortable),
+        // so Annual stays stored: its column is rebuilt for the new definition and holds the same exact values.
         var salary = await conn.ExecuteScalarAsync<long>($"SELECT Id FROM meta.AppField WHERE AppTableId = {Emp} AND Fid = 7");
         await conn.ExecuteAsync("UPDATE meta.AppField SET IsEncrypted = 1 WHERE Id = @salary", new { salary });
         await FieldState().InvalidateAsync([salary], null);
         await Worker().Builder.BuildPendingAsync(_options, CancellationToken.None);
 
-        (await conn.ExecuteScalarAsync<byte>("SELECT MaterializeMode FROM meta.AppField WHERE Id = @_annual", new { _annual })).Should().Be(MaterializeModes.NotAllowed);
-        var columnStays = await conn.ExecuteScalarAsync<int?>($"SELECT COL_LENGTH('data.t_{Emp}', 'c_12')") is not null;
-        var leftover = columnStays ? await conn.ExecuteScalarAsync<int>($"SELECT COUNT(c_12) FROM data.t_{Emp}") : 0;
-        leftover.Should().Be(0,"Annual is derived from an encrypted field now: no plain-text copy may stay in the table");
+        (await conn.ExecuteScalarAsync<byte>("SELECT MaterializeMode FROM meta.AppField WHERE Id = @_annual", new { _annual })).Should().Be(MaterializeModes.On);
+        (await conn.ExecuteScalarAsync<byte>("SELECT MaterializeState FROM meta.AppField WHERE Id = @_annual", new { _annual })).Should().Be(MaterializeStates.Ready);
+        (await conn.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM data.t_{Emp} WHERE IsDeleted = 0 AND ISNULL(c_12, -1) <> ISNULL(f_7 * 12, -1)"))
+            .Should().Be(0, "a Number is never encrypted in its column, so Annual is still Salary x 12");
     }
 }

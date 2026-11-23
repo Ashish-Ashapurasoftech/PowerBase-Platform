@@ -45,6 +45,20 @@ public sealed class ComputeSchema
 
     public bool IsAppEncrypted(long tableId) => _appByTable.TryGetValue(tableId, out var appId) && _encryptedApps.Contains(appId);
 
+    /// <summary>The app the table belongs to; null for a table that is gone.</summary>
+    public long? AppIdOf(long tableId) => _appByTable.TryGetValue(tableId, out var appId) ? appId : null;
+
+    /// <summary>
+    /// Whether the field's column holds ciphertext, so the worker has to decrypt it before computing (the same rule as
+    /// FieldEncryptionContext.StoresCiphertext): every non-system, non-exempt field of an encrypted app, otherwise only a field flagged
+    /// IsEncrypted. Numbers, dates, booleans, references and users are never encrypted, so SQL reads them as they are.
+    /// </summary>
+    public bool StoresCiphertext(AppField field) =>
+        !field.IsSystem
+        && !PowerBase.Domain.Constants.PhysicalNaming.IsEncryptionExemptTypeCode(field.TypeCode)
+        && !PowerBase.Domain.Constants.PhysicalNaming.IsComputedTypeCode(field.TypeCode)
+        && (IsAppEncrypted(field.AppTableId) || field.IsEncrypted);
+
     public IReadOnlyDictionary<long, AppField> FieldsByFid(long tableId) =>
         FieldsOf(tableId).Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
 }

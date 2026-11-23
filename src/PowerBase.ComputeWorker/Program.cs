@@ -31,6 +31,12 @@ builder.Services.AddSingleton<ComputeWorkerCounters>();
 builder.Services.AddSingleton<ComputeModelCache>();
 // All DDL (the c_ columns) goes through the schema engine, as everywhere else.
 builder.Services.AddScoped<ISchemaEngineService, SchemaEngineService>();
+// Encrypted apps: what a stored field reads is decrypted with the API's own keys and cipher (Encryption:* settings, the same as the API's),
+// and the computed value is stored plain in c_.
+builder.Services.AddSingleton<AesEncryptionService>();
+builder.Services.AddSingleton<IEncryptionService>(sp =>
+    new CachedDekEncryptionService(sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<AesEncryptionService>()));
+builder.Services.AddScoped<ComputeDecryptor>();
 builder.Services.AddScoped<ComputeTableProcessor>();
 builder.Services.AddScoped<MaterializeBuilder>();
 builder.Services.AddScoped<MaterializedIndexMaintainer>();

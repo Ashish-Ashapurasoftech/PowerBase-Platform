@@ -22,9 +22,11 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
     private readonly ComputeTableProcessor _processor;
     private readonly ComputeSearchNotifier? _search;
     private readonly ILogger<MaterializeBuilder>? _logger;
+    private readonly ComputeDecryptor? _decryptor;
 
     public MaterializeBuilder(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, ISchemaEngineService schemaEngine,
-        ComputeModelCache models, ComputeTableProcessor processor, ILogger<MaterializeBuilder>? logger = null, ComputeSearchNotifier? search = null)
+        ComputeModelCache models, ComputeTableProcessor processor, ILogger<MaterializeBuilder>? logger = null, ComputeSearchNotifier? search = null,
+        ComputeDecryptor? decryptor = null)
         : base(connectionFactory, queryContext)
     {
         _search = search;
@@ -32,6 +34,7 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
         _models = models;
         _processor = processor;
         _logger = logger;
+        _decryptor = decryptor;
     }
 
     public sealed record FieldOutcome(long FieldId, int Fid, long TableId, string Outcome, long Rows, long Differences, TimeSpan Took, string? Reason = null);
@@ -176,7 +179,7 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
             await using (var guard = await DatabaseGuard.AcquireAsync(ConnectionFactory.CreateAsync, options, backgroundOnly: true, TimeSpan.FromMinutes(2), _logger, ct))
             {
                 if (guard is null) return Done("busy", reason: "No background compute slot was free.");
-                result = await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, v, new WriteScope.All(), model.Schema, options, reconcile: false, ct);
+                result = await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, v, new WriteScope.All(), model.Schema, options, reconcile: false, ct, _decryptor);
                 await ComputeTableProcessor.PropagateAsync(guard.Connection, model, plan, result, ct);
             }
 
@@ -245,7 +248,7 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
             if (sqlType is null) { outcomes.Add(new(field.Id, plan.Fid, plan.TableId, "missing-column", 0, 0, sw.Elapsed)); continue; }
             try
             {
-                var r = await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, field.MaterializeVersion, new WriteScope.All(), model.Schema, options, reconcile: true, ct);
+                var r = await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, field.MaterializeVersion, new WriteScope.All(), model.Schema, options, reconcile: true, ct, _decryptor);
                 await ComputeTableProcessor.PropagateAsync(guard.Connection, model, plan, r, ct);   // fixed values feed their stored dependents
                 outcomes.Add(new(field.Id, plan.Fid, plan.TableId, "checked", r.RowsWritten, r.Differences, sw.Elapsed));
                 var level = r.Differences > 0 ? LogLevel.Warning : LogLevel.Information;

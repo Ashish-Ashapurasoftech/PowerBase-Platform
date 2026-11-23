@@ -22,14 +22,16 @@ public sealed class ComputeTableProcessor : TenantRepositoryBase
     private readonly ComputeModelCache _models;
     private readonly ComputeSearchNotifier? _search;
     private readonly ILogger<ComputeTableProcessor>? _logger;
+    private readonly ComputeDecryptor? _decryptor;
 
     public ComputeTableProcessor(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, ComputeModelCache models,
-        ILogger<ComputeTableProcessor>? logger = null, ComputeSearchNotifier? search = null)
+        ILogger<ComputeTableProcessor>? logger = null, ComputeSearchNotifier? search = null, ComputeDecryptor? decryptor = null)
         : base(connectionFactory, queryContext)
     {
         _search = search;
         _models = models;
         _logger = logger;
+        _decryptor = decryptor;
     }
 
     internal sealed record OutboxRow(long Id, long? RecordId, Guid? RecordPublicId, byte Reason, string? ChangedFids, string? OldRefs);
@@ -74,7 +76,7 @@ public sealed class ComputeTableProcessor : TenantRepositoryBase
                 {
                     var concrete = await ComputeScopes.ResolveAsync(guard.Connection, plan, scope, ct);
                     var result = await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, field.MaterializeVersion, concrete,
-                        model.Schema, options, reconcile: false, ct);
+                        model.Schema, options, reconcile: false, ct, _decryptor);
                     fields++;
                     values += result.RowsWritten;
                     foreach (var t in await PropagateAsync(guard.Connection, model, plan, result, ct)) notify.Add(t);

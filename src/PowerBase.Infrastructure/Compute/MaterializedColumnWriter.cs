@@ -140,13 +140,20 @@ public static class MaterializedColumnWriter
         return (from, SqlColumnType.CastTo($"lk.{plan.SourceColumn}", sqlType));
     }
 
-    /// <summary>The "FROM … WHERE …" of one Formula batch: the values the formula engine produced, bulk-copied into #cv.</summary>
-    internal static (string From, string Value) FormulaBatchParts(FormulaPlan plan) =>
+    /// <summary>The "FROM … WHERE …" of one batch whose values were worked out in C# (a formula, or anything that read ciphertext) and
+    /// bulk-copied into #cv.</summary>
+    internal static (string From, string Value) ValueTableBatchParts(MaterializePlan plan) =>
         ($"""
           FROM {PhysicalNaming.FullTableName(plan.TableId)} {TargetAlias}
           JOIN #cv v ON v.Id = {TargetAlias}.Id
           WHERE 1 = 1
           """, "v.v");
+
+    internal static (string From, string Value) FormulaBatchParts(FormulaPlan plan) => ValueTableBatchParts(plan);
+
+    /// <summary>True when the batch's values are worked out in C# and handed to SQL through #cv: every formula, and a lookup / summary
+    /// that reads encrypted data (SQL cannot read ciphertext).</summary>
+    internal static bool UsesValueTable(MaterializePlan plan) => plan is FormulaPlan || plan.DecryptAppId is not null;
 
     /// <summary>"The stored value differs from the fresh one" — NULLs both ways, text exactly (case included).</summary>
     internal static string DiffersSql(string column, string sqlType, string fresh)
@@ -175,18 +182,30 @@ public static class MaterializedColumnWriter
     /// Recomputes the plan's stored column for <paramref name="scope"/>, batch by batch through <paramref name="guard"/>, writing only what
     /// changed. Throws <see cref="MaterializeVersionChangedException"/> when the field moved on mid-way.
     /// </summary>
+    /// <param name="decryptor">Needed by a plan that reads encrypted data (<see cref="MaterializePlan.DecryptAppId"/>); without it such a
+    /// plan fails (the field is marked Failed and keeps today's dynamic path).</param>
     public static async Task<WriteResult> RecomputeAsync(GuardedConnection guard, MaterializePlan plan, string sqlType, int version,
-        WriteScope scope, ComputeSchema schema, ComputeOptions options, bool reconcile, CancellationToken ct)
+        WriteScope scope, ComputeSchema schema, ComputeOptions options, bool reconcile, CancellationToken ct, ComputeDecryptor? decryptor = null)
     {
+        if (plan.DecryptAppId is not null && decryptor is null)
+            throw new InvalidOperationException($"Field {plan.FieldId} reads encrypted data and no decryptor is configured for the compute worker.");
+
         var column = PhysicalNaming.MaterializedColumnName(plan.Fid);
-        var batchSize = plan switch { SummaryPlan => options.SummaryBatchSize, FormulaPlan => FormulaBatchSize, _ => options.LookupBatchSize };
+        var batchSize = plan switch
+        {
+            SummaryPlan => options.SummaryBatchSize,
+            FormulaPlan => FormulaBatchSize,
+            LookupPlan when plan.DecryptAppId is not null => FormulaBatchSize,
+            _ => options.LookupBatchSize
+        };
         var childFields = plan is SummaryPlan s ? schema.FieldsByFid(s.ChildTableId) : new Dictionary<long, AppField>();
+        var valueTable = UsesValueTable(plan);
         long written = 0;
         var batches = 0;
         var changed = new HashSet<long>();
         var tooMany = false;
 
-        if (plan is FormulaPlan)
+        if (valueTable)
             await guard.Connection.ExecuteAsync(new CommandDefinition(
                 $"IF OBJECT_ID('tempdb..#cv') IS NOT NULL DROP TABLE #cv; CREATE TABLE #cv (Id BIGINT NOT NULL PRIMARY KEY, v {sqlType} NULL);", cancellationToken: ct));
         try
@@ -204,10 +223,18 @@ public static class MaterializedColumnWriter
                 (string From, string Value) parts;
                 switch (plan)
                 {
+                    case SummaryPlan { DecryptAppId: not null } sp:
+                        await FillEncryptedSummaryValuesAsync(guard.Connection, sp, sqlType, ids, schema, decryptor!, ct);
+                        parts = ValueTableBatchParts(sp);
+                        break;
+                    case LookupPlan { DecryptAppId: not null } lp:
+                        await FillEncryptedLookupValuesAsync(guard.Connection, lp, sqlType, ids, decryptor!, ct);
+                        parts = ValueTableBatchParts(lp);
+                        break;
                     case SummaryPlan sp: parts = SummaryBatchParts(sp, sqlType, childFields, parameters); break;
                     case LookupPlan lp: parts = LookupBatchParts(lp, sqlType); break;
                     case FormulaPlan fp:
-                        await FillFormulaValuesAsync(guard.Connection, fp, ids, schema, ct);
+                        await FillFormulaValuesAsync(guard.Connection, fp, ids, schema, decryptor, ct);
                         parts = FormulaBatchParts(fp);
                         break;
                     default: throw new NotSupportedException(plan.GetType().Name);
@@ -229,15 +256,16 @@ public static class MaterializedColumnWriter
         }
         finally
         {
-            if (plan is FormulaPlan && guard.Connection.State == ConnectionState.Open)
+            if (valueTable && guard.Connection.State == ConnectionState.Open)
                 await guard.Connection.ExecuteAsync("IF OBJECT_ID('tempdb..#cv') IS NOT NULL DROP TABLE #cv;");
         }
         return new WriteResult(written, batches, changed, tooMany);
     }
 
-    /// <summary>Reads the batch's rows (their stored fields and the stored values of the calculated fields the formula reads), evaluates the
-    /// formula for each, and bulk-copies the results into #cv.</summary>
-    private static async Task FillFormulaValuesAsync(SqlConnection connection, FormulaPlan plan, long[] ids, ComputeSchema schema, CancellationToken ct)
+    /// <summary>Reads the batch's rows (their stored fields and the stored values of the calculated fields the formula reads), decrypts the
+    /// encrypted ones when the app is encrypted, evaluates the formula for each, and bulk-copies the results into #cv.</summary>
+    private static async Task FillFormulaValuesAsync(SqlConnection connection, FormulaPlan plan, long[] ids, ComputeSchema schema,
+        ComputeDecryptor? decryptor, CancellationToken ct)
     {
         var tableFields = schema.FieldsOf(plan.TableId);
         var storedColumns = string.Concat(plan.StoredReads.Select(f => ", " + PhysicalNaming.MaterializedColumnName(f)));
@@ -246,10 +274,10 @@ public static class MaterializedColumnWriter
             FROM {PhysicalNaming.FullTableName(plan.TableId)}
             WHERE Id BETWEEN @lo AND @hi AND Id IN {IdsInSql}
             """;
-        var rows = (await connection.QueryAsync(new CommandDefinition(sql, new { ids = JsonSerializer.Serialize(ids), lo = ids.Min(), hi = ids.Max() },
-                commandTimeout: CommandTimeoutSeconds, cancellationToken: ct)))
-            .Select(r => (IReadOnlyDictionary<string, object?>)((IDictionary<string, object?>)r).ToDictionary(kv => kv.Key, kv => kv.Value is DBNull ? null : kv.Value))
-            .ToList();
+        var mutable = await ReadRowsAsync(connection, sql, new { ids = JsonSerializer.Serialize(ids), lo = ids.Min(), hi = ids.Max() }, ct);
+        if (plan.DecryptAppId is long appId)
+            await decryptor!.DecryptRowsAsync(connection, appId, mutable, PhysicalFields(tableFields), ct);
+        var rows = mutable.Select(r => (IReadOnlyDictionary<string, object?>)(Dictionary<string, object?>)r).ToList();
         var values = Formulas.Evaluate(plan, tableFields, rows);
 
         var data = new DataTable();
@@ -261,6 +289,153 @@ public static class MaterializedColumnWriter
         await connection.ExecuteAsync(new CommandDefinition("TRUNCATE TABLE #cv;", cancellationToken: ct));
         using var bulk = new SqlBulkCopy(connection) { DestinationTableName = "#cv", BulkCopyTimeout = CommandTimeoutSeconds };
         await bulk.WriteToServerAsync(data, ct);
+    }
+
+    // ── encrypted inputs (worked out in C#, stored plain) ───────────────────────────────────────────────
+
+    /// <summary>A lookup whose source holds ciphertext: the parent's source value through the child's reference (a deleted or missing parent
+    /// gives NULL, as LookupColumnExpr), decrypted with the parent app's key, cut to the stored type, bulk-copied into #cv.</summary>
+    private static async Task FillEncryptedLookupValuesAsync(SqlConnection connection, LookupPlan plan, string sqlType, long[] ids,
+        ComputeDecryptor decryptor, CancellationToken ct)
+    {
+        var sql = $"""
+            {KeysSql}SELECT {TargetAlias}.Id AS Id, lk.{plan.SourceColumn} AS v
+            FROM {PhysicalNaming.FullTableName(plan.ChildTableId)} {TargetAlias}
+            LEFT JOIN {PhysicalNaming.FullTableName(plan.ParentTableId)} lk ON lk.Id = {TargetAlias}.{PhysicalNaming.ColumnName(plan.ReferenceFid)} AND lk.IsDeleted = 0
+            WHERE {TargetAlias}.Id BETWEEN @lo AND @hi AND {TargetAlias}.Id IN {IdsInSql}
+            """;
+        var rows = await ReadRowsAsync(connection, sql, new { ids = JsonSerializer.Serialize(ids), lo = ids.Min(), hi = ids.Max() }, ct);
+        var values = new List<(long Id, object? Value)>(rows.Count);
+        foreach (var row in rows)
+        {
+            var raw = row["v"];
+            if (raw is string cipher) raw = await decryptor.DecryptValueAsync(connection, plan.DecryptAppId!.Value, cipher, ct);
+            values.Add((Convert.ToInt64(row["Id"]), raw));
+        }
+        await CopyValuesAsync(connection, sqlType, values, ct);
+    }
+
+    /// <summary>
+    /// A summary whose target or criteria read ciphertext: the batch's live children (through the reference index), decrypted with the
+    /// child app's key, matched and aggregated by EncryptedSummaryAggregator — the same code the dynamic read of an encrypted summary uses,
+    /// so the stored value is the one shown. Parents with no matching child: Count / Distinct Count 0, Exists false, anything else NULL.
+    /// </summary>
+    private static async Task FillEncryptedSummaryValuesAsync(SqlConnection connection, SummaryPlan plan, string sqlType, long[] ids,
+        ComputeSchema schema, ComputeDecryptor decryptor, CancellationToken ct)
+    {
+        var childFields = schema.FieldsOf(plan.ChildTableId);
+        var refCol = PhysicalNaming.ColumnName(plan.ReferenceFid);
+        // A chained target (a stored calculated field of the child) is read from its c_ column under its f_ name, as a plain field of its value type.
+        var aggregateFields = childFields.ToList();
+        var storedTarget = "";
+        if (plan.TargetIsStored && plan.TargetFid is int targetFid
+            && childFields.FirstOrDefault(f => f.Fid == targetFid) is { } chained && MaterializedReadFields.ValueTypeOf(chained) is { } valueType)
+        {
+            var plain = chained.Clone();
+            plain.TypeCode = valueType;
+            plain.Settings = null;
+            plain.IsEncrypted = false;
+            aggregateFields[aggregateFields.IndexOf(chained)] = plain;
+            storedTarget = $", c.{PhysicalNaming.MaterializedColumnName(targetFid)} AS {PhysicalNaming.ColumnName(targetFid)}";
+        }
+
+        var sql = $"""
+            {KeysSql}SELECT c.Id, c.CreatedOn, c.CreatedBy, c.ModifiedOn, c.ModifiedBy{RecordRepository.BuildFieldColumnList(childFields)}{storedTarget}
+            FROM {PhysicalNaming.FullTableName(plan.ChildTableId)} c
+            WHERE c.IsDeleted = 0 AND c.{refCol} BETWEEN @lo AND @hi AND c.{refCol} IN {IdsInSql}
+            ORDER BY c.Id
+            """;
+        var rows = await ReadRowsAsync(connection, sql, new { ids = JsonSerializer.Serialize(ids), lo = ids.Min(), hi = ids.Max() }, ct);
+        await decryptor.DecryptRowsAsync(connection, plan.DecryptAppId!.Value, rows, PhysicalFields(childFields), ct);
+
+        var keys = ids.ToDictionary(id => id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        var aggregated = PowerBase.Application.Relationships.EncryptedSummaryAggregator.Aggregate(
+            rows.Select(r => (IReadOnlyDictionary<string, object?>)(Dictionary<string, object?>)r).ToList(),
+            aggregateFields, plan.Function, plan.ReferenceFid, plan.TargetFid, plan.TargetSubField,
+            keys.Keys.ToHashSet(), plan.Filter, options: null, format: v => Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture));
+
+        var values = new List<(long Id, object? Value)>(ids.Length);
+        foreach (var (key, id) in keys)
+        {
+            object? value = aggregated.TryGetValue(key, out var v) ? v : null;
+            value ??= plan.Function switch
+            {
+                SummaryFunctions.Count or SummaryFunctions.DistinctCount => 0,
+                SummaryFunctions.Exists => false,
+                _ => null
+            };
+            values.Add((id, value));
+        }
+        await CopyValuesAsync(connection, sqlType, values, ct);
+    }
+
+    /// <summary>The table's own stored (non-calculated) fields: the only columns that can hold ciphertext.</summary>
+    private static IReadOnlyList<AppField> PhysicalFields(IReadOnlyList<AppField> fields) =>
+        fields.Where(f => f.Fid.HasValue && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)).ToList();
+
+    private static async Task<List<IDictionary<string, object?>>> ReadRowsAsync(SqlConnection connection, string sql, object parameters, CancellationToken ct) =>
+        (await connection.QueryAsync(new CommandDefinition(sql, parameters, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct)))
+            .Select(r => (IDictionary<string, object?>)((IDictionary<string, object?>)r).ToDictionary(kv => kv.Key, kv => kv.Value is DBNull ? null : kv.Value))
+            .ToList();
+
+    /// <summary>Bulk-copies (Id, value) into #cv, each value converted to the stored column's type (text cut to the sort key); a value that does
+    /// not convert is stored as NULL, as the dynamic read shows nothing for it either.</summary>
+    private static async Task CopyValuesAsync(SqlConnection connection, string sqlType, IReadOnlyList<(long Id, object? Value)> values, CancellationToken ct)
+    {
+        var clr = ClrTypeOfSql(sqlType);
+        var data = new DataTable();
+        data.Columns.Add("Id", typeof(long));
+        data.Columns.Add("v", clr);
+        foreach (var (id, raw) in values)
+            data.Rows.Add(id, ToStoredValue(raw, sqlType, clr) ?? DBNull.Value);
+
+        await connection.ExecuteAsync(new CommandDefinition("TRUNCATE TABLE #cv;", cancellationToken: ct));
+        using var bulk = new SqlBulkCopy(connection) { DestinationTableName = "#cv", BulkCopyTimeout = CommandTimeoutSeconds };
+        await bulk.WriteToServerAsync(data, ct);
+    }
+
+    internal static Type ClrTypeOfSql(string sqlType) => sqlType switch
+    {
+        "BIT" => typeof(bool),
+        "TINYINT" => typeof(byte),
+        "SMALLINT" => typeof(short),
+        "INT" => typeof(int),
+        "BIGINT" => typeof(long),
+        "DATE" => typeof(DateTime),
+        _ when sqlType.StartsWith("DATETIME2", StringComparison.Ordinal) => typeof(DateTime),
+        _ when sqlType.StartsWith("TIME", StringComparison.Ordinal) => typeof(TimeSpan),
+        _ when sqlType.StartsWith("DECIMAL", StringComparison.Ordinal) => typeof(decimal),
+        _ => typeof(string)
+    };
+
+    /// <summary>One computed value as the stored column holds it; null when it is empty or does not convert.</summary>
+    internal static object? ToStoredValue(object? raw, string sqlType, Type clr)
+    {
+        if (raw is null || raw is DBNull) return null;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        try
+        {
+            if (clr == typeof(string))
+            {
+                var text = raw is DateTime dt ? dt.ToString("o", inv) : Convert.ToString(raw, inv);
+                if (string.IsNullOrEmpty(text)) return null;
+                return text.Length > SqlColumnType.TextSortKeyLength ? text[..SqlColumnType.TextSortKeyLength] : text;
+            }
+            if (clr == typeof(bool))
+                return raw is string sb ? (bool.TryParse(sb, out var b) ? b : sb.Trim() == "1") : Convert.ToBoolean(raw, inv);
+            if (clr == typeof(DateTime))
+                return raw is string sd ? DateTime.Parse(sd, inv, System.Globalization.DateTimeStyles.RoundtripKind) : Convert.ToDateTime(raw, inv);
+            if (clr == typeof(TimeSpan))
+                return raw switch { TimeSpan ts => ts, DateTime d => d.TimeOfDay, string st => TimeSpan.Parse(st, inv), _ => null };
+            if (clr == typeof(decimal))
+            {
+                var d = raw is string sdec ? decimal.Parse(sdec, System.Globalization.NumberStyles.Any, inv) : Convert.ToDecimal(raw, inv);
+                var scale = sqlType.LastIndexOf(',') is var comma and > 0 && int.TryParse(sqlType[(comma + 1)..].TrimEnd(')'), out var sc) ? sc : 4;
+                return Math.Round(d, scale, MidpointRounding.AwayFromZero);
+            }
+            return Convert.ChangeType(raw is string s ? decimal.Parse(s, System.Globalization.NumberStyles.Any, inv) : raw, clr, inv);
+        }
+        catch (Exception ex) when (ex is FormatException or InvalidCastException or OverflowException) { return null; }
     }
 
     private static Type ClrTypeOf(FormulaType type) => type switch

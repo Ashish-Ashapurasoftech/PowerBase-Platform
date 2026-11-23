@@ -95,8 +95,34 @@ public class Phase5FormulaChainTests
         plan.ResultType.Should().Be(FormulaType.Number);
     }
 
+    [Fact]
+    public void A_formula_reading_an_encrypted_field_is_stored_and_decrypted_by_the_worker()
+    {
+        var f = F(Emp, 30, "Formula_Text", "Secret x", Expr("[Secret] & \"x\""));
+        var d = Decide(Schema(f), f);
+        d.Outcome.Should().Be(MaterializeOutcome.Allowed);
+        var plan = d.Plan.Should().BeOfType<FormulaPlan>().Subject;
+        plan.PhysicalReads.Should().Equal(16);
+        plan.DecryptAppId.Should().Be(1);
+    }
+
+    [Fact]
+    public void A_plain_formula_needs_no_decryption()
+    {
+        var f = F(Emp, 30, "Formula_Text", "Full name", Expr("[First] & \" \" & [Last]"));
+        Decide(Schema(f), f).Plan!.DecryptAppId.Should().BeNull();
+    }
+
+    [Fact]
+    public void A_unique_formula_reading_an_encrypted_field_is_refused()
+    {
+        var f = F(Emp, 30, "Formula_Text", "Secret key", Expr("[Secret] & \"x\""), unique: true);
+        var d = Decide(Schema(f), f);
+        d.Outcome.Should().Be(MaterializeOutcome.NotAllowed);
+        d.Reason.Should().Contain("encrypted");
+    }
+
     [Theory]
-    [InlineData("[Secret] & \"x\"", "encrypted")]
     [InlineData("ToText([Manager])", "Reference")]
     [InlineData("[Task Names Max] & \"!\"", "not stored")]
     [InlineData("URLRoot() & [First]", "URLRoot")]

@@ -41,7 +41,7 @@ public class Phase3RulesAndGraphTests
             F(Dept, 6, "Text"), F(Dept, 7, "MultiSelect"), F(Dept, 9, "Summary", SummaryJson("Sum")), F(Dept, 10, "Text", encrypted: true),
             F(Emp, 6, "Reference"), F(Emp, 7, "Number"), F(Emp, 9, "Text"), F(Emp, 10, "User"), F(Emp, 11, "Formula"), F(Emp, 12, "Text", encrypted: true),
             F(Emp, 13, "Reference"), F(Emp, 14, "Address"),
-            F(Secret, 6, "Reference"), F(Secret, 7, "Number")
+            F(Secret, 6, "Reference"), F(Secret, 7, "Number"), F(Secret, 8, "Text")
         };
         fields.AddRange(extra);
         return new ComputeSchema(fields, new Dictionary<long, long> { [Dept] = 1, [Emp] = 1, [Secret] = 2 }, new HashSet<long> { 2 });
@@ -100,13 +100,19 @@ public class Phase3RulesAndGraphTests
     public void Not_allowed_for_types_with_nothing_to_store(string type) =>
         Decide(F(Emp, 30, type)).Outcome.Should().Be(MaterializeOutcome.NotAllowed);
 
-    [Fact]
-    public void Not_allowed_in_an_encrypted_app() =>
-        Decide(F(Secret, 30, "Summary", SummaryJson("Sum", child: Emp))).Reason.Should().Contain("encrypted");
+    // ── encrypted apps: stored, the worker decrypts what it reads (plan.DecryptAppId) and keeps the value plain ──
 
     [Fact]
-    public void Not_allowed_when_the_field_itself_is_encrypted() =>
-        Decide(F(Emp, 30, "Lookup", LookupJson(), encrypted: true)).Outcome.Should().Be(MaterializeOutcome.NotAllowed);
+    public void A_field_of_an_encrypted_app_is_stored()
+    {
+        var d = Decide(F(Secret, 30, "Summary", SummaryJson("Sum", child: Emp)));
+        d.Outcome.Should().Be(MaterializeOutcome.Allowed);
+        d.Plan!.DecryptAppId.Should().BeNull();   // it sums a Number of a plain app: nothing to decrypt
+    }
+
+    [Fact]
+    public void A_field_flagged_encrypted_is_still_stored() =>
+        Decide(F(Emp, 30, "Lookup", LookupJson(), encrypted: true)).Outcome.Should().Be(MaterializeOutcome.Allowed);
 
     [Fact]
     public void Not_allowed_in_a_dependency_cycle()
@@ -160,12 +166,29 @@ public class Phase3RulesAndGraphTests
         Decide(F(Emp, 30, "Lookup", LookupJson(sourceFid: 9))).Reason.Should().Contain("calculated");
 
     [Fact]
-    public void Lookup_of_an_encrypted_field_is_not_allowed() =>
-        Decide(F(Emp, 30, "Lookup", LookupJson(sourceFid: 10))).Reason.Should().Contain("encrypted");
+    public void Lookup_of_an_encrypted_field_is_decrypted_with_the_parent_app_key()
+    {
+        var d = Decide(F(Emp, 30, "Lookup", LookupJson(sourceFid: 10)));
+        d.Outcome.Should().Be(MaterializeOutcome.Allowed);
+        d.Plan!.DecryptAppId.Should().Be(1);
+    }
 
     [Fact]
-    public void Lookup_into_an_encrypted_app_is_not_allowed() =>
-        Decide(F(Emp, 30, "Lookup", LookupJson(sourceFid: 7, parent: Secret))).Reason.Should().Contain("encrypted");
+    public void Lookup_of_text_in_an_encrypted_app_is_decrypted()
+    {
+        var d = Decide(F(Emp, 30, "Lookup", LookupJson(sourceFid: 8, parent: Secret)));
+        d.Outcome.Should().Be(MaterializeOutcome.Allowed);
+        d.Plan!.DecryptAppId.Should().Be(2);
+    }
+
+    [Fact]
+    public void Lookup_of_a_number_in_an_encrypted_app_needs_no_decryption()
+    {
+        // Numbers, dates, booleans and references are never encrypted, so SQL copies them as they are.
+        var d = Decide(F(Emp, 30, "Lookup", LookupJson(sourceFid: 7, parent: Secret)));
+        d.Outcome.Should().Be(MaterializeOutcome.Allowed);
+        d.Plan!.DecryptAppId.Should().BeNull();
+    }
 
     [Fact]
     public void Lookup_of_a_type_that_does_not_sort_as_shown_is_not_allowed() =>
@@ -188,8 +211,24 @@ public class Phase3RulesAndGraphTests
         Decide(F(Dept, 30, "Summary", SummaryJson("Sum", 11))).Reason.Should().Contain("calculated");
 
     [Fact]
-    public void Summary_of_an_encrypted_target_is_not_allowed() =>
-        Decide(F(Dept, 30, "Summary", SummaryJson("Max", 12))).Reason.Should().Contain("encrypted");
+    public void Summary_of_an_encrypted_target_is_decrypted_with_the_child_app_key()
+    {
+        var d = Decide(F(Dept, 30, "Summary", SummaryJson("DistinctCount", 12)));
+        d.Outcome.Should().Be(MaterializeOutcome.Allowed);
+        d.Plan!.DecryptAppId.Should().Be(1);
+    }
+
+    [Fact]
+    public void Summary_with_criteria_on_an_encrypted_field_is_decrypted()
+    {
+        var d = Decide(F(Dept, 30, "Summary", SummaryJson("Count", null, Filter(fid: 12))));
+        d.Outcome.Should().Be(MaterializeOutcome.Allowed);
+        d.Plan!.DecryptAppId.Should().Be(1);
+    }
+
+    [Fact]
+    public void Summary_with_plain_criteria_needs_no_decryption() =>
+        Decide(F(Dept, 30, "Summary", SummaryJson("Count", null, Filter(fid: 9)))).Plan!.DecryptAppId.Should().BeNull();
 
     [Fact]
     public void Summary_of_a_reference_is_not_allowed() =>
@@ -216,7 +255,6 @@ public class Phase3RulesAndGraphTests
     [Theory]
     [InlineData(10L, "User")]        // user picks resolve per viewer
     [InlineData(11L, "calculated")]
-    [InlineData(12L, "encrypted")]
     [InlineData(13L, "Reference")]
     [InlineData(99L, "no longer exists")]
     public void Criteria_on_fields_sql_cannot_read_fixed_are_not_allowed(long fid, string reason) =>
