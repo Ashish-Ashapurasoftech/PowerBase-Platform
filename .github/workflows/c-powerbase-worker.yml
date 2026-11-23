@@ -1,0 +1,73 @@
+# Stored computed columns test setup (resource group C-PowerBase-RG): builds the ComputeWorker image, pushes it to
+# the registry cpowerbaseacr, and rolls the Container App c-powerbase-compute onto it.
+# Secrets live in the GitHub environment "c-powerbase-uat" (see DEPLOY_Stored_Computed_Columns_Checklist.md):
+#   C_ACR_USERNAME / C_ACR_PASSWORD  registry admin user (push the image)
+#   C_AZURE_CREDENTIALS              optional: a service principal allowed to update the Container App. Without it the
+#                                    image is pushed and the job prints the one command that switches the app to it.
+name: C - Build and deploy ComputeWorker to c-powerbase-compute
+on:
+  push:
+    branches:
+    - feature/PB-stored-computed-columns
+    paths:
+    - 'src/**'
+    - '.github/workflows/c-powerbase-worker.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: c-powerbase-worker
+  cancel-in-progress: false
+env:
+  REGISTRY: cpowerbaseacr.azurecr.io
+  IMAGE: powerbase-computeworker
+  RESOURCE_GROUP: C-PowerBase-RG
+  CONTAINER_APP: c-powerbase-compute
+jobs:
+  build-and-deploy:
+    environment: c-powerbase-uat
+    runs-on: ubuntu-latest
+    env:
+      HAS_AZURE: ${{ secrets.C_AZURE_CREDENTIALS != '' }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Log in to the registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ secrets.C_ACR_USERNAME }}
+        password: ${{ secrets.C_ACR_PASSWORD }}
+    - name: Build and push the image
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: src/PowerBase.ComputeWorker/Dockerfile
+        push: true
+        tags: |
+          ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ github.sha }}
+          ${{ env.REGISTRY }}/${{ env.IMAGE }}:latest
+    - name: Azure login (only when C_AZURE_CREDENTIALS is set)
+      id: azlogin
+      if: ${{ env.HAS_AZURE == 'true' }}
+      uses: azure/login@v2
+      with:
+        creds: ${{ secrets.C_AZURE_CREDENTIALS }}
+    - name: Roll the Container App onto the new image
+      if: ${{ steps.azlogin.outcome == 'success' }}
+      run: |
+        az containerapp update -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+          --image "$REGISTRY/$IMAGE:${{ github.sha }}" --min-replicas 1 --max-replicas 10 \
+          --scale-rule-name compute-queue --scale-rule-type azure-servicebus \
+          --scale-rule-metadata queueName=compute-queue namespace=c-powerbase-sb-wus2 messageCount=200 \
+          --scale-rule-auth connection=sb \
+          --query properties.latestRevisionName -o tsv
+    - name: Manual step (no Azure credentials in GitHub)
+      if: ${{ steps.azlogin.outcome != 'success' }}
+      run: |
+        {
+          echo "### Image pushed: \`$REGISTRY/$IMAGE:${{ github.sha }}\`"
+          echo "No C_AZURE_CREDENTIALS secret, so the Container App was not switched. Run this once in Azure Cloud Shell:"
+          echo '```bash'
+          echo "az containerapp update -g $RESOURCE_GROUP -n $CONTAINER_APP --image $REGISTRY/$IMAGE:${{ github.sha }} --min-replicas 1 --max-replicas 10 --scale-rule-name compute-queue --scale-rule-type azure-servicebus --scale-rule-metadata queueName=compute-queue namespace=c-powerbase-sb-wus2 messageCount=200 --scale-rule-auth connection=sb"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"

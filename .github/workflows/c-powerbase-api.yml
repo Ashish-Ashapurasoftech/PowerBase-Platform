@@ -1,0 +1,59 @@
+# Stored computed columns test setup (resource group C-PowerBase-RG): builds the API and deploys it to the
+# separate App Service c-powerbaseapi-wus2. The existing API (powerbaseapi-wus2, powerbaseapi.yml) is not touched.
+# Secrets live in the GitHub environment "c-powerbase-uat" (see DEPLOY_Stored_Computed_Columns_Checklist.md).
+name: C - Build and deploy API to c-powerbaseapi-wus2
+on:
+  push:
+    branches:
+    - feature/PB-stored-computed-columns
+    paths:
+    - 'src/**'
+    - '.github/workflows/c-powerbase-api.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: c-powerbase-api
+  cancel-in-progress: false
+env:
+  AZURE_WEBAPP_NAME: c-powerbaseapi-wus2
+  AZURE_WEBAPP_PACKAGE_PATH: src/PowerBase.API/publish
+  CONFIGURATION: Release
+  DOTNET_CORE_VERSION: 8.0.x
+  WORKING_DIRECTORY: src/PowerBase.API
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup .NET SDK
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_CORE_VERSION }}
+    - name: Restore
+      run: dotnet restore "${{ env.WORKING_DIRECTORY }}"
+    - name: Build
+      run: dotnet build "${{ env.WORKING_DIRECTORY }}" --configuration ${{ env.CONFIGURATION }} --no-restore
+    - name: Publish
+      run: dotnet publish "${{ env.WORKING_DIRECTORY }}" --configuration ${{ env.CONFIGURATION }} --no-build --output "${{ env.AZURE_WEBAPP_PACKAGE_PATH }}"
+    - name: Publish Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: c-webapp
+        path: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
+  deploy:
+    environment: c-powerbase-uat
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+    - name: Download artifact from build job
+      uses: actions/download-artifact@v4
+      with:
+        name: c-webapp
+        path: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
+    - name: Deploy to Azure WebApp
+      uses: azure/webapps-deploy@v3
+      with:
+        app-name: ${{ env.AZURE_WEBAPP_NAME }}
+        publish-profile: ${{ secrets.C_AZURE_WEBAPP_PUBLISH_PROFILE }}
+        package: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
