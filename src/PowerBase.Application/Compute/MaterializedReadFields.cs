@@ -33,6 +33,15 @@ public interface IMaterializedFieldState
 
     /// <summary>What the field page shows about the field's stored column; null for a field that is not a Lookup / Summary / Formula.</summary>
     Task<StoredColumnStatus?> GetStatusAsync(AppField field, CancellationToken ct = default) => Task.FromResult<StoredColumnStatus?>(null);
+
+    /// <summary>
+    /// The stored values (c_{fid}) of these rows for these Ready fields, read in ONE query: row Id → (Fid → value). What a list shows for a
+    /// Ready Lookup / Summary instead of working it out again on every read (each summary would otherwise read its child rows).
+    /// Empty when nothing can be read; the caller then works the values out the usual way.
+    /// </summary>
+    Task<IReadOnlyDictionary<long, IReadOnlyDictionary<int, object?>>> ReadStoredValuesAsync(long tableId, IReadOnlyCollection<int> fids,
+        IReadOnlyCollection<long> rowIds, CancellationToken ct = default) =>
+        Task.FromResult<IReadOnlyDictionary<long, IReadOnlyDictionary<int, object?>>>(new Dictionary<long, IReadOnlyDictionary<int, object?>>());
 }
 
 /// <summary>The field page's view of a stored column (read fresh, never from the field cache).</summary>

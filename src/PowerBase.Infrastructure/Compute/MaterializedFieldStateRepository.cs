@@ -83,6 +83,38 @@ public sealed class MaterializedFieldStateRepository : TenantRepositoryBase, IMa
         return pending;
     }
 
+    public async Task<IReadOnlyDictionary<long, IReadOnlyDictionary<int, object?>>> ReadStoredValuesAsync(long tableId, IReadOnlyCollection<int> fids,
+        IReadOnlyCollection<long> rowIds, CancellationToken ct = default)
+    {
+        var result = new Dictionary<long, IReadOnlyDictionary<int, object?>>();
+        if (fids.Count == 0 || rowIds.Count == 0) return result;
+        // Column names come from integer Fids only; the row ids are parsed once into a keyed table (an index seek per id).
+        var columns = string.Join(", ", fids.Distinct().Select(f => $"{PhysicalNaming.MaterializedColumnName(f)} AS [{f}]"));
+        var sql = $"""
+            DECLARE @k TABLE (k BIGINT NOT NULL PRIMARY KEY);
+            INSERT INTO @k (k) SELECT DISTINCT k FROM OPENJSON(@ids) WITH (k BIGINT '$');
+            SELECT x.Id, {columns}
+            FROM {PhysicalNaming.FullTableName(tableId)} x JOIN @k k ON k.k = x.Id;
+            """;
+        try
+        {
+            await using var connection = await OpenConnectionAsync(ct);
+            foreach (IDictionary<string, object?> row in await connection.QueryAsync(new CommandDefinition(sql,
+                         new { ids = System.Text.Json.JsonSerializer.Serialize(rowIds) }, cancellationToken: ct)))
+            {
+                var values = new Dictionary<int, object?>();
+                foreach (var f in fids) values[f] = row.TryGetValue(f.ToString(), out var v) && v is not DBNull ? v : null;
+                result[Convert.ToInt64(row["Id"])] = values;
+            }
+        }
+        catch (SqlException ex) when (ex.Number is InvalidColumnName or InvalidObjectName)
+        {
+            // A column was dropped between "Ready" and this read (a definition change): the caller works the values out instead.
+            return new Dictionary<long, IReadOnlyDictionary<int, object?>>();
+        }
+        return result;
+    }
+
     public async Task<StoredColumnStatus?> GetStatusAsync(AppField field, CancellationToken ct = default)
     {
         if (field.IsSystem || !PhysicalNaming.IsMaterializableTypeCode(field.TypeCode)) return null;

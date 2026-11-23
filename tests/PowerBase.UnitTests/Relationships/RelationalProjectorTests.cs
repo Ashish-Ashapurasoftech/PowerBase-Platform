@@ -190,6 +190,74 @@ public class RelationalProjectorTests
             new List<AppField> { Field(20, "S", "Summary", settings) },
             Rows(new Dictionary<string, object?> { ["Id"] = 1L }, new Dictionary<string, object?> { ["Id"] = 2L }));
 
+    // ── Ready stored fields are shown from their c_ column ────────────────────────────────────────
+
+    private PowerBase.Application.Compute.IMaterializedFieldState Stored(IReadOnlyDictionary<long, IReadOnlyDictionary<int, object?>> values, params long[] readyFieldIds)
+    {
+        var state = Substitute.For<PowerBase.Application.Compute.IMaterializedFieldState>();
+        state.ReadyFieldIdsAsync(Arg.Any<CancellationToken>()).Returns(readyFieldIds.ToHashSet());
+        state.ReadStoredValuesAsync(Arg.Any<long>(), Arg.Any<IReadOnlyCollection<int>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
+            .Returns(values);
+        return state;
+    }
+
+    [Fact]
+    public async Task A_ready_summary_is_shown_from_its_stored_column_without_reading_children()
+    {
+        var state = Stored(new Dictionary<long, IReadOnlyDictionary<int, object?>>
+        {
+            [1L] = new Dictionary<int, object?> { [20] = 7 },
+            [2L] = new Dictionary<int, object?> { [20] = 0 },
+        }, readyFieldIds: 20);
+        var projector = new RelationalProjector(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _appRepo, _userRepo, _formulaProjector, _queryContext, state);
+
+        var result = await projector.ProjectAsync(new AppTable { Id = 5 },
+            new List<AppField> { Field(20, "S", "Summary", "{\"childTableId\":77,\"referenceFid\":10,\"function\":\"Count\"}") },
+            Rows(new Dictionary<string, object?> { ["Id"] = 1L }, new Dictionary<string, object?> { ["Id"] = 2L }));
+
+        result[0][20].Should().Be(7);
+        result[1][20].Should().Be(0);
+        await _recordRepo.DidNotReceiveWithAnyArgs().AggregateByReferenceAsync(default!, default, default!, default, default!, default, default, default, default, default);
+        await _fieldRepo.DidNotReceive().ListByTableAsync(77, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task A_summary_that_is_not_ready_is_still_worked_out()
+    {
+        _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77 });
+        _fieldRepo.ListByTableAsync(77, Arg.Any<CancellationToken>()).Returns(PlainChildFields);
+        CountReturns(new Dictionary<object, object?> { [1L] = 3 });
+        var state = Stored(new Dictionary<long, IReadOnlyDictionary<int, object?>>(), readyFieldIds: []);
+        var projector = new RelationalProjector(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _appRepo, _userRepo, _formulaProjector, _queryContext, state);
+
+        var result = await projector.ProjectAsync(new AppTable { Id = 5 },
+            new List<AppField> { Field(20, "S", "Summary", "{\"childTableId\":77,\"referenceFid\":10,\"function\":\"Count\"}") },
+            Rows(new Dictionary<string, object?> { ["Id"] = 1L }));
+
+        result[0][20].Should().Be(3);
+    }
+
+    [Fact]
+    public async Task Stored_text_that_may_be_cut_is_worked_out_instead()
+    {
+        // Text is stored as a 400-character sort key: a 400-character value may be longer in truth, so the lookup is read as before.
+        var childFields = new List<AppField>
+        {
+            Field(10, "Product", "Reference", "{\"relationshipId\":1,\"parentTableId\":99}"),
+            Field(11, "Product - Notes", "Lookup", "{\"relationshipId\":1,\"referenceFid\":10,\"sourceTableId\":99,\"sourceFid\":5,\"sourceTypeCode\":\"Text\"}"),
+        };
+        _tableRepo.GetByIdAsync(99, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 99 });
+        _fieldRepo.ListByTableAsync(99, Arg.Any<CancellationToken>()).Returns(new List<AppField> { Field(5, "Notes", "Text") });
+        var full = new string('n', 450);
+        ParentRowsFor(99, RowsById((42L, new Dictionary<string, object?> { [PhysicalNaming.ColumnName(5)] = full })));
+        var state = Stored(new Dictionary<long, IReadOnlyDictionary<int, object?>> { [1L] = new Dictionary<int, object?> { [11] = full[..400] } }, readyFieldIds: 11);
+        var projector = new RelationalProjector(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _appRepo, _userRepo, _formulaProjector, _queryContext, state);
+
+        var result = await projector.ProjectAsync(new AppTable { Id = 7 }, childFields, ChildRowLinkedTo42);
+
+        result[0][11].Should().Be(full);
+    }
+
     [Fact]
     public async Task Summary_matches_decimal_reference_keys_to_row_ids()
     {
@@ -850,15 +918,18 @@ public class RelationalProjectorTests
     }
 
     [Fact]
-    public async Task Summary_in_memory_over_a_formula_still_reads_every_column_the_formula_might()
+    public async Task Summary_in_memory_over_a_formula_reads_only_the_columns_the_formula_reads()
     {
-        // The criteria compare a formula, worked out per child from whatever fields it reads: every column is read.
+        // The criteria compare a formula, worked out per child: the reference and what the formula reads (Qty), never the other
+        // columns (Notes) — a child table can have millions of rows and hundreds of encrypted columns.
         const int formulaFid = 32;
         _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77 });
         _fieldRepo.ListByTableAsync(77, Arg.Any<CancellationToken>()).Returns(new List<AppField>
         {
-            Field(10, "Item", "Reference"), Field(formulaFid, "F", "Formula_Number"), Field(33, "Qty", "Number"),
+            Field(10, "Item", "Reference"), Field(formulaFid, "F", "Formula_Number"), Field(33, "Qty", "Number"), Field(34, "Notes", "Text"),
         });
+        _formulaProjector.GetFormulaDependencies(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IEnumerable<long>>())
+            .Returns(new HashSet<long> { formulaFid, 33 });
         ChildRowsByReference(77, Rows(new Dictionary<string, object?> { ["Id"] = 1L, ["f_10"] = 1L, ["f_33"] = 2m }));
         _formulaProjector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
                 Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())

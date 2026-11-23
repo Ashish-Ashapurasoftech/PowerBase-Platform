@@ -49,11 +49,15 @@ public sealed class RelationalProjector : IRelationalProjector
     /// <summary>How many parent tables deep lookups of computed fields are being projected right now.</summary>
     private int _lookupDepth;
 
+    private readonly PowerBase.Application.Compute.IMaterializedFieldState? _materialized;
+
     public RelationalProjector(
         IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo,
         IRelationshipRepository relRepo, IAppRepository appRepo, IUserRepository userRepo,
-        IFormulaProjector formulaProjector, IQueryContext queryContext)
+        IFormulaProjector formulaProjector, IQueryContext queryContext,
+        PowerBase.Application.Compute.IMaterializedFieldState? materialized = null)
     {
+        _materialized = materialized;
         _queryContext = queryContext;
         _formulaProjector = formulaProjector;
         _tableRepo = tableRepo;
@@ -79,10 +83,57 @@ public sealed class RelationalProjector : IRelationalProjector
         var maps = new Dictionary<long, object?>[rows.Count];
         for (var i = 0; i < rows.Count; i++) maps[i] = new Dictionary<long, object?>();
 
+        // A Ready stored Lookup / Summary is shown from its c_ column (one query for the whole page) instead of being worked out again:
+        // a summary otherwise reads its child rows on every read. Those fields are then left out of the dynamic work below.
+        var stored = await FillStoredValuesAsync(table, lookupFields.Concat(summaryFields).ToList(), rows, maps, ct);
+        if (stored.Count > 0)
+        {
+            lookupFields = lookupFields.Where(f => !stored.Contains(f.Fid!.Value)).ToList();
+            summaryFields = summaryFields.Where(f => !stored.Contains(f.Fid!.Value)).ToList();
+        }
+
         await ProjectReferencesAndLookupsAsync(table, referenceFields, lookupFields, rows, maps, ct);
         await ProjectSummariesAsync(table, summaryFields, rows, maps, ct);
 
         return maps;
+    }
+
+    /// <summary>Text is stored as a 400-character sort key: a value that long may have been cut, so that field is worked out instead.</summary>
+    private const int StoredTextLength = 400;
+
+    /// <summary>
+    /// Fills <paramref name="maps"/> from the stored c_ columns of the Ready fields among <paramref name="candidates"/> and returns their Fids.
+    /// A field is left to the dynamic path when its stored text may be cut (400 characters) or a row is missing from the read.
+    /// </summary>
+    private async Task<IReadOnlySet<int>> FillStoredValuesAsync(AppTable table, IReadOnlyList<AppField> candidates,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, Dictionary<long, object?>[] maps, CancellationToken ct)
+    {
+        var none = new HashSet<int>();
+        if (_materialized is null || candidates.Count == 0) return none;
+        var ready = await _materialized.ReadyFieldIdsAsync(ct);
+        var fields = candidates.Where(f => ready.Contains(f.Id) && f.Fid.HasValue).ToList();
+        if (fields.Count == 0) return none;
+
+        var ids = new long[rows.Count];
+        for (var i = 0; i < rows.Count; i++)
+            if (!TryGetLong(rows[i], "Id", out ids[i])) return none;   // rows without an Id (a preview): work everything out
+
+        var values = await _materialized.ReadStoredValuesAsync(table.Id, fields.Select(f => f.Fid!.Value).ToList(), ids.Distinct().ToList(), ct);
+        if (values.Count == 0) return none;
+
+        var filled = new HashSet<int>();
+        foreach (var field in fields)
+        {
+            var fid = field.Fid!.Value;
+            var usable = true;
+            for (var i = 0; i < rows.Count && usable; i++)
+                usable = values.TryGetValue(ids[i], out var row) && row.TryGetValue(fid, out var v)
+                    && !(v is string s && s.Length >= StoredTextLength);
+            if (!usable) continue;
+            for (var i = 0; i < rows.Count; i++) maps[i][fid] = values[ids[i]][fid];
+            filled.Add(fid);
+        }
+        return filled;
     }
 
     private async Task ProjectReferencesAndLookupsAsync(
@@ -719,10 +770,11 @@ public sealed class RelationalProjector : IRelationalProjector
     /// Combined Text sort, the criteria fields and the reference each lookup among them pulls its value through — not every
     /// column of the child table, each of which is decrypted for every child of the page's parents. All of them when it
     /// reads a Formula / Summary, or a lookup of one, which is worked out per child record from whatever fields it reads.</summary>
-    private static IReadOnlyList<AppField> ChildFieldsRead(
+    private IReadOnlyList<AppField> ChildFieldsRead(
         IReadOnlyList<AppField> childFields, IReadOnlyDictionary<long, AppField> lookupSources, int refFid, IEnumerable<long> readFids)
     {
         var read = new HashSet<long> { refFid };
+        var formulas = new List<long>();
         foreach (var fid in readFids)
         {
             if (childFields.FirstOrDefault(f => f.Fid == fid) is not { } field) continue;
@@ -731,8 +783,23 @@ public sealed class RelationalProjector : IRelationalProjector
                 if (SummaryLookupSources.ReadsComputedSource(field, lookupSources)) return childFields;
                 if (SummaryLookupSources.Settings(field)?.ReferenceFid is int lookupRefFid) read.Add(lookupRefFid);
             }
-            else if (PhysicalNaming.IsComputedTypeCode(field.TypeCode)) return childFields;
+            else if (SummaryComputedTargets.IsFormula(field)) formulas.Add(fid);
+            else if (PhysicalNaming.IsComputedTypeCode(field.TypeCode)) { /* a child Summary is worked out from the child's Id, always read */ }
             read.Add(fid);
+        }
+        // A formula the criteria / target read: only the columns it reads (transitively), never every column of a table that can
+        // have millions of rows and hundreds of encrypted columns. Unknown dependencies: read everything, as before.
+        if (formulas.Count > 0)
+        {
+            var deps = _formulaProjector.GetFormulaDependencies(childFields, formulas);
+            if (deps is null) return childFields;
+            read.UnionWith(deps);
+            // A lookup the formula reads needs its reference column on the row.
+            foreach (var dep in childFields.Where(f => f.Fid is int d && deps.Contains(d) && SummaryLookupSources.IsLookup(f)))
+            {
+                if (SummaryLookupSources.ReadsComputedSource(dep, lookupSources)) return childFields;
+                if (SummaryLookupSources.Settings(dep)?.ReferenceFid is int depRef) read.Add(depRef);
+            }
         }
         return childFields.Where(f => f.Fid is int fid && read.Contains(fid)).ToList();
     }
