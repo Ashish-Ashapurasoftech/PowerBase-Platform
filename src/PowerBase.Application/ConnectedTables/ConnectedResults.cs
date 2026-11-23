@@ -23,7 +23,7 @@ public sealed record SourceTableResult(Guid PublicId, string Name, string? Plura
 
 public sealed record SourceFieldResult(
     int Fid, string Label, string TypeCode, bool IsSystem, bool IsEncrypted, bool Connectable, string? Reason,
-    string? DestinationTypeCode, string? Conversion);
+    string? DestinationTypeCode, string? Conversion, bool IsKeyField = false);
 
 public sealed record SourceFieldsResult(Guid TablePublicId, string TableName, IReadOnlyList<SourceFieldResult> Fields, bool RestrictedRecords);
 

@@ -518,16 +518,13 @@ public class ImportAppFromPblCommandHandler
 
             var existing = await _fieldRepo.ListByTableAsync(table.Id, ct);
             var usedLabels = existing.Select(f => (f.Label ?? "").Trim()).Where(l => l.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var usedNames = existing.Select(f => f.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             var items = new List<(PlaceholderWanted W, BulkCreateFieldItem Item)>();
             foreach (var w in group)
             {
                 // The field exists already (it was created after all - an earlier warning about it does not mean it failed): nothing to stand in for.
-                if (usedNames.Contains(w.Name))
-                    continue;
-                // Same for a reference field whose relationship was created after all (only part of it failed).
-                if (w.Code == "REFERENCE_NOT_CREATED" && usedLabels.Contains((w.Label ?? w.Name).Trim()))
+                // A real summary or lookup carries a generated Name, so it is recognised by its field number or label (see ImportStandIns).
+                if (!ImportStandIns.IsNeeded(w.Code, w.Name, w.Label, w.Fid, existing))
                     continue;
                 var label = UniqueLabel((w.Label ?? w.Name).Trim(), usedLabels);
                 items.Add((w, new BulkCreateFieldItem(w.TypeCode, label, Description: string.IsNullOrWhiteSpace(w.Description) ? null : w.Description,

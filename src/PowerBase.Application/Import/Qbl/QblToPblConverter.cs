@@ -106,6 +106,8 @@ public static class QblToPblConverter
         // Quickbase itself never enforces this, so treat it the same as the
         // QBL_DUPLICATE_REPORT_NAME case below: first wins, later ones flagged and skipped.
         var seenFieldNamesByTableRef = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        // Per table: a field's full Quickbase label -> the shortened name it was imported under (labels over FIELD_NAME_MAX).
+        var shortenedFieldNamesByTableRef = new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
         var addressSubComponentOwnerByTableRef = new Dictionary<string, Dictionary<string, (string CompositeFieldRef, string SubFieldKey)>>(StringComparer.Ordinal);
 
         foreach (var (tableRef, tableNode) in appNode.ChildMap("Tables"))
@@ -184,6 +186,13 @@ public static class QblToPblConverter
                 if (field is null)
                     continue;
 
+                // Quickbase allows very long labels (a whole survey question); meta.AppField.Name/Label hold FIELD_NAME_MAX characters.
+                // InferFieldName already shortened the name; shorten the label the same way and keep the full text in the import report.
+                var fullLabel = NullIfBlank(ResolveScalar(fieldNode, "Label"))?.Trim();
+                var wasShortened = fullLabel is not null && fullLabel.Length > FIELD_NAME_MAX;
+                if (field.Label is { Length: > FIELD_NAME_MAX })
+                    field.Label = FitFieldText(field.Label);
+
                 // Two fields of one table can share a name in a real export; PowerBase needs unique names, so the later one is kept
                 // under a numbered name (and label) instead of being dropped with its data, form elements and report columns.
                 var uniqueFieldName = NumberedName(seenFieldNames, field.Name);
@@ -204,6 +213,12 @@ public static class QblToPblConverter
                 {
                     field.Label = uniqueLabel;
                     issues.Add(Warning("QBL_DUPLICATE_FIELD_LABEL", $"Field label '{wantedLabel}' is already used on table '{table.Name}'; imported as '{uniqueLabel}'.", fieldRef));
+                }
+
+                if (wasShortened)
+                {
+                    (shortenedFieldNamesByTableRef.TryGetValue(tableRef, out var shortened) ? shortened : shortenedFieldNamesByTableRef[tableRef] = new(StringComparer.Ordinal))[fullLabel!] = field.Name;
+                    issues.Add(Warning("QBL_FIELD_LABEL_SHORTENED", $"Field label on table '{table.Name}' is longer than {FIELD_NAME_MAX} characters, so it was imported as '{field.Name}'. Full label: {fullLabel}", fieldRef));
                 }
 
                 table.Fields.Add(field);
@@ -322,6 +337,9 @@ public static class QblToPblConverter
         // A bracketed number can also be an app variable that happens to be named with digits (Quickbase files have variables "1202", "1226"…).
         // The formula engine binds a variable before a field, so such a token must stay as written and is not a field id at all.
         var variableNames = ConvertVariables(appNode, []).Select(v => v.Name).ToHashSet(StringComparer.Ordinal);
+        RewriteShortenedFieldRefs(tables.Where(t => t.Fields.Count > 0).SelectMany(t => t.Fields
+            .Where(f => string.Equals(f.TypeCode, "Formula", StringComparison.OrdinalIgnoreCase))
+            .Select(f => (t.LogicalRef, (Func<string?>)(() => f.FormulaExpression), (Action<string>)(v => f.FormulaExpression = v)))), shortenedFieldNamesByTableRef);
         RewriteNumericFieldRefs(tables, fieldNameBySourceId, variableNames, issues);
 
         foreach (var table in tables)
@@ -441,6 +459,8 @@ public static class QblToPblConverter
                 connectedTables.Add(connected);
         }
 
+        RewriteShortenedFieldRefs(forms.SelectMany(form => form.Rules
+            .Select(r => (form.TableRef, (Func<string?>)(() => r.ExpressionText), (Action<string>)(v => r.ExpressionText = v)))), shortenedFieldNamesByTableRef);
         RewriteRuleFormulas(forms, fieldNameBySourceId, variableNames, issues);
 
         // Pass D.
@@ -523,6 +543,20 @@ public static class QblToPblConverter
         var variables = ConvertVariables(appNode, issues);
         var pages = ConvertCodePages(appNode, issues);
         var dashboards = ConvertDashboards(appNode, issues);
+
+        // Reference / lookup / summary / report-link labels: same column limit as any field label (their names were fitted by InferFieldName).
+        foreach (var rel in relationships)
+        {
+            if (rel.ReferenceFieldLabel is { Length: > FIELD_NAME_MAX }) rel.ReferenceFieldLabel = FitFieldText(rel.ReferenceFieldLabel);
+            foreach (var lookup in rel.Lookups)
+                if (lookup.Label is { Length: > FIELD_NAME_MAX }) lookup.Label = FitFieldText(lookup.Label);
+            foreach (var summary in rel.Summaries)
+                if (summary.Label is { Length: > FIELD_NAME_MAX }) summary.Label = FitFieldText(summary.Label);
+            if (rel.ReportLink?.Label is { Length: > FIELD_NAME_MAX }) rel.ReportLink.Label = FitFieldText(rel.ReportLink.Label);
+        }
+        foreach (var table in tables)
+            foreach (var field in table.Fields)
+                if (field.Label is { Length: > FIELD_NAME_MAX }) field.Label = FitFieldText(field.Label);
 
         var document = new PblDocument { App = pblApp, Tables = tables, Relationships = relationships, Forms = forms, Roles = roles, Variables = variables, Pages = pages, FormRoleDefaults = formRoleDefaults, ConnectedTables = connectedTables, Dashboards = dashboards };
         return new QblConversionResult { AppRef = appRef, Document = document, Issues = issues };
@@ -3904,10 +3938,35 @@ public static class QblToPblConverter
 
     // ── Shared helpers ────────────────────────────────────────────────────
 
+    /// <summary>meta.AppField.Name / Label are NVARCHAR(200).</summary>
+    private const int FIELD_NAME_MAX = 200;
+
+    /// <summary>A shortened name stops here, leaving room for the " (n)" a duplicate gets from <see cref="NumberedName"/>.</summary>
+    private const int FIELD_NAME_FIT = 190;
+
+    /// <summary><paramref name="text"/> unchanged when it fits a field name/label column, otherwise cut to <see cref="FIELD_NAME_FIT"/> characters ending in "...".</summary>
+    private static string FitFieldText(string text) =>
+        text.Length <= FIELD_NAME_MAX ? text : text[..(FIELD_NAME_FIT - 3)].TrimEnd() + "...";
+
+    /// <summary>A Quickbase formula can name a field by its full label (<c>[label]</c>); when that label was too long and the field got a
+    /// shortened name, the reference is rewritten to the new name so the formula still resolves.</summary>
+    private static void RewriteShortenedFieldRefs(IEnumerable<(string TableRef, Func<string?> Get, Action<string> Set)> expressions, Dictionary<string, Dictionary<string, string>> shortenedByTableRef)
+    {
+        if (shortenedByTableRef.Count == 0) return;
+        foreach (var (tableRef, get, set) in expressions)
+        {
+            if (!shortenedByTableRef.TryGetValue(tableRef, out var map) || get() is not { Length: > 0 } text) continue;
+            var updated = text;
+            foreach (var (fullLabel, shortName) in map)
+                updated = updated.Replace($"[{fullLabel}]", $"[{shortName}]", StringComparison.Ordinal);
+            if (!ReferenceEquals(updated, text) && updated != text) set(updated);
+        }
+    }
+
     private static string InferFieldName(string logicalRef, string? label)
     {
         if (!string.IsNullOrWhiteSpace(label))
-            return label;
+            return FitFieldText(label);
 
         var stripped = logicalRef.StartsWith("$Field_", StringComparison.Ordinal) ? logicalRef["$Field_".Length..] : logicalRef.TrimStart('$');
         return stripped.Replace('_', ' ');

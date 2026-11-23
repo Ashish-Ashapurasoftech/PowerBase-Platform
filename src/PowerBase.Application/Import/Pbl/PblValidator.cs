@@ -66,6 +66,11 @@ public class PblValidator
     /// <c>AppSeeder.cs</c>'s <c>systemFieldDefs</c>) regardless of what's declared in this PBL
     /// document's own Fields list — a report column, form element, or form rule condition can
     /// validly reference one of these even though it's never a standalone PblField entry.</summary>
+    /// <summary>meta.AppField.Name / Label column size.</summary>
+    private const int FieldNameMaxLength = 200;
+
+    private static string Shorten(string? text) => text is { Length: > 60 } ? text[..57] + "..." : text ?? "";
+
     private static readonly string[] ImplicitSystemFieldNames =
     [
         "Record ID#",
@@ -339,6 +344,10 @@ public class PblValidator
             {
                 issues.Add(Error("DUPLICATE_FIELD_LABEL", $"Field label '{effectiveLabel}' is used more than once in table '{table.Name}'.", field.LogicalRef));
             }
+
+            // meta.AppField.Name / Label are NVARCHAR(200): say so here instead of failing the whole import on a SQL truncation error.
+            if ((field.Name?.Length ?? 0) > FieldNameMaxLength || (field.Label?.Length ?? 0) > FieldNameMaxLength)
+                issues.Add(Error("FIELD_NAME_TOO_LONG", $"Field '{Shorten(field.Label ?? field.Name)}' in table '{table.Name}' has a name or label longer than {FieldNameMaxLength} characters.", field.LogicalRef));
 
             if (string.IsNullOrWhiteSpace(field.TypeCode))
             {
