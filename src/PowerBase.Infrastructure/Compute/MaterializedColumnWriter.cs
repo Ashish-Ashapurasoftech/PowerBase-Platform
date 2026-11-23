@@ -60,6 +60,8 @@ public static class MaterializedColumnWriter
     {
         switch (plan)
         {
+            case ProjectedPlan p:
+                return SqlColumnType.IsAllowed(p.SqlType) ? p.SqlType : null;
             case LookupPlan l:
                 return SqlColumnType.StoredTypeFor(await SqlColumnType.ReadAsync(connection, PhysicalNaming.FullTableName(l.ParentTableId), l.SourceColumn, ct: ct));
             case SummaryPlan s:
@@ -153,7 +155,13 @@ public static class MaterializedColumnWriter
 
     /// <summary>True when the batch's values are worked out in C# and handed to SQL through #cv: every formula, and a lookup / summary
     /// that reads encrypted data (SQL cannot read ciphertext).</summary>
-    internal static bool UsesValueTable(MaterializePlan plan) => plan is FormulaPlan || plan.DecryptAppId is not null;
+    internal static bool UsesValueTable(MaterializePlan plan) => plan is FormulaPlan or ProjectedPlan || plan.DecryptAppId is not null;
+
+    /// <summary>The plan whose shape decides which rows a scope means (a projected field's Lookup / Summary / Formula shape).</summary>
+    internal static MaterializePlan ShapeOf(MaterializePlan plan) => plan is ProjectedPlan p ? p.Shape : plan;
+
+    /// <summary>Rows per batch of a projected field: the read code works each one out (a summary reads its children per batch).</summary>
+    internal const int ProjectedBatchSize = 500;
 
     /// <summary>"The stored value differs from the fresh one" — NULLs both ways, text exactly (case included).</summary>
     internal static string DiffersSql(string column, string sqlType, string fresh)
@@ -185,14 +193,18 @@ public static class MaterializedColumnWriter
     /// <param name="decryptor">Needed by a plan that reads encrypted data (<see cref="MaterializePlan.DecryptAppId"/>); without it such a
     /// plan fails (the field is marked Failed and keeps today's dynamic path).</param>
     public static async Task<WriteResult> RecomputeAsync(GuardedConnection guard, MaterializePlan plan, string sqlType, int version,
-        WriteScope scope, ComputeSchema schema, ComputeOptions options, bool reconcile, CancellationToken ct, ComputeDecryptor? decryptor = null)
+        WriteScope scope, ComputeSchema schema, ComputeOptions options, bool reconcile, CancellationToken ct, ComputeDecryptor? decryptor = null,
+        ProjectedValueComputer? projector = null)
     {
         if (plan.DecryptAppId is not null && decryptor is null)
             throw new InvalidOperationException($"Field {plan.FieldId} reads encrypted data and no decryptor is configured for the compute worker.");
+        if (plan is ProjectedPlan && projector is null)
+            throw new InvalidOperationException($"Field {plan.FieldId} is worked out by the read code and no projector is configured for the compute worker.");
 
         var column = PhysicalNaming.MaterializedColumnName(plan.Fid);
         var batchSize = plan switch
         {
+            ProjectedPlan => ProjectedBatchSize,
             SummaryPlan => options.SummaryBatchSize,
             FormulaPlan => FormulaBatchSize,
             LookupPlan when plan.DecryptAppId is not null => FormulaBatchSize,
@@ -210,7 +222,7 @@ public static class MaterializedColumnWriter
                 $"IF OBJECT_ID('tempdb..#cv') IS NOT NULL DROP TABLE #cv; CREATE TABLE #cv (Id BIGINT NOT NULL PRIMARY KEY, v {sqlType} NULL);", cancellationToken: ct));
         try
         {
-            await foreach (var ids in BatchesAsync(guard.Connection, plan, scope, batchSize, ct))
+            await foreach (var ids in BatchesAsync(guard.Connection, ShapeOf(plan), scope, batchSize, ct))
             {
                 await guard.BeforeBatchAsync(ct);
                 var parameters = new DynamicParameters();
@@ -223,6 +235,10 @@ public static class MaterializedColumnWriter
                 (string From, string Value) parts;
                 switch (plan)
                 {
+                    case ProjectedPlan pp:
+                        await CopyValuesAsync(guard.Connection, sqlType, await projector!.ComputeAsync(pp, ids, ct), ct);
+                        parts = ValueTableBatchParts(pp);
+                        break;
                     case SummaryPlan { DecryptAppId: not null } sp:
                         await FillEncryptedSummaryValuesAsync(guard.Connection, sp, sqlType, ids, schema, decryptor!, ct);
                         parts = ValueTableBatchParts(sp);
@@ -447,14 +463,20 @@ public static class MaterializedColumnWriter
             {
                 var text = raw is DateTime dt ? dt.ToString("o", inv) : Convert.ToString(raw, inv);
                 if (string.IsNullOrEmpty(text)) return null;
-                return text.Length > SqlColumnType.TextSortKeyLength ? text[..SqlColumnType.TextSortKeyLength] : text;
+                return !SqlColumnType.IsFullText(sqlType) && text.Length > SqlColumnType.TextSortKeyLength ? text[..SqlColumnType.TextSortKeyLength] : text;
             }
             if (clr == typeof(bool))
                 return raw is string sb ? (bool.TryParse(sb, out var b) ? b : sb.Trim() == "1") : Convert.ToBoolean(raw, inv);
             if (clr == typeof(DateTime))
-                return raw is string sd ? DateTime.Parse(sd, inv, System.Globalization.DateTimeStyles.RoundtripKind) : Convert.ToDateTime(raw, inv);
+                return raw switch
+                {
+                    DateOnly d => d.ToDateTime(TimeOnly.MinValue),
+                    DateTimeOffset o => o.UtcDateTime,
+                    string sd => DateTime.Parse(sd, inv, System.Globalization.DateTimeStyles.RoundtripKind),
+                    _ => Convert.ToDateTime(raw, inv)
+                };
             if (clr == typeof(TimeSpan))
-                return raw switch { TimeSpan ts => ts, DateTime d => d.TimeOfDay, string st => TimeSpan.Parse(st, inv), _ => null };
+                return raw switch { TimeSpan ts => ts, TimeOnly t => t.ToTimeSpan(), DateTime d => d.TimeOfDay, string st => TimeSpan.Parse(st, inv), _ => null };
             if (clr == typeof(decimal))
             {
                 var d = raw is string sdec ? decimal.Parse(sdec, System.Globalization.NumberStyles.Any, inv) : Convert.ToDecimal(raw, inv);

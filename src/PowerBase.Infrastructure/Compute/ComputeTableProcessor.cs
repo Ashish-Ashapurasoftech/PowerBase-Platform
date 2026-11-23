@@ -23,15 +23,18 @@ public sealed class ComputeTableProcessor : TenantRepositoryBase
     private readonly ComputeSearchNotifier? _search;
     private readonly ILogger<ComputeTableProcessor>? _logger;
     private readonly ComputeDecryptor? _decryptor;
+    private readonly ProjectedValueComputer? _projector;
 
     public ComputeTableProcessor(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, ComputeModelCache models,
-        ILogger<ComputeTableProcessor>? logger = null, ComputeSearchNotifier? search = null, ComputeDecryptor? decryptor = null)
+        ILogger<ComputeTableProcessor>? logger = null, ComputeSearchNotifier? search = null, ComputeDecryptor? decryptor = null,
+        ProjectedValueComputer? projector = null)
         : base(connectionFactory, queryContext)
     {
         _search = search;
         _models = models;
         _logger = logger;
         _decryptor = decryptor;
+        _projector = projector;
     }
 
     internal sealed record OutboxRow(long Id, long? RecordId, Guid? RecordPublicId, byte Reason, string? ChangedFids, string? OldRefs);
@@ -76,7 +79,7 @@ public sealed class ComputeTableProcessor : TenantRepositoryBase
                 {
                     var concrete = await ComputeScopes.ResolveAsync(guard.Connection, plan, scope, ct);
                     var result = await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, field.MaterializeVersion, concrete,
-                        model.Schema, options, reconcile: false, ct, _decryptor);
+                        model.Schema, options, reconcile: false, ct, _decryptor, _projector);
                     fields++;
                     values += result.RowsWritten;
                     foreach (var t in await PropagateAsync(guard.Connection, model, plan, result, ct)) notify.Add(t);
@@ -173,6 +176,7 @@ public sealed class ComputeTableProcessor : TenantRepositoryBase
     {
         var affected = model.Graph.AffectedBy(tableId, change.ChangedFids, change.RowsChanged).ToHashSet();
         var result = new List<(Domain.Entities.AppField, MaterializePlan, WriteScope)>();
+        var live = model.Live().Select(l => l.Plan.Key).ToHashSet();
         foreach (var (field, plan) in model.Live())
         {
             if (!affected.Contains(plan.Key)) continue;
@@ -181,7 +185,9 @@ public sealed class ComputeTableProcessor : TenantRepositoryBase
                 result.Add((field, plan, new WriteScope.All()));
                 continue;
             }
-            switch (plan)
+            var before = result.Count;
+            // A projected field's rows follow its Lookup / Summary / Formula shape.
+            switch (MaterializedColumnWriter.ShapeOf(plan))
             {
                 case SummaryPlan s:
                     if (s.ChildTableId == tableId)
@@ -201,6 +207,12 @@ public sealed class ComputeTableProcessor : TenantRepositoryBase
                         result.Add((field, plan, new WriteScope.Rows(change.RecordIds)));
                     break;
             }
+            // A projected field reading a calculated field that is NOT stored hears of that field's changes only through this table-level
+            // event (no stored value changes, so nothing is propagated): its rows cannot be told, so all of them are worked out again.
+            // Through stored inputs nothing is needed here: their changed rows are propagated to it.
+            if (plan is ProjectedPlan && result.Count == before && tableId != plan.TableId
+                && model.Graph.InputsOf(plan.Key).Any(k => k.Fid != FieldKey.RowsFid && model.Decisions.ContainsKey(k) && !live.Contains(k)))
+                result.Add((field, plan, new WriteScope.All()));
         }
         return result;
     }
@@ -217,7 +229,7 @@ public static class ComputeScopes
     /// <summary>Turns <see cref="ParentsPending"/> into the concrete parent Ids; any other scope is returned as it is.</summary>
     public static async Task<WriteScope> ResolveAsync(SqlConnection connection, MaterializePlan plan, WriteScope scope, CancellationToken ct)
     {
-        if (scope is not ParentsPending pending || plan is not SummaryPlan s) return scope;
+        if (scope is not ParentsPending pending || MaterializedColumnWriter.ShapeOf(plan) is not SummaryPlan s) return scope;
         var parents = new HashSet<long>(pending.OldParents);
         var refCol = PhysicalNaming.ColumnName(pending.ReferenceFid);
         foreach (var chunk in pending.ChildIds.Chunk(2000))

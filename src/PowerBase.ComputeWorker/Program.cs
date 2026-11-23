@@ -37,6 +37,28 @@ builder.Services.AddSingleton<AesEncryptionService>();
 builder.Services.AddSingleton<IEncryptionService>(sp =>
     new CachedDekEncryptionService(sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<AesEncryptionService>()));
 builder.Services.AddScoped<ComputeDecryptor>();
+
+// The API's read code, for fields worked out the way a report works them out (ProjectedPlan): chains of calculated fields, criteria on
+// calculated or parent fields, Today() / relative dates, URLRoot(), Combined Text. The metadata cache is OFF here: the worker must see a
+// field definition change at once, and the API's cache invalidation does not reach this process.
+builder.Services.Configure<PowerBase.Application.Common.Configurations.MetadataCacheOptions>(o => o.Enabled = false);
+builder.Services.AddSingleton<IMetadataCache, MetadataCache>();
+builder.Services.AddSingleton<PowerBase.Formula.FormulaEngine>();
+builder.Services.AddSingleton<IFormulaRuntimeContext, WorkerFormulaRuntimeContext>();
+builder.Services.AddScoped<IAppRepository, PowerBase.Infrastructure.Repositories.AppRepository>();
+builder.Services.AddScoped<IAppVariableRepository, PowerBase.Infrastructure.Repositories.AppVariableRepository>();
+builder.Services.AddScoped<IAppRoleRepository, PowerBase.Infrastructure.Repositories.AppRoleRepository>();
+builder.Services.AddScoped<IAppUserRepository, PowerBase.Infrastructure.Repositories.AppUserRepository>();
+builder.Services.AddScoped<IAppTableRepository, PowerBase.Infrastructure.Repositories.AppTableRepository>();
+builder.Services.AddScoped<IUserRepository, PowerBase.Infrastructure.Repositories.UserRepository>();
+builder.Services.AddScoped<IAppFieldRepository, PowerBase.Infrastructure.Repositories.AppFieldRepository>();
+builder.Services.AddScoped<IRecordRepository, PowerBase.Infrastructure.Repositories.RecordRepository>();
+builder.Services.AddScoped<IRelationshipRepository, PowerBase.Infrastructure.Repositories.RelationshipRepository>();
+builder.Services.AddScoped<PowerBase.Application.Compute.IMaterializedFieldState, MaterializedFieldStateRepository>();
+builder.Services.AddScoped<PowerBase.Application.Formulas.IFormulaProjector, PowerBase.Application.Formulas.FormulaProjector>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.IRelationalProjector, PowerBase.Application.Relationships.RelationalProjector>();
+builder.Services.AddScoped<ProjectedValueComputer>();
+
 builder.Services.AddScoped<ComputeTableProcessor>();
 builder.Services.AddScoped<MaterializeBuilder>();
 builder.Services.AddScoped<MaterializedIndexMaintainer>();
@@ -53,5 +75,6 @@ builder.Services.AddHostedService<ComputeOutboxRelay>();
 builder.Services.AddHostedService<ReplicaHeartbeatWriter>();
 builder.Services.AddHostedService<BackfillRunner>();
 builder.Services.AddHostedService<ReconciliationWorker>();
+builder.Services.AddHostedService<DailyRefreshRunner>();
 
 builder.Build().Run();

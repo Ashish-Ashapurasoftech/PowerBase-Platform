@@ -13,14 +13,20 @@ public static class SqlColumnType
 {
     public const string TextSortKey = "NVARCHAR(400)";
     public const int TextSortKeyLength = 400;
+    /// <summary>Whole long text (Combined Text, rich text): shown from c_, never cut, never indexed.</summary>
+    public const string FullText = "NVARCHAR(MAX)";
 
     private static readonly Regex Allowed = new(
-        @"^(BIT|TINYINT|SMALLINT|INT|BIGINT|DATE|NVARCHAR\(400\)|DECIMAL\(\d{1,2},\d{1,2}\)|DATETIME2\(\d\)|TIME\(\d\))$", RegexOptions.Compiled);
+        @"^(BIT|TINYINT|SMALLINT|INT|BIGINT|DATE|NVARCHAR\(400\)|NVARCHAR\(MAX\)|DECIMAL\(\d{1,2},\d{1,2}\)|DATETIME2\(\d\)|TIME\(\d\))$", RegexOptions.Compiled);
 
     /// <summary>True for the only types the schema engine will add as a c_ column (the type string is built from integers we control).</summary>
     public static bool IsAllowed(string sqlType) => Allowed.IsMatch(sqlType);
 
-    public static bool IsText(string sqlType) => sqlType == TextSortKey;
+    /// <summary>Text of either kind (compared exactly, case included).</summary>
+    public static bool IsText(string sqlType) => sqlType is TextSortKey or FullText;
+
+    /// <summary>Text kept whole: never cut, never indexed.</summary>
+    public static bool IsFullText(string sqlType) => sqlType == FullText;
 
     /// <summary>"DECIMAL(18,4)", "NVARCHAR(MAX)", "DATETIME2(3)"… from sys.columns.</summary>
     public static string Format(string typeName, short maxLength, byte precision, byte scale) => typeName.ToLowerInvariant() switch
@@ -46,7 +52,9 @@ public static class SqlColumnType
 
     /// <summary>The value expression cast to the stored type (text cut to the sort-key length).</summary>
     public static string CastTo(string valueExpr, string sqlType) =>
-        IsText(sqlType)
+        IsFullText(sqlType)
+            ? $"CAST({valueExpr} AS NVARCHAR(MAX))"
+            : IsText(sqlType)
             ? $"CAST(LEFT(CAST({valueExpr} AS NVARCHAR(MAX)), {TextSortKeyLength}) AS {TextSortKey})"
             : $"CAST({valueExpr} AS {sqlType})";
 

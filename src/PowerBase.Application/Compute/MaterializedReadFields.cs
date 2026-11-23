@@ -162,4 +162,33 @@ public static class MaterializedReadFields
     };
 
     private static string? NonEmpty(string? s) => string.IsNullOrWhiteSpace(s) ? null : s;
+
+    /// <summary>Fields whose stored text is kept whole (NVARCHAR(MAX), shown, never indexed): Combined Text summaries and rich-text formulas.
+    /// Every other stored text is a 400-character sort key, which may be cut.</summary>
+    public static bool IsFullTextStored(AppField field) =>
+        field.TypeCode == "Formula_RichText"
+        || (field.TypeCode == "Summary" && SummaryFunctions.Normalize(FormulaTypeMap.ParseSummarySettings(field.Settings)?.Function) == SummaryFunctions.CombinedText);
+}
+
+/// <summary>
+/// The field the compute worker is working out right now: the read code it runs must not show that field from its own (old) stored column.
+/// Flows with the async call (AsyncLocal), so builds side by side each exclude their own field.
+/// </summary>
+public static class StoredReadExclusion
+{
+    private static readonly System.Threading.AsyncLocal<long?> Current = new();
+
+    public static long? FieldId => Current.Value;
+
+    public static System.IDisposable Exclude(long fieldId)
+    {
+        var previous = Current.Value;
+        Current.Value = fieldId;
+        return new Restore(previous);
+    }
+
+    private sealed class Restore(long? previous) : System.IDisposable
+    {
+        public void Dispose() => Current.Value = previous;
+    }
 }

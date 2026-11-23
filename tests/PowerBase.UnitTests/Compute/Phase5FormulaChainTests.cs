@@ -59,10 +59,10 @@ public class Phase5FormulaChainTests
     }
 
     [Fact]
-    public void Without_the_inputs_decision_a_chain_is_refused()
+    public void Without_the_inputs_decision_a_chain_is_worked_out_by_the_read_code()
     {
         var schema = Schema();
-        MaterializeRules.Evaluate(SumOfSum, schema).Outcome.Should().Be(MaterializeOutcome.NotAllowed);
+        MaterializeRules.Evaluate(SumOfSum, schema).Plan.Should().BeOfType<ProjectedPlan>();
     }
 
     [Fact]
@@ -76,11 +76,11 @@ public class Phase5FormulaChainTests
     }
 
     [Fact]
-    public void A_chain_over_stored_text_is_refused_because_text_is_cut_to_400_characters()
+    public void A_chain_over_stored_text_is_worked_out_by_the_read_code_because_text_is_cut_to_400_characters()
     {
         var overText = F(Dept, 9, "Summary", "Max of names",
             System.Text.Json.JsonSerializer.Serialize(new { ChildTableId = Emp, ReferenceFid = 6, Function = "Max", TargetFid = 15, TargetTypeCode = "Text", ResultTypeCode = "Text" }));
-        Decide(Schema(overText), overText).Outcome.Should().Be(MaterializeOutcome.NotAllowed);
+        Decide(Schema(overText), overText).Plan.Should().BeOfType<ProjectedPlan>();
     }
 
     // ── formulas ──────────────────────────────────────────────────────────────────────────────────────
@@ -93,6 +93,45 @@ public class Phase5FormulaChainTests
         plan.StoredReads.Should().Equal(11);
         plan.PhysicalReads.Should().BeEmpty();
         plan.ResultType.Should().Be(FormulaType.Number);
+    }
+
+    [Theory]
+    [InlineData("ToText([Manager])", false)]           // a Reference, read as the read code reads it
+    [InlineData("[Task Names Max] & \"!\"", false)]    // stored text is a cut sort key: worked out instead
+    [InlineData("URLRoot() & [First]", false)]         // the deployment's fixed address (Frontend:BaseUrl)
+    public void Formulas_the_sql_cannot_store_are_worked_out_by_the_read_code(string expression, bool daily)
+    {
+        var f = F(Emp, 30, "Formula_Text", "Projected", Expr(expression));
+        var plan = Decide(Schema(f), f).Plan.Should().BeOfType<ProjectedPlan>().Subject;
+        plan.Daily.Should().Be(daily);
+        plan.SqlType.Should().Be("NVARCHAR(400)");
+        plan.Shape.Should().BeOfType<FormulaPlan>().Which.TableId.Should().Be(Emp);
+    }
+
+    [Fact]
+    public void A_today_formula_is_refreshed_after_midnight_utc()
+    {
+        var f = F(Emp, 30, "Formula_Date", "Due", Expr("Today()"));
+        var plan = Decide(Schema(f), f).Plan.Should().BeOfType<ProjectedPlan>().Subject;
+        plan.Daily.Should().BeTrue();
+        plan.SqlType.Should().Be("DATE");
+    }
+
+    [Fact]
+    public void A_formula_reading_a_field_that_can_never_be_stored_is_refused_too()
+    {
+        var perViewer = F(Emp, 30, "Formula_Text", "Who", Expr("UserToName([Salary])"));
+        var reader = F(Emp, 31, "Formula_Text", "Who twice", Expr("[Who] & [Who]"));
+        var d = Decide(Schema(perViewer, reader), reader);
+        d.Outcome.Should().Be(MaterializeOutcome.NotAllowed);
+        d.Reason.Should().Contain("can never be stored");
+    }
+
+    [Fact]
+    public void A_rich_text_formula_is_kept_whole()
+    {
+        var f = F(Emp, 30, "Formula_RichText", "Card", Expr("\"<b>\" & [First] & \"</b>\""));
+        Decide(Schema(f), f).Plan.Should().BeOfType<ProjectedPlan>().Which.SqlType.Should().Be("NVARCHAR(MAX)");
     }
 
     [Fact]
@@ -123,9 +162,8 @@ public class Phase5FormulaChainTests
     }
 
     [Theory]
-    [InlineData("ToText([Manager])", "Reference")]
-    [InlineData("[Task Names Max] & \"!\"", "not stored")]
-    [InlineData("URLRoot() & [First]", "URLRoot")]
+    [InlineData("UserToEmail([Salary])", "UserToEmail")]
+    [InlineData("Now() & [First]", "Now")]
     [InlineData("UserToName([Salary])", "UserToName")]
     [InlineData("[Nope] * 2", "compile")]
     public void Formulas_that_cannot_be_stored_exactly_are_refused(string expression, string reason)

@@ -94,7 +94,10 @@ public class StoredColumnRoundTripTests : IClassFixture<ComputeSqlFixture>, IAsy
         _nameLookupId = await AddFieldAsync(conn, Emp, 4, 8, "Dept Name", $"{{\"SourceTableId\":{Dept},\"ReferenceFid\":6,\"SourceFid\":6}}");
         _totalId = await AddFieldAsync(conn, Dept, 5, 8, "Total Salary", $"{{\"ChildTableId\":{Emp},\"ReferenceFid\":6,\"Function\":\"Sum\",\"TargetFid\":7}}");
         _countId = await AddFieldAsync(conn, Dept, 5, 9, "Head Count", $"{{\"ChildTableId\":{Emp},\"ReferenceFid\":6,\"Function\":\"Count\"}}");
-        _combinedId = await AddFieldAsync(conn, Dept, 5, 10, "All Salaries", $"{{\"ChildTableId\":{Emp},\"ReferenceFid\":6,\"Function\":\"CombinedText\",\"TargetFid\":7}}");
+        // A summary the rules refuse for good: its criteria ask the viewer for a value (never the same for everyone).
+        _combinedId = await AddFieldAsync(conn, Dept, 5, 10, "Asked Count",
+            System.Text.Json.JsonSerializer.Serialize(new { ChildTableId = Emp, ReferenceFid = 6, Function = "Count",
+                FilterTree = """{"logic":"and","nodes":[{"condition":{"fieldId":7,"operator":"gt","valueMode":"ask"}}]}""" }));
 
         // 250 departments (more than two batches of 100), 1,000 employees; some departments have nobody.
         await conn.ExecuteAsync($"""
@@ -147,7 +150,7 @@ public class StoredColumnRoundTripTests : IClassFixture<ComputeSqlFixture>, IAsy
 
         outcomes.Where(o => o.Outcome == "ready").Select(o => o.FieldId).Should().BeEquivalentTo([_nameLookupId, _totalId, _countId]);
         (await StateAsync(_totalId)).State.Should().Be(MaterializeStates.Ready);
-        (await StateAsync(_combinedId)).Mode.Should().Be(MaterializeModes.NotAllowed, "Combined Text is never stored");
+        (await StateAsync(_combinedId)).Mode.Should().Be(MaterializeModes.NotAllowed, "a summary asking the viewer is never stored");
         (await WrongValuesAsync()).Should().Be((0, 0, 0));
 
         await using var conn = await OpenAsync();
@@ -212,14 +215,14 @@ public class StoredColumnRoundTripTests : IClassFixture<ComputeSqlFixture>, IAsy
         var state = StateRepo();
         (await state.GetStatusAsync(Field(_totalId, Dept, 8, "Summary")))!.Status.Should().Be(StoredColumnStatuses.Waiting, "undecided = about to be switched on");
 
-        (await builder.SwitchOnUndecidedAsync(CancellationToken.None)).Should().Be(3, "the lookup, Total Salary and All Salaries; never the plain fields");
+        (await builder.SwitchOnUndecidedAsync(CancellationToken.None)).Should().Be(3, "the lookup, Total Salary and Asked Count; never the plain fields");
         (await StateAsync(_countId)).Mode.Should().Be(MaterializeModes.Excluded);
         (await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM meta.AppField WHERE AppTableId IN (@Dept, @Emp) AND FieldTypeId IN (1, 2, 3) AND MaterializeMode <> 0", new { Dept, Emp }))
             .Should().Be(0);
 
         var outcomes = await builder.BuildPendingAsync(_options, CancellationToken.None);
         outcomes.Where(o => o.Outcome == "ready").Select(o => o.FieldId).Should().BeEquivalentTo([_nameLookupId, _totalId]);
-        (await StateAsync(_combinedId)).Mode.Should().Be(MaterializeModes.NotAllowed, "the rules still refuse Combined Text");
+        (await StateAsync(_combinedId)).Mode.Should().Be(MaterializeModes.NotAllowed, "the rules still refuse a summary asking the viewer");
         (await builder.SwitchOnUndecidedAsync(CancellationToken.None)).Should().Be(0, "nothing is undecided any more");
 
         // The field page's status, read fresh from the table.
@@ -245,7 +248,7 @@ public class StoredColumnRoundTripTests : IClassFixture<ComputeSqlFixture>, IAsy
         var (builder, _) = Worker();
         await builder.BuildPendingAsync(_options, CancellationToken.None);
         (await StateAsync(_combinedId)).Mode.Should().Be(MaterializeModes.NotAllowed);
-        (await builder.RecheckNotAllowedAsync(CancellationToken.None)).Should().Be(0, "Combined Text is still refused");
+        (await builder.RecheckNotAllowedAsync(CancellationToken.None)).Should().Be(0, "a summary asking the viewer is still refused");
 
         // A field marked Not allowed earlier that the rules allow now (here: Head Count, marked by hand to stand in for a changed input).
         await using var conn = await OpenAsync();

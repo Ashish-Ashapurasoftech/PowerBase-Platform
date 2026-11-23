@@ -195,8 +195,12 @@ public class Phase3RulesAndGraphTests
         Decide(F(Emp, 30, "Lookup", LookupJson(sourceFid: 7))).Reason.Should().Contain("MultiSelect");
 
     [Fact]
-    public void Combined_text_is_not_allowed() =>
-        Decide(F(Dept, 30, "Summary", SummaryJson("CombinedText", 9))).Reason.Should().Contain("Combined Text");
+    public void Combined_text_is_stored_whole_by_the_read_code()
+    {
+        var plan = Decide(F(Dept, 30, "Summary", SummaryJson("CombinedText", 9))).Plan.Should().BeOfType<ProjectedPlan>().Subject;
+        plan.SqlType.Should().Be("NVARCHAR(MAX)");
+        plan.Shape.Should().BeOfType<SummaryPlan>();
+    }
 
     [Fact]
     public void Summary_with_incomplete_settings_is_not_allowed() =>
@@ -207,8 +211,8 @@ public class Phase3RulesAndGraphTests
         Decide(F(Dept, 30, "Summary", SummaryJson("Count", null, child: 999))).Outcome.Should().Be(MaterializeOutcome.NotAllowed);
 
     [Fact]
-    public void Summary_of_a_calculated_target_is_not_allowed_yet() =>
-        Decide(F(Dept, 30, "Summary", SummaryJson("Sum", 11))).Reason.Should().Contain("calculated");
+    public void Summary_of_a_calculated_target_is_worked_out_by_the_read_code() =>
+        Decide(F(Dept, 30, "Summary", SummaryJson("Sum", 11))).Plan.Should().BeOfType<ProjectedPlan>();
 
     [Fact]
     public void Summary_of_an_encrypted_target_is_decrypted_with_the_child_app_key()
@@ -243,22 +247,35 @@ public class Phase3RulesAndGraphTests
         Decide(F(Dept, 30, "Summary", SummaryJson("Sum", null))).Outcome.Should().Be(MaterializeOutcome.NotAllowed);
 
     [Theory]
-    [InlineData("today"), InlineData("yesterday"), InlineData("pastDays"), InlineData("duringCurrent"), InlineData("parentField"), InlineData("ask")]
-    public void Criteria_with_a_moving_or_outside_value_are_not_allowed(string mode) =>
+    [InlineData("today", true), InlineData("yesterday", true), InlineData("pastDays", true), InlineData("duringCurrent", true), InlineData("parentField", false)]
+    public void Criteria_with_a_relative_date_or_a_parent_field_are_worked_out_by_the_read_code(string mode, bool daily) =>
+        Decide(F(Dept, 30, "Summary", SummaryJson("Count", null, Filter("eq", mode, valueFid: 6)))).Plan.Should().BeOfType<ProjectedPlan>().Which.Daily.Should().Be(daily);
+
+    [Theory]
+    [InlineData("ask"), InlineData("currentUserOrSomethingNew")]
+    public void Criteria_asking_the_viewer_or_with_an_unknown_mode_are_not_allowed(string mode) =>
         Decide(F(Dept, 30, "Summary", SummaryJson("Count", null, Filter("eq", mode)))).Outcome.Should().Be(MaterializeOutcome.NotAllowed);
 
     [Theory]
-    [InlineData("isCurrentUser"), InlineData("isNotCurrentUser"), InlineData("during"), InlineData("notDuring")]
-    public void Criteria_with_a_viewer_or_clock_operator_are_not_allowed(string op) =>
+    [InlineData("isCurrentUser"), InlineData("isNotCurrentUser")]
+    public void Criteria_with_a_viewer_operator_are_not_allowed(string op) =>
         Decide(F(Dept, 30, "Summary", SummaryJson("Count", null, Filter(op)))).Outcome.Should().Be(MaterializeOutcome.NotAllowed);
 
     [Theory]
-    [InlineData(10L, "User")]        // user picks resolve per viewer
-    [InlineData(11L, "calculated")]
-    [InlineData(13L, "Reference")]
-    [InlineData(99L, "no longer exists")]
-    public void Criteria_on_fields_sql_cannot_read_fixed_are_not_allowed(long fid, string reason) =>
-        Decide(F(Dept, 30, "Summary", SummaryJson("Count", null, Filter(fid: fid)))).Reason.Should().Contain(reason);
+    [InlineData("during"), InlineData("notDuring")]
+    public void Criteria_with_a_date_range_operator_are_refreshed_daily(string op) =>
+        Decide(F(Dept, 30, "Summary", SummaryJson("Count", null, Filter(op)))).Plan.Should().BeOfType<ProjectedPlan>().Which.Daily.Should().BeTrue();
+
+    [Theory]
+    [InlineData(10L)]   // a User field compared to a picked user (not the viewer)
+    [InlineData(11L)]   // a calculated field
+    [InlineData(13L)]   // a Reference (compared as its key)
+    public void Criteria_sql_cannot_read_are_worked_out_by_the_read_code(long fid) =>
+        Decide(F(Dept, 30, "Summary", SummaryJson("Count", null, Filter(fid: fid)))).Plan.Should().BeOfType<ProjectedPlan>();
+
+    [Fact]
+    public void Criteria_naming_a_field_that_no_longer_exists_are_not_allowed() =>
+        Decide(F(Dept, 30, "Summary", SummaryJson("Count", null, Filter(fid: 99)))).Reason.Should().Contain("no longer exists");
 
     [Fact]
     public void Unreadable_criteria_are_not_allowed() =>
@@ -410,7 +427,7 @@ public class Phase3RulesAndGraphTests
         SqlColumnType.StoredTypeFor(source).Should().Be(stored);
 
     [Theory]
-    [InlineData("INT; DROP TABLE x"), InlineData("NVARCHAR(MAX)"), InlineData("DECIMAL(18,4) NULL; --")]
+    [InlineData("INT; DROP TABLE x"), InlineData("NVARCHAR(4000)"), InlineData("DECIMAL(18,4) NULL; --")]
     public void The_schema_engine_refuses_any_other_type(string type) =>
         SqlColumnType.IsAllowed(type).Should().BeFalse();
 

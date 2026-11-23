@@ -111,7 +111,9 @@ public sealed class RelationalProjector : IRelationalProjector
         var none = new HashSet<int>();
         if (_materialized is null || candidates.Count == 0) return none;
         var ready = await _materialized.ReadyFieldIdsAsync(ct);
-        var fields = candidates.Where(f => ready.Contains(f.Id) && f.Fid.HasValue).ToList();
+        // The field the compute worker is working out right now is never read from its own (old) column.
+        var computing = PowerBase.Application.Compute.StoredReadExclusion.FieldId;
+        var fields = candidates.Where(f => ready.Contains(f.Id) && f.Fid.HasValue && f.Id != computing).ToList();
         if (fields.Count == 0) return none;
 
         var ids = new long[rows.Count];
@@ -125,10 +127,11 @@ public sealed class RelationalProjector : IRelationalProjector
         foreach (var field in fields)
         {
             var fid = field.Fid!.Value;
+            var fullText = PowerBase.Application.Compute.MaterializedReadFields.IsFullTextStored(field);
             var usable = true;
             for (var i = 0; i < rows.Count && usable; i++)
                 usable = values.TryGetValue(ids[i], out var row) && row.TryGetValue(fid, out var v)
-                    && !(v is string s && s.Length >= StoredTextLength);
+                    && (fullText || !(v is string s && s.Length >= StoredTextLength));
             if (!usable) continue;
             for (var i = 0; i < rows.Count; i++) maps[i][fid] = values[ids[i]][fid];
             filled.Add(fid);

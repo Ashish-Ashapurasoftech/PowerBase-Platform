@@ -23,10 +23,11 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
     private readonly ComputeSearchNotifier? _search;
     private readonly ILogger<MaterializeBuilder>? _logger;
     private readonly ComputeDecryptor? _decryptor;
+    private readonly ProjectedValueComputer? _projector;
 
     public MaterializeBuilder(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, ISchemaEngineService schemaEngine,
         ComputeModelCache models, ComputeTableProcessor processor, ILogger<MaterializeBuilder>? logger = null, ComputeSearchNotifier? search = null,
-        ComputeDecryptor? decryptor = null)
+        ComputeDecryptor? decryptor = null, ProjectedValueComputer? projector = null)
         : base(connectionFactory, queryContext)
     {
         _search = search;
@@ -35,6 +36,7 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
         _processor = processor;
         _logger = logger;
         _decryptor = decryptor;
+        _projector = projector;
     }
 
     public sealed record FieldOutcome(long FieldId, int Fid, long TableId, string Outcome, long Rows, long Differences, TimeSpan Took, string? Reason = null);
@@ -209,7 +211,7 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
             await using (var guard = await DatabaseGuard.AcquireAsync(ConnectionFactory.CreateAsync, options, backgroundOnly: true, TimeSpan.FromMinutes(2), _logger, ct))
             {
                 if (guard is null) return Done("busy", reason: "No background compute slot was free.");
-                result = await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, v, new WriteScope.All(), model.Schema, options, reconcile: false, ct, _decryptor);
+                result = await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, v, new WriteScope.All(), model.Schema, options, reconcile: false, ct, _decryptor, _projector);
                 await ComputeTableProcessor.PropagateAsync(guard.Connection, model, plan, result, ct);
             }
 
@@ -278,7 +280,7 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
             if (sqlType is null) { outcomes.Add(new(field.Id, plan.Fid, plan.TableId, "missing-column", 0, 0, sw.Elapsed)); continue; }
             try
             {
-                var r = await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, field.MaterializeVersion, new WriteScope.All(), model.Schema, options, reconcile: true, ct, _decryptor);
+                var r = await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, field.MaterializeVersion, new WriteScope.All(), model.Schema, options, reconcile: true, ct, _decryptor, _projector);
                 await ComputeTableProcessor.PropagateAsync(guard.Connection, model, plan, r, ct);   // fixed values feed their stored dependents
                 outcomes.Add(new(field.Id, plan.Fid, plan.TableId, "checked", r.RowsWritten, r.Differences, sw.Elapsed));
                 var level = r.Differences > 0 ? LogLevel.Warning : LogLevel.Information;
@@ -291,6 +293,46 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
         return outcomes;
     }
 
+    /// <summary>
+    /// After midnight UTC (the date Today() and relative-date criteria use on the read path): every Ready field whose value moves with the
+    /// date and was last worked out before today is worked out again, inputs first. Its changed rows are propagated, so whatever reads it
+    /// follows. MaterializedOn records when the values were last made current.
+    /// </summary>
+    public async Task<IReadOnlyList<FieldOutcome>> RefreshDailyAsync(ComputeOptions options, CancellationToken ct)
+    {
+        var today = DateTime.UtcNow.Date;
+        var model = await _models.GetAsync(QueryContext.TenantId, Repo, fresh: true, ct);
+        var order = model.Graph.TopologicalOrder.Select((k, i) => (k, i)).ToDictionary(x => x.k, x => x.i);
+        var outcomes = new List<FieldOutcome>();
+        foreach (var (field, plan) in model.Live()
+                     .Where(l => l.Plan is ProjectedPlan { Daily: true } && l.Field.MaterializeState == MaterializeStates.Ready
+                                 && (l.Field.MaterializedOn ?? DateTime.MinValue) < today)
+                     .OrderBy(l => order.TryGetValue(l.Plan.Key, out var i) ? i : int.MaxValue))
+        {
+            var sw = Stopwatch.StartNew();
+            await using var guard = await DatabaseGuard.AcquireAsync(ConnectionFactory.CreateAsync, options, backgroundOnly: true, TimeSpan.FromMinutes(2), _logger, ct);
+            if (guard is null) { outcomes.Add(new(field.Id, plan.Fid, plan.TableId, "busy", 0, 0, sw.Elapsed)); break; }
+            var sqlType = await SqlColumnType.ReadAsync(guard.Connection, PhysicalNaming.FullTableName(plan.TableId), PhysicalNaming.MaterializedColumnName(plan.Fid), ct: ct);
+            if (sqlType is null) continue;
+            try
+            {
+                var r = await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, field.MaterializeVersion, new WriteScope.All(), model.Schema, options, reconcile: false, ct, _decryptor, _projector);
+                await ComputeTableProcessor.PropagateAsync(guard.Connection, model, plan, r, ct);
+                await guard.Connection.ExecuteAsync(new CommandDefinition(
+                    "UPDATE meta.AppField SET MaterializedOn = SYSUTCDATETIME() WHERE Id = @id AND MaterializeVersion = @v AND MaterializeState = @ready",
+                    new { id = field.Id, v = field.MaterializeVersion, ready = MaterializeStates.Ready }, cancellationToken: ct));
+                if (_search is not null && r.RowsWritten > 0) await _search.ValuesChangedAsync(field, r.ChangedIds, r.TooManyChanges, ct);
+                outcomes.Add(new(field.Id, plan.Fid, plan.TableId, "refreshed", r.RowsWritten, 0, sw.Elapsed));
+                _logger?.LogInformation("Compute daily refresh: tenant {TenantId} field {FieldId} (t{TableId}.c_{Fid}): {Rows} value(s) moved with the date, {Seconds:0.0}s.",
+                    QueryContext.TenantId, field.Id, plan.TableId, plan.Fid, r.RowsWritten, sw.Elapsed.TotalSeconds);
+            }
+            catch (DatabaseBusyException) { outcomes.Add(new(field.Id, plan.Fid, plan.TableId, "busy", 0, 0, sw.Elapsed)); break; }
+            catch (MaterializeVersionChangedException) { outcomes.Add(new(field.Id, plan.Fid, plan.TableId, "superseded", 0, 0, sw.Elapsed)); }
+        }
+        if (outcomes.Count > 0) _models.Invalidate(QueryContext.TenantId);
+        return outcomes;
+    }
+
     /// <summary>The stored calculated fields the plan reads (a chain): they must be Ready before it is built.</summary>
     internal static IReadOnlyList<FieldKey> StoredInputs(MaterializePlan plan) => plan switch
     {
@@ -300,7 +342,7 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
         _ => []
     };
 
-    internal static IReadOnlyList<long> InputTables(MaterializePlan plan) => plan switch
+    internal static IReadOnlyList<long> InputTables(MaterializePlan plan) => MaterializedColumnWriter.ShapeOf(plan) switch
     {
         SummaryPlan s => new[] { s.ChildTableId, s.ParentTableId }.Distinct().ToList(),
         LookupPlan l => new[] { l.ParentTableId, l.ChildTableId }.Distinct().ToList(),

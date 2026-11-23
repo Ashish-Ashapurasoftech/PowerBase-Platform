@@ -22,7 +22,7 @@ public static class StoredIndexPlanner
     };
 
     /// <summary>A Yes/No column has two values: an index on it is rarely used and still costs every write (design 4.3).</summary>
-    public static bool IsWorthIndexing(string sqlType) => sqlType != "BIT";
+    public static bool IsWorthIndexing(string sqlType) => sqlType is not ("BIT" or "NVARCHAR(MAX)");   // MAX cannot be an index key
 
     /// <summary>
     /// The AppField.Id of every field in <paramref name="candidateFieldIds"/> that a report or a role rule sorts, groups or filters on.

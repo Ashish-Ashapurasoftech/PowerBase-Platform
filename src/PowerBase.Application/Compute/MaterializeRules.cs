@@ -49,6 +49,16 @@ public sealed record FormulaPlan(long FormulaTableId, int FormulaFid, long Field
     IReadOnlyList<int> PhysicalReads, IReadOnlyList<int> StoredReads, bool IsUnique, long? DecryptAppId = null)
     : MaterializePlan(FormulaTableId, FormulaFid, FieldId, DecryptAppId);
 
+/// <summary>
+/// A field the set-based SQL cannot work out (it reads other calculated fields, its criteria read them or compare to the parent, it uses
+/// Today() / a relative-date criteria, URLRoot(), Combined Text, rich text…): the worker works its value out with the API's own read code
+/// (RelationalProjector / FormulaProjector, the code every report uses), so the stored value IS the value shown, and keeps it in c_.
+/// <paramref name="Shape"/> is the Lookup / Summary / Formula plan of the same field, used only to know which rows a change makes stale.
+/// <paramref name="Daily"/>: the value moves with the date (UTC, as the read path) — all of it is recomputed after midnight UTC.
+/// </summary>
+public sealed record ProjectedPlan(long TableId, int Fid, long FieldId, string SqlType, bool Daily, MaterializePlan Shape)
+    : MaterializePlan(TableId, Fid, FieldId);
+
 public sealed record MaterializeDecision(MaterializeOutcome Outcome, string? Reason, MaterializePlan? Plan)
 {
     public static MaterializeDecision Allow(MaterializePlan plan) => new(MaterializeOutcome.Allowed, null, plan);
@@ -141,9 +151,189 @@ public static class MaterializeRules
             return MaterializeDecision.Deny("The field is part of a dependency cycle.");
         // An encrypted app (or a field flagged encrypted) is NOT refused: what it reads is decrypted by the worker, and the value is stored plain.
 
-        if (field.TypeCode == "Lookup") return EvaluateLookup(field, fid, schema);
-        if (field.TypeCode == "Summary") return EvaluateSummary(field, fid, schema);
-        return EvaluateFormula(field, fid, schema);
+        // Long text (rich text, Combined Text) is kept whole: never through the native plans, which store a 400-character sort key.
+        if (MaterializedReadFields.IsFullTextStored(field))
+            return EvaluateProjected(field, fid, schema, MaterializeDecision.Deny("Long text is stored whole by the read code."));
+        var native = field.TypeCode switch
+        {
+            "Lookup" => EvaluateLookup(field, fid, schema),
+            "Summary" => EvaluateSummary(field, fid, schema),
+            _ => EvaluateFormula(field, fid, schema)
+        };
+        return native.Outcome == MaterializeOutcome.Allowed ? native : EvaluateProjected(field, fid, schema, native);
+    }
+
+    // ── projected: worked out by the API's read code ─────────────────────────────────────────────────────
+
+    /// <summary>Functions whose value can never be stored: it moves continuously (Now), differs per viewer or request (User, Rurl…), or reads
+    /// tables the dependency graph cannot see (GetRecords…). Today() and URLRoot() are NOT here: one moves once a day (daily refresh), the
+    /// other is the deployment's fixed address.</summary>
+    public static readonly string[] NeverStoredFormulaFunctions =
+        ["Now", "User", "UserRoles", "GetRecords", "GetRecord", "GetRecordByUniqueField", "SumValues", "GetFieldValues",
+         "UserID", "UserToID", "UserToName", "UserToEmail", "Rurl"];
+
+    private static readonly Regex NeverStoredCall = new(
+        @"\b(" + string.Join("|", NeverStoredFormulaFunctions) + @")\s*\(", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex TodayCall = new(@"\bToday\s*\(", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>Criteria value modes that resolve to a date relative to today (UTC), as RunReportQueryHandler resolves them.</summary>
+    private static readonly HashSet<string> DateValueModes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "today", "yesterday", "tomorrow", "pastDays", "futureDays", "duringCurrent", "duringPrevious", "duringNext"
+    };
+
+    /// <summary>Criteria value modes fixed by the data alone.</summary>
+    private static readonly HashSet<string> FixedValueModes = new(StringComparer.OrdinalIgnoreCase) { "literal", "field", "parentField" };
+
+    /// <summary>The c_ type of a projected value; null when its value type cannot be stored. Long text (Combined Text, rich text) is kept
+    /// whole (NVARCHAR(MAX), shown, not indexed); other text as the 400-character sort key.</summary>
+    public static string? ProjectedSqlType(AppField field)
+    {
+        if (MaterializedReadFields.IsFullTextStored(field)) return "NVARCHAR(MAX)";
+        if (field.TypeCode == "Summary")
+        {
+            switch (SummaryFunctions.Normalize(FormulaTypeMap.ParseSummarySettings(field.Settings)?.Function))
+            {
+                case SummaryFunctions.Count or SummaryFunctions.DistinctCount: return "INT";
+                case SummaryFunctions.Exists: return "BIT";
+                case SummaryFunctions.Sum or SummaryFunctions.Avg: return "DECIMAL(38,8)";
+            }
+        }
+        else if (field.TypeCode != "Lookup")
+            return FormulaTypeMap.ExpressionAndType(field.TypeCode, field.Settings) is { } et ? FormulaAnalysis.StoredSqlType(et.Type) : null;
+
+        return MaterializedReadFields.ValueTypeOf(field) switch
+        {
+            "Text" or "TextMultiLine" or "Email" or "Phone" or "Url" or "SingleSelect" => "NVARCHAR(400)",
+            "Number" or "Currency" or "Percent" or "Rating" => "DECIMAL(38,8)",
+            "Date" => "DATE",
+            "DateTime" => "DATETIME2(3)",
+            "Boolean" => "BIT",
+            _ => null
+        };
+    }
+
+    private static MaterializeDecision EvaluateProjected(AppField field, int fid, ComputeSchema schema, MaterializeDecision native)
+    {
+        // A unique formula is computed in the save from the record alone (design section 5): the native rules are the whole story for it.
+        if (field.IsUnique && field.TypeCode is not ("Lookup" or "Summary")) return native;
+        var daily = false;
+        var hard = field.TypeCode switch
+        {
+            "Lookup" => LookupNeverStored(field, schema),
+            "Summary" => SummaryNeverStored(field, schema, ref daily),
+            _ => FormulaNeverStored(field, fid, schema, ref daily)
+        };
+        if (hard is not null) return MaterializeDecision.Deny(hard);
+        if (ProjectedSqlType(field) is not { } sqlType || Shape(field, fid) is not { } shape) return native;
+        return MaterializeDecision.Allow(new ProjectedPlan(field.AppTableId, fid, field.Id, sqlType, daily, shape));
+    }
+
+    /// <summary>True when <paramref name="input"/> is a calculated field the rules refused for good: what reads it cannot be stored either.</summary>
+    private static bool NeverStoredInput(AppField input) =>
+        PhysicalNaming.IsComputedTypeCode(input.TypeCode) && input.Fid is int f
+        && _decided?.Invoke(new FieldKey(input.AppTableId, f)) is { Outcome: MaterializeOutcome.NotAllowed };
+
+    private static string? FormulaNeverStored(AppField field, int fid, ComputeSchema schema, ref bool daily)
+    {
+        var expression = FormulaExpression(field.Settings) ?? FormulaTypeMap.ExpressionAndType(field.TypeCode, field.Settings)?.Expression;
+        if (expression is not null && NeverStoredCall.Match(expression) is { Success: true } m)
+            return $"The formula uses {m.Groups[1].Value}(), whose value changes without a data change or differs per viewer.";
+        var tableFields = schema.FieldsOf(field.AppTableId);
+        if (FormulaAnalysis.Analyze(field, tableFields) is not { } info) return "The formula has no expression.";
+        if (info.UsesVariables) return "The formula uses an app variable (its value can change without any record changing).";
+        if (info.HasErrors) return "The formula does not compile.";
+        if (info.UsesDynamicFieldReference) return "The formula picks the field it reads per record, so what it depends on cannot be listed.";
+        var byFid = schema.FieldsByFid(field.AppTableId);
+        foreach (var read in info.Reads.Distinct())
+        {
+            if (read == fid || read is >= 1 and <= 5) continue;
+            if (!byFid.TryGetValue(read, out var input)) return "The formula reads a field that no longer exists.";
+            if (NeverStoredInput(input)) return $"The formula reads the calculated field '{input.Name}', which can never be stored.";
+        }
+        daily = expression is not null && TodayCall.IsMatch(expression);
+        return null;
+    }
+
+    private static string? LookupNeverStored(AppField field, ComputeSchema schema)
+    {
+        var s = FormulaTypeMap.ParseLookupSettings(field.Settings);
+        if (s is not { SourceTableId: long parentId, ReferenceFid: int refFid, SourceFid: int sourceFid }) return "The lookup's settings are incomplete.";
+        if (schema.Field(field.AppTableId, refFid) is not { TypeCode: "Reference" }) return "The lookup's reference field is missing.";
+        if (!schema.TableExists(parentId)) return "The lookup's parent table is missing.";
+        if (sourceFid is >= 1 and <= 5) return null;
+        if (schema.Field(parentId, sourceFid) is not { } source) return "The lookup's source field is missing.";
+        return NeverStoredInput(source) ? $"The lookup reads the calculated field '{source.Name}', which can never be stored." : null;
+    }
+
+    private static string? SummaryNeverStored(AppField field, ComputeSchema schema, ref bool daily)
+    {
+        var s = FormulaTypeMap.ParseSummarySettings(field.Settings);
+        if (s is not { ChildTableId: long childId, ReferenceFid: int refFid } || SummaryFunctions.Normalize(s.Function) is null)
+            return "The summary's settings are incomplete.";
+        if (!schema.TableExists(childId)) return "The summary's child table is missing.";
+        if (schema.Field(childId, refFid) is not { TypeCode: "Reference" }) return "The summary's reference field is missing.";
+        var function = SummaryFunctions.Normalize(s.Function);
+        if (s.TargetFid is null && function is not (SummaryFunctions.Count or SummaryFunctions.Exists)) return "The summary has no target field.";
+        var childFields = schema.FieldsByFid(childId);
+        var parentFields = schema.FieldsByFid(field.AppTableId);
+        foreach (var read in new[] { s.TargetFid, s.SortFid })
+        {
+            if (read is not int r || r is >= 1 and <= 5) continue;
+            if (!childFields.TryGetValue(r, out var t)) return "The summary reads a field that no longer exists.";
+            if (NeverStoredInput(t)) return $"The summary reads the calculated field '{t.Name}', which can never be stored.";
+        }
+        if (string.IsNullOrWhiteSpace(s.FilterTree)) return null;
+
+        FilterGroup? filter;
+        try { filter = JsonSerializer.Deserialize<FilterGroup>(s.FilterTree, FilterJson); }
+        catch (JsonException) { return "The summary's criteria cannot be read."; }
+        var stack = new Stack<FilterGroup>();
+        if (filter is not null) stack.Push(filter);
+        while (stack.Count > 0)
+            foreach (var node in stack.Pop().Nodes)
+            {
+                if (node.Group is { } g) stack.Push(g);
+                if (node.Condition is not { } c) continue;
+                var mode = c.ValueMode?.Trim();
+                if (string.Equals(mode, "ask", StringComparison.OrdinalIgnoreCase))
+                    return "The criteria ask the viewer for a value, which differs per viewer.";
+                if (c.Operator is "isCurrentUser" or "isNotCurrentUser") return "The criteria compare to the current user, which differs per viewer.";
+                if (!string.IsNullOrEmpty(mode) && DateValueModes.Contains(mode)) daily = true;
+                else if (!string.IsNullOrEmpty(mode) && !FixedValueModes.Contains(mode)) return $"The criteria use \"{mode}\", which is not fixed.";
+                if (c.Operator is "during" or "notDuring") daily = true;
+                if (c.FieldId is not (>= 1 and <= 5) && !childFields.ContainsKey(c.FieldId)) return "The criteria name a field that no longer exists.";
+                if (childFields.TryGetValue(c.FieldId, out var cf) && NeverStoredInput(cf))
+                    return $"The criteria read the calculated field '{cf.Name}', which can never be stored.";
+                if (c.ValueFieldId is long other)
+                {
+                    var onParent = string.Equals(mode, "parentField", StringComparison.OrdinalIgnoreCase);
+                    if ((onParent ? parentFields : childFields).TryGetValue(other, out var of) && NeverStoredInput(of))
+                        return $"The criteria compare to the calculated field '{of.Name}', which can never be stored.";
+                }
+            }
+        return null;
+    }
+
+    /// <summary>The Lookup / Summary / Formula plan shape of a projected field: which rows a change makes stale (no SQL is built from it).</summary>
+    private static MaterializePlan? Shape(AppField field, int fid)
+    {
+        switch (field.TypeCode)
+        {
+            case "Lookup":
+                return FormulaTypeMap.ParseLookupSettings(field.Settings) is { SourceTableId: long parent, ReferenceFid: int r, SourceFid: int src }
+                    ? new LookupPlan(field.AppTableId, fid, field.Id, r, parent, src, "") : null;
+            case "Summary":
+                var s = FormulaTypeMap.ParseSummarySettings(field.Settings);
+                return s is { ChildTableId: long child, ReferenceFid: int sr }
+                    ? new SummaryPlan(field.AppTableId, fid, field.Id, child, sr, SummaryFunctions.Normalize(s.Function) ?? SummaryFunctions.Count,
+                        s.TargetFid, s.TargetSubField, null)
+                    : null;
+            default:
+                var et = FormulaTypeMap.ExpressionAndType(field.TypeCode, field.Settings);
+                return new FormulaPlan(field.AppTableId, fid, field.Id, et?.Expression ?? "", et?.Type ?? PowerBase.Formula.Types.FormulaType.Text, [], [], false);
+        }
     }
 
     private static MaterializeDecision EvaluateFormula(AppField field, int fid, ComputeSchema schema)
