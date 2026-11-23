@@ -8,6 +8,7 @@ using Dapper;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Compute;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Infrastructure.Persistence;
@@ -32,6 +33,7 @@ public class ExemptFieldEncryptionCleanupService : IExemptFieldEncryptionCleanup
     private readonly IControlConnectionFactory _controlFactory;
     private readonly IEncryptionService _encryptionService;
     private readonly ILogger<ExemptFieldEncryptionCleanupService> _logger;
+    private readonly IComputeOutbox? _computeOutbox;
 
     private static readonly IReadOnlyDictionary<string, string> NativeSqlType =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -60,8 +62,10 @@ public class ExemptFieldEncryptionCleanupService : IExemptFieldEncryptionCleanup
         IControlConnectionFactory controlFactory,
         IEncryptionService encryptionService,
         ILogger<ExemptFieldEncryptionCleanupService> logger,
-        IMetadataCache metadataCache)
+        IMetadataCache metadataCache,
+        IComputeOutbox? computeOutbox = null)
     {
+        _computeOutbox = computeOutbox;
         _metadataCache = metadataCache;
         _queryContext = queryContext;
         _appRepo = appRepo;
@@ -208,10 +212,12 @@ public class ExemptFieldEncryptionCleanupService : IExemptFieldEncryptionCleanup
                         var encCtx = await FieldEncryptionContext.ResolveAsync(
                             conn, app.Id, tenantId, _encryptionService, null, ct);
 
+                        var rewrittenFids = new List<int>();
                         foreach (var field in affectedFields)
                         {
                             var fieldResult = await ProcessFieldAsync(
                                 conn, table, field, encCtx, tenantId, app.Id, ct);
+                            if (fieldResult.Fixed) rewrittenFids.Add(field.Fid!.Value);
 
                             result.FieldsFixed += fieldResult.Fixed ? 1 : 0;
                             result.FieldsFailed += fieldResult.Fixed ? 0 : 1;
@@ -232,6 +238,11 @@ public class ExemptFieldEncryptionCleanupService : IExemptFieldEncryptionCleanup
                                     field.Name, field.Fid, field.TypeCode, fieldResult.Error);
                             }
                         }
+
+                        // The rewritten columns now hold native values that lookups, summaries and formulas read: recompute the table.
+                        if (rewrittenFids.Count > 0 && _computeOutbox != null)
+                            await _computeOutbox.AddAsync(
+                                [new ComputeChange(table.Id, ComputeChangeReason.TableWide, ChangedFids: rewrittenFids)], null, ct);
                     }
                     catch (Exception ex)
                     {

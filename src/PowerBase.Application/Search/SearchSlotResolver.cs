@@ -77,7 +77,7 @@ public static class SearchSlotResolver
         var eligible = tableFields.Where(f => !f.IsDeleted && IsSearchEligible(f)).ToList();
         if (eligible.Count > WideTableThreshold) return true;
         return eligible
-            .GroupBy(f => SlotPrefix(f.TypeCode))
+            .GroupBy(f => SlotPrefix(SlotTypeCode(f)))
             .Any(g => g.Sum(f => IsRange(f.TypeCode) ? 2 : 1) > MaxSlots(g.Key));
     }
 
@@ -95,6 +95,18 @@ public static class SearchSlotResolver
     /// <summary>The slot column family a field type lives in: "num", "date", "bool" or "str".</summary>
     public static string SlotPrefix(string? typeCode) =>
         IsNumeric(typeCode) ? "num" : IsDate(typeCode) ? "date" : IsBoolean(typeCode) ? "bool" : "str";
+
+    /// <summary>
+    /// The type that decides which slot family a field's index column belongs to. A Lookup, Summary or Formula saves the type of the
+    /// value it shows in its Settings (see <see cref="Compute.MaterializedReadFields.ValueTypeOf"/>), and once its stored column is Ready
+    /// it is indexed as a stand-in of that type, so its column must be of that family: a Summary that counts goes in a numeric slot, not a
+    /// string one. Every other field is its own type code (so is a computed field whose value type is not known).
+    /// </summary>
+    public static string? SlotTypeCode(AppField field) =>
+        PowerBase.Domain.Constants.PhysicalNaming.IsMaterializableTypeCode(field.TypeCode)
+        && Compute.MaterializedReadFields.ValueTypeOf(field) is { } valueType
+            ? valueType
+            : field.TypeCode;
 
     public static int MaxSlots(string prefix) => prefix switch
     {
@@ -145,7 +157,7 @@ public static class SearchSlotResolver
 
     /// <summary>The columns of a field for a table that is (or is about to be) wide: f_{fid}, plus f_{fid}_e for a range.</summary>
     public static SlotRef WideRef(AppField field) =>
-        new(WideSlot(field.Fid!.Value), field.TypeCode, IsRange(field.TypeCode) ? WideEndSlot(field.Fid!.Value) : null);
+        new(WideSlot(field.Fid!.Value), SlotTypeCode(field), IsRange(field.TypeCode) ? WideEndSlot(field.Fid!.Value) : null);
 
     /// <summary>
     /// Decides slots for eligible fields whose slot is missing or of the wrong family (and a range's second slot). Pure: pass EVERY
@@ -182,11 +194,12 @@ public static class SearchSlotResolver
         foreach (var field in live.Where(IsSearchEligible).OrderBy(f => f.Fid ?? int.MaxValue).ThenBy(f => f.Id))
         {
             var wantsEnd = supportsEndSlots && IsRange(field.TypeCode);
-            var needSlot = !SlotMatchesType(field.SearchSlot, field.TypeCode);
-            var needEnd = wantsEnd && !SlotMatchesType(field.SearchSlotEnd, field.TypeCode);
+            var slotType = SlotTypeCode(field);
+            var needSlot = !SlotMatchesType(field.SearchSlot, slotType);
+            var needEnd = wantsEnd && !SlotMatchesType(field.SearchSlotEnd, slotType);
             if (!needSlot && !needEnd) continue;
 
-            var prefix = SlotPrefix(field.TypeCode);
+            var prefix = SlotPrefix(slotType);
             var slot = needSlot ? Take(prefix) : field.SearchSlot;
             var end = needEnd ? Take(prefix) : (wantsEnd ? field.SearchSlotEnd : null);
             if (slot == null || (wantsEnd && end == null)) continue; // pool full: stays in SQL (anything taken above stays reserved, which is harmless)

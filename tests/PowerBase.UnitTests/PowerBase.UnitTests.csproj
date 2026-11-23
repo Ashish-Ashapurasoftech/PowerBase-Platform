@@ -29,6 +29,7 @@
     <ProjectReference Include="..\..\src\PowerBase.Domain\PowerBase.Domain.csproj" />
     <ProjectReference Include="..\..\src\PowerBase.Infrastructure\PowerBase.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\PowerBase.API\PowerBase.API.csproj" />
+    <ProjectReference Include="..\..\src\PowerBase.ComputeWorker\PowerBase.ComputeWorker.csproj" />
   </ItemGroup>
 
 </Project>

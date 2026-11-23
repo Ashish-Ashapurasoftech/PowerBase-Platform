@@ -30,6 +30,10 @@ public class GetParentOptionsQueryHandler
     private readonly IReportRepository? _reportRepo;
     private readonly IUserRepository? _userRepo;
     private readonly IAppUserRepository? _appUserRepo;
+    private readonly Compute.IMaterializedFieldState? _materialized;
+
+    private async Task<IReadOnlySet<long>?> ReadyFieldIdsAsync(CancellationToken ct) =>
+        _materialized is null ? null : await _materialized.ReadyFieldIdsAsync(ct);
 
     public GetParentOptionsQueryHandler(
         IAppTableRepository tableRepo,
@@ -43,8 +47,10 @@ public class GetParentOptionsQueryHandler
         IFormRepository? formRepo = null,
         IReportRepository? reportRepo = null,
         IUserRepository? userRepo = null,
-        IAppUserRepository? appUserRepo = null)
+        IAppUserRepository? appUserRepo = null,
+        Compute.IMaterializedFieldState? materialized = null)
     {
+        _materialized = materialized;
         _queryContext = queryContext;
         _enforcer = enforcer;
         _formRepo = formRepo;
@@ -142,7 +148,7 @@ public class GetParentOptionsQueryHandler
                 {
                     // Fall back to ViewableRowIds for formula rules
                     onlyRowIds = await Records.ViewableRowIds.ResolveAsync(
-                        access, parent, parentFields, _recordRepo, _relationalProjector, _formulaProjector, ct);
+                        access, parent, parentFields, _recordRepo, _relationalProjector, _formulaProjector, ct, await ReadyFieldIdsAsync(ct));
                     if (onlyRowIds is { Count: 0 }) return new GetParentOptionsResult(headers, []);
                 }
             }
@@ -314,7 +320,7 @@ public class GetParentOptionsQueryHandler
                     VisibleFields = parentFields,
                 };
                 filterRowIds = await Records.ViewableRowIds.ResolveAsync(
-                    byTree, parent, parentFields, _recordRepo, _relationalProjector, _formulaProjector, ct);
+                    byTree, parent, parentFields, _recordRepo, _relationalProjector, _formulaProjector, ct, await ReadyFieldIdsAsync(ct));
             }
         }
 

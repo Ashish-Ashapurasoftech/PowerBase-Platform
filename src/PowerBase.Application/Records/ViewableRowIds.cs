@@ -17,7 +17,7 @@ public static class ViewableRowIds
     public static async Task<IReadOnlyCollection<long>?> ResolveAsync(
         TableAccessContext access, AppTable table, IReadOnlyList<AppField> fields,
         IRecordRepository recordRepo, IRelationalProjector relationalProjector, IFormulaProjector formulaProjector,
-        CancellationToken ct = default)
+        CancellationToken ct = default, IReadOnlySet<long>? readyFieldIds = null)
     {
         if (access.Unrestricted) return null;
         if (!access.CanView) return [];
@@ -27,6 +27,17 @@ public static class ViewableRowIds
             .Where(f => f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings))
             .Select(f => (long)f.Fid!.Value)
             .ToHashSet();
+
+        // A Ready stored field (c_{fid}) is a column now: when every computed condition is on one, the whole rule runs in SQL through
+        // the stand-ins, as in reports. Otherwise the rule keeps today's split (the in-memory path reads the original fields).
+        if (readyFieldIds is { Count: > 0 })
+        {
+            var notStored = formulaFids.Except(Compute.MaterializedReadFields.ReadyFids(fields, readyFieldIds)).ToHashSet();
+            if (notStored.Count < formulaFids.Count && !FormulaFilterSorter.TreeContainsFormulaField(access.ViewFilter, notStored))
+                return await recordRepo.ListMatchingRowIdsAsync(
+                    table, Compute.MaterializedReadFields.Substitute(fields, readyFieldIds), access.ViewFilter,
+                    restrictToCreatedBy: access.RestrictToCreatedBy, maxRows: 10000, timeoutSeconds: 30, ct: ct);
+        }
         var (physical, formula) = FormulaFilterSorter.SplitFilterTree(access.ViewFilter, formulaFids);
 
         // Fast bounded path: if the filter contains only physical fields (or no filter), query only row IDs directly

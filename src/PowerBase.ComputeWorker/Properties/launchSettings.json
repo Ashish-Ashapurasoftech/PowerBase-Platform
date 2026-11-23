@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "PowerBase.ComputeWorker": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}

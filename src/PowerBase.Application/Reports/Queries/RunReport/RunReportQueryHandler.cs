@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Compute;
 using PowerBase.Application.Formulas;
 using PowerBase.Application.Pipelines;
 using PowerBase.Application.Records;
@@ -106,6 +107,9 @@ public class RunReportQueryHandler
     }
 
     private readonly ISearchFieldJobs? _searchFieldJobs;
+    /// <summary>Stored (c_{fid}) Lookup / Summary columns: which are Ready, and the AppField ids of those this run reads in SQL.</summary>
+    private readonly Compute.IMaterializedFieldState? _materialized;
+    private IReadOnlySet<long> _readyFieldIds = new HashSet<long>();
     private readonly IServerTiming _timing;
 
     private static async Task<App?> WrapApp(Task<App> task) => await task;
@@ -134,8 +138,10 @@ public class RunReportQueryHandler
         IAppRepository? appRepo = null,
         ISearchOutbox? searchOutbox = null,
         ISearchFieldJobs? searchFieldJobs = null,
-        IServerTiming? serverTiming = null)
+        IServerTiming? serverTiming = null,
+        Compute.IMaterializedFieldState? materialized = null)
     {
+        _materialized = materialized;
         _timing = serverTiming ?? NoServerTiming.Instance;
         _searchOutbox = searchOutbox;
         _searchFieldJobs = searchFieldJobs;
@@ -270,7 +276,11 @@ public class RunReportQueryHandler
         }
 
         if (report.ReportType is "Summary" or "Chart")
+        {
+            // Summary and chart reports are heavy reads that may be a second behind: they may use the read replica (when it is on).
+            using var replicaScope = Common.ReadReplicaScope.Begin(Common.ReadReplicaLane.Interactive);
             return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, effectiveRuntimeFilters, filterTree, isMaskedPreview, ct);
+        }
 
         return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields,
             effectiveRuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, isMaskedPreview, isAppEncrypted, ct);
@@ -449,6 +459,14 @@ public class RunReportQueryHandler
                 .Concat(SummaryEncryptionGuard.ConditionFieldIds(access.ViewFilter))
                 .Concat(sortFields.Select(s => s.FieldId)), ct));
         if (sqlLookupFids is not null) formulaFids.ExceptWith(sqlLookupFids);
+
+        // A Lookup / Summary whose stored column c_{fid} is Ready (design section 7) is sorted, filtered, counted and totalled in SQL
+        // through that column — every record, no InMemoryReadLimit — while the value shown is still worked out as before. Anything not
+        // Ready (building, failed, never stored, compute switched off for the tenant) keeps today's path. They stay in computedFids:
+        // the search index has no value for them (Phase 5).
+        _readyFieldIds = _materialized is null ? new HashSet<long>() : await Timed("stored", _materialized.ReadyFieldIdsAsync(ct));
+        var storedFids = MaterializedReadFields.ReadyFids(allFields, _readyFieldIds);
+        formulaFids.ExceptWith(storedFids);
 
         var hasFormulaFilters = FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, formulaFids);
         var hasFormulaSorts   = sortFields.Any(s => formulaFids.Contains(s.FieldId));
@@ -840,7 +858,9 @@ public class RunReportQueryHandler
         hasFormulaSorts   = sortFields.Any(s => formulaFids.Contains(s.FieldId));
         var usedFields = FieldsUsed(allFields, selectedFields, sortFields, filterTree);
         var projectedFields = FieldsToProject(allFields, usedFields);
-        var readFields = FieldsToRead(allFields, usedFields);
+        // SQL gets the Ready Lookups / Summaries as stand-ins reading c_{fid}; the projectors keep the original fields.
+        var readFields = MaterializedReadFields.Substitute(FieldsToRead(allFields, usedFields), _readyFieldIds);
+        var sqlFields = MaterializedReadFields.Substitute(allFields, _readyFieldIds);
 
         IReadOnlyList<RecordResult> items;
         int total;
@@ -856,9 +876,12 @@ public class RunReportQueryHandler
             // When sorts include formula fields, skip SQL ORDER BY (we'll re-sort everything in-memory).
             IReadOnlyList<SortSpec> sqlSorts = hasFormulaSorts ? [] : sortFields;
 
-            var allRows = await _recordRepo.ListAllMatchingAsync(table, readFields,
-                physicalFilterTree, sqlSorts,
-                restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids);
+            IReadOnlyList<IReadOnlyDictionary<string, object?>> allRows;
+            // The in-memory report path reads up to 50,000 rows: a heavy read that may come from the read replica (when it is on).
+            using (Common.ReadReplicaScope.Begin(Common.ReadReplicaLane.Interactive))
+                allRows = await _recordRepo.ListAllMatchingAsync(table, readFields,
+                    physicalFilterTree, sqlSorts,
+                    restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids);
             // The read stops at InMemoryReadLimit.Rows: past that the in-memory order and filter below only cover the
             // first that-many records, which the result says (InMemoryRowLimit) instead of passing them off as all.
             var readEveryMatch = allRows.Count < InMemoryReadLimit.Rows;
@@ -916,7 +939,7 @@ public class RunReportQueryHandler
             // the totals need the count (whether every match fits in memory) and run beside the row query.
             var rowsTask = Timed("rows", _recordRepo.ListAsync(table, readFields, page, pageSize, filterTree, sortFields,
                 restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids));
-            var countTask = Timed("count", _recordRepo.CountAsync(table, allFields, filterTree,
+            var countTask = Timed("count", _recordRepo.CountAsync(table, sqlFields, filterTree,
                 restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids));
             total = await countTask;
             Task<(Dictionary<string, ColumnTotal> Totals, bool Incomplete)>? totalsTask = totalCols.Count > 0
@@ -978,21 +1001,26 @@ public class RunReportQueryHandler
         FilterGroup? filterTree, long? restrictToCreatedBy, bool fitsInMemory, IReadOnlySet<long>? sqlLookupFids, CancellationToken ct)
     {
         var totals = new Dictionary<string, ColumnTotal>();
-        var physicalCols = totalCols.Where(c => !PhysicalNaming.IsComputedTypeCode(c.TypeCode) && !c.IsEncrypted).ToList();
+        // A Ready stored Lookup / Summary is totalled in SQL from its c_ column, over every match, like a stored field.
+        var physicalCols = MaterializedReadFields.Substitute(totalCols, _readyFieldIds)
+            .Where(c => !PhysicalNaming.IsComputedTypeCode(c.TypeCode) && !c.IsEncrypted).ToList();
         if (physicalCols.Count > 0)
         {
-            foreach (var kv in await _recordRepo.AggregateColumnsAsync(table, allFields, physicalCols, filterTree,
+            // Report totals: a heavy read over every match that may come from the read replica (when it is on).
+            using var totalsScope = Common.ReadReplicaScope.Begin(Common.ReadReplicaLane.Interactive);
+            foreach (var kv in await _recordRepo.AggregateColumnsAsync(table, MaterializedReadFields.Substitute(allFields, _readyFieldIds), physicalCols, filterTree,
                          restrictToCreatedBy: restrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids))
                 totals[kv.Key.ToString()] = kv.Value;
         }
 
-        var memoryCols = totalCols.Except(physicalCols).ToList();
+        var physicalIds = physicalCols.Select(c => c.Id).ToHashSet();
+        var memoryCols = totalCols.Where(c => !physicalIds.Contains(c.Id)).ToList();
         if (memoryCols.Count == 0) return (totals, false);
         if (!fitsInMemory) return (totals, true);
 
         // Only the columns the totals and the filter use, and only the Lookups / Summaries among them.
         var used = FieldsUsed(allFields, selectedFields, [], filterTree);
-        var everyRow = await _recordRepo.ListAllMatchingAsync(table, FieldsToRead(allFields, used), filterTree, [], restrictToCreatedBy: restrictToCreatedBy, ct: ct,
+        var everyRow = await _recordRepo.ListAllMatchingAsync(table, MaterializedReadFields.Substitute(FieldsToRead(allFields, used), _readyFieldIds), filterTree, [], restrictToCreatedBy: restrictToCreatedBy, ct: ct,
             sqlLookupFids: sqlLookupFids);
         var everyRelational = await _relationalProjector.ProjectAsync(table, FieldsToProject(allFields, used), everyRow, ct);
         var everyComputed = _formulaProjector.Project(allFields, everyRow, everyRelational, table);
@@ -1908,15 +1936,19 @@ public class RunReportQueryHandler
         var seriesMode = definition.Chart?.SeriesMode ?? "EqualValues";
         // A Formula/Lookup/Summary field has no column, so SQL can't group by or aggregate it (it fails with
         // "Invalid column name" and the report never loads) — those reports are summarized in memory instead.
-        var rows = InMemorySummarizer.IsRequired(rowGroupSpecs, queryAggregations, seriesField, allFields, summaryFilterTree)
+        // A Ready stored Lookup / Summary / Formula (c_{fid}) is grouped, aggregated and filtered in SQL like a stored field, over every
+        // record — handed to SQL as a stand-in of its value type. Not Ready (or compute off for the tenant): today's in-memory path.
+        var ready = _materialized is null ? new HashSet<long>() : await _materialized.ReadyFieldIdsAsync(ct);
+        var sql = SummarySqlFields.For(ready, allFields, rowGroupSpecs, seriesField);
+        var rows = InMemorySummarizer.IsRequired(sql.RowGroups, queryAggregations, sql.Series, sql.Fields, summaryFilterTree)
             ? await InMemorySummarizer.SummarizeAsync(
                 _recordRepo, _relationalProjector, _formulaProjector,
                 table, rowGroupSpecs, queryAggregations, allFields,
                 summaryFilterTree, access.RestrictToCreatedBy, seriesField, seriesMode, summarySort, ct)
             : await _recordRepo.SummarizeAsync(
-                table, rowGroupSpecs, queryAggregations, allFields,
+                table, sql.RowGroups, queryAggregations, sql.Fields,
                 filterTree: summaryFilterTree, restrictToCreatedBy: access.RestrictToCreatedBy,
-                seriesField: seriesField, seriesMode: seriesMode, sort: summarySort, ct: ct);
+                seriesField: sql.Series, seriesMode: seriesMode, sort: summarySort, ct: ct);
         rows = SummaryFormulaEvaluator.Apply(rows, summaryFormulaPlan);
         if (definition.SummarySortFields.Any(f => f.AggregationFieldId is { } id && SummaryFormulaFields.IsSummaryFormulaFid(id)))
             rows = SummaryFormulaEvaluator.Sort(rows, definition.SummarySortFields, rowGroupSpecs.Count, fieldMap);

@@ -32,6 +32,7 @@ public class SearchGlobalRecordsQueryHandler
     private readonly IRecordRepository _recordRepo;
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly ISearchOutbox? _outbox;
+    private readonly PowerBase.Application.Compute.IMaterializedFieldState? _materialized;
 
     public SearchGlobalRecordsQueryHandler(
         IAzureSearchService searchService,
@@ -41,8 +42,10 @@ public class SearchGlobalRecordsQueryHandler
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
         IRolePermissionEnforcer enforcer,
-        ISearchOutbox? outbox = null)
+        ISearchOutbox? outbox = null,
+        PowerBase.Application.Compute.IMaterializedFieldState? materialized = null)
     {
+        _materialized = materialized;
         _searchService = searchService;
         _queryContext = queryContext;
         _appRepo = appRepo;
@@ -132,8 +135,10 @@ public class SearchGlobalRecordsQueryHandler
         var context = await TableAsync(tableId, tables, ct);
         if (context == null || !context.Access.CanView) return [];
 
-        // An unrestricted user sees every field.
-        var visible = (context.Access.Unrestricted ? context.Fields : context.Access.VisibleFields)
+        // An unrestricted user sees every field. A Ready stored Lookup / Summary / Formula (decision Q7) is matched on its c_ value, as a
+        // stand-in of its value type — only when this user may see the field, like any other.
+        var ready = _materialized is null ? new HashSet<long>() : await _materialized.ReadyFieldIdsAsync(ct);
+        var visible = PowerBase.Application.Compute.MaterializedReadFields.Substitute(context.Access.Unrestricted ? context.Fields : context.Access.VisibleFields, ready)
             .Where(f => f.Fid.HasValue && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)).ToList();
         // The fields the index searches, cut down to those this user may see.
         var searchable = visible.Where(f => f.IsSearchable && SearchSlotResolver.IsIndexableType(f.TypeCode)).ToList();

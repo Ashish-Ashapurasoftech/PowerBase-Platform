@@ -247,7 +247,11 @@ public class UpdateFieldCommandHandler
         }
 
         await _guard.ValidateRequiredHasDefaultOrNoRestrictedRolesAsync(existing.Id, label, isRequired, defaultValue, ct);
-        await _guard.ValidateUniqueTransitionAsync(table, existing, label, isUnique, ct);
+        // A calculated field has no f_ column to check or index: a unique formula is enforced on its stored c_ column (design section 5),
+        // whose build checks for duplicates (and reports them) before the UNIQUE index is created.
+        var uniqueOnStoredColumn = PhysicalNaming.IsComputedTypeCode(existing.TypeCode);
+        if (!uniqueOnStoredColumn)
+            await _guard.ValidateUniqueTransitionAsync(table, existing, label, isUnique, ct);
         await _guard.ValidateEncryptionTransitionAsync(table, existing, isEncrypted, ct);
 
         // Ciphertext needs a text column (see SchemaEngineService.AddColumnAsync); a field created
@@ -259,7 +263,7 @@ public class UpdateFieldCommandHandler
         // Build the physical constraint before persisting IsUnique. A failed index build must
         // not leave metadata claiming that uniqueness is enforced. Also repair fields whose
         // metadata was saved by an earlier failed attempt but whose index is missing.
-        if (isUnique || existing.IsUnique)
+        if ((isUnique || existing.IsUnique) && !uniqueOnStoredColumn)
             await _schemaEngine.SetUniqueAsync(table, existing, isUnique, ct);
 
         // Save old search eligibility before UpdateAsync modifies metadata

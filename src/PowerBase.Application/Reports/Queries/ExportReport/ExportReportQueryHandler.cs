@@ -22,6 +22,10 @@ public class ExportReportQueryHandler
     private readonly Relationships.IRelationalProjector _relationalProjector;
     private readonly IAzureSearchService _searchService;
     private readonly IQueryContext _queryContext;
+    private readonly Compute.IMaterializedFieldState? _materialized;
+
+    /// <summary>Rows per page when the whole export is plain SQL (no calculated filter or sort left): paged, never capped.</summary>
+    public const int SqlExportPageSize = 5000;
 
     public ExportReportQueryHandler(
         IReportRepository reportRepo,
@@ -33,8 +37,10 @@ public class ExportReportQueryHandler
         IFormulaProjector formulaProjector,
         Relationships.IRelationalProjector relationalProjector,
         IAzureSearchService searchService,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        Compute.IMaterializedFieldState? materialized = null)
     {
+        _materialized = materialized;
         _reportRepo = reportRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -49,6 +55,9 @@ public class ExportReportQueryHandler
 
     public async Task<ExportResult> HandleAsync(ExportReportQuery query, CancellationToken ct = default)
     {
+        // An export reads every matching record: the heaviest read there is, and a second of delay does not matter. It may use the read
+        // replica (when it is on and fresh enough); metadata, access checks and everything else here still read the primary.
+        using var replicaScope = Common.ReadReplicaScope.Begin(Common.ReadReplicaLane.Interactive);
         var report = await _reportRepo.GetByPublicIdAsync(query.ReportPublicId, ct);
         var table = await _tableRepo.GetByIdAsync(report.AppTableId, ct);
         var allFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
@@ -164,17 +173,45 @@ public class ExportReportQueryHandler
             .Select(f => (long)f.Fid!.Value)
             .ToHashSet();
 
+        // A Ready stored Lookup / Summary (c_{fid}) is ordered and filtered in SQL like a stored field (design 7).
+        var ready = _materialized is null ? new HashSet<long>() : await _materialized.ReadyFieldIdsAsync(ct);
+        formulaFids.ExceptWith(Compute.MaterializedReadFields.ReadyFids(allFields, ready));
+        var sqlFields = Compute.MaterializedReadFields.Substitute(allFields, ready);
+
         var (physicalFilterTree, formulaConditions) = FormulaFilterSorter.SplitFilterTree(filterTree, formulaFids);
         var hasFormulaSorts = sortFields.Any(s => formulaFids.Contains(s.FieldId));
         IReadOnlyList<SortSpec> sqlSorts = hasFormulaSorts ? [] : sortFields;
 
-        // Every matching record — no row cap, so the export is never silently cut short.
-        var rows = await _recordRepo.ListAllMatchingAsync(table, allFields, physicalFilterTree, sqlSorts,
-            restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
-        var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, rows,
-            await _relationalProjector.ProjectAsync(table, allFields, rows, ct));
-        var computed = _formulaProjector.Project(allFields, rows, relational, table);
-        var pairs = rows.Zip(computed, (r, c) => (Row: r, Computed: c)).ToList();
+        List<(IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed)> pairs;
+        if (formulaConditions == null && !hasFormulaSorts)
+        {
+            // Everything is plain SQL: page through every match in the report's order — no 50,000 cap. Record ID# breaks ties so a
+            // page boundary never repeats or skips a row; each page is projected on its own.
+            pairs = [];
+            var pagedSorts = WithIdTiebreak(sqlSorts);
+            var pagedFields = WithRecordIdField(sqlFields);
+            for (var page = 1; ; page++)
+            {
+                var rows = await _recordRepo.ListAsync(table, pagedFields, page, SqlExportPageSize, physicalFilterTree, pagedSorts,
+                    restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+                if (rows.Count == 0) break;
+                var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, rows,
+                    await _relationalProjector.ProjectAsync(table, allFields, rows, ct));
+                var computedPage = _formulaProjector.Project(allFields, rows, relational, table);
+                pairs.AddRange(rows.Zip(computedPage, (r, c) => (Row: r, Computed: c)));
+                if (rows.Count < SqlExportPageSize) break;
+            }
+        }
+        else
+        {
+            // A calculated filter or sort SQL can't evaluate: read the matches (capped at InMemoryReadLimit.Rows) and finish in memory.
+            var rows = await _recordRepo.ListAllMatchingAsync(table, sqlFields, physicalFilterTree, sqlSorts,
+                restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+            var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, rows,
+                await _relationalProjector.ProjectAsync(table, allFields, rows, ct));
+            var computed = _formulaProjector.Project(allFields, rows, relational, table);
+            pairs = rows.Zip(computed, (r, c) => (Row: r, Computed: c)).ToList();
+        }
 
         if (formulaConditions != null)
             pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, formulaConditions, allFields);
@@ -187,6 +224,16 @@ public class ExportReportQueryHandler
         var columns = selectedFields.Select(f => new ColumnInfo((f.Fid ?? f.Id).ToString(), string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label, f.TypeCode)).ToList();
         return BuildExport(columns, items.Select(r => r.Fields).ToList(), safeName, format);
     }
+
+    /// <summary>The sorts with Record ID# (Fid 3) appended when it isn't already a sort key: a total order, so OFFSET pages are stable.</summary>
+    public static IReadOnlyList<SortSpec> WithIdTiebreak(IReadOnlyList<SortSpec> sorts) =>
+        sorts.Any(s => s.FieldId == 3) ? sorts : [.. sorts, new SortSpec { FieldId = 3, Desc = false }];
+
+    /// <summary>Makes sure the field list resolves Fid 3 to the Id column (the repository's ORDER BY looks sort keys up by Fid).</summary>
+    public static IReadOnlyList<AppField> WithRecordIdField(IReadOnlyList<AppField> fields) =>
+        fields.Any(f => f.Fid == 3)
+            ? fields
+            : [.. fields, new AppField { Id = -3, Fid = 3, TypeCode = "Number", IsSystem = true, PhysicalColumnName = "Id", Name = "Record ID#" }];
 
     private async Task<ExportResult> ExportSummaryAsync(
         AppTable table,
@@ -245,15 +292,18 @@ public class ExportReportQueryHandler
 
         // Formula/Lookup/Summary fields have no column to group or aggregate in SQL — summarize those in memory
         // (see RunReportQueryHandler.RunSummaryAsync).
-        var rows = InMemorySummarizer.IsRequired(rowGroupSpecs, queryAggregations, seriesField, allFields, summaryFilterTree)
+        // Ready stored Lookup / Summary / Formula fields are grouped and aggregated in SQL through c_ (see RunReportQueryHandler).
+        var ready = _materialized is null ? new HashSet<long>() : await _materialized.ReadyFieldIdsAsync(ct);
+        var sql = Compute.SummarySqlFields.For(ready, allFields, rowGroupSpecs, seriesField);
+        var rows = InMemorySummarizer.IsRequired(sql.RowGroups, queryAggregations, sql.Series, sql.Fields, summaryFilterTree)
             ? await InMemorySummarizer.SummarizeAsync(
                 _recordRepo, _relationalProjector, _formulaProjector,
                 table, rowGroupSpecs, queryAggregations, allFields,
                 summaryFilterTree, access.RestrictToCreatedBy, seriesField, seriesMode, summarySort, ct)
             : await _recordRepo.SummarizeAsync(
-                table, rowGroupSpecs, queryAggregations, allFields,
+                table, sql.RowGroups, queryAggregations, sql.Fields,
                 filterTree: summaryFilterTree, restrictToCreatedBy: access.RestrictToCreatedBy,
-                seriesField: seriesField, seriesMode: seriesMode, sort: summarySort, ct: ct);
+                seriesField: sql.Series, seriesMode: seriesMode, sort: summarySort, ct: ct);
         rows = SummaryFormulaEvaluator.Apply(rows, summaryFormulaPlan);
         if (definition.SummarySortFields.Any(f => f.AggregationFieldId is { } id && SummaryFormulaFields.IsSummaryFormulaFid(id)))
             rows = SummaryFormulaEvaluator.Sort(rows, definition.SummarySortFields, rowGroupSpecs.Count, fieldMap);

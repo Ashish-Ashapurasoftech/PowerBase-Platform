@@ -478,6 +478,156 @@ public class SchemaEngineService : ISchemaEngineService
             """, cancellationToken: ct));
     }
 
+    /// <summary>Leaves room under SQL Server's 1,024 columns per table for the fields users still add.</summary>
+    internal const int MaterializedColumnHeadroomLimit = 1000;
+
+    public async Task<bool> EnsureMaterializedColumnAsync(long tableId, int fid, string sqlType, CancellationToken ct = default)
+    {
+        if (!Compute.SqlColumnType.IsAllowed(sqlType))
+            throw new ArgumentException($"'{sqlType}' is not a type a stored column may have.", nameof(sqlType));
+
+        var physicalTable = PhysicalNaming.FullTableName(tableId);
+        var column = PhysicalNaming.MaterializedColumnName(fid);
+        await using var connection = await _connectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+
+        var existing = await Compute.SqlColumnType.ReadAsync(connection, physicalTable, column, ct: ct);
+        if (existing == sqlType) return true;
+
+        if (existing is null)
+        {
+            var columns = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+                "SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID(@physicalTable)", new { physicalTable }, cancellationToken: ct));
+            if (columns >= MaterializedColumnHeadroomLimit) return false;
+        }
+
+        // Another type: the stored values are worthless for the new type, so the column is replaced (empty) and rebuilt by the worker.
+        await connection.ExecuteAsync(new CommandDefinition($"""
+            DROP INDEX IF EXISTS IX_{PhysicalNaming.TableName(tableId)}_{column} ON {physicalTable};
+            DROP INDEX IF EXISTS UX_{PhysicalNaming.TableName(tableId)}_{column} ON {physicalTable};
+            IF COL_LENGTH('{physicalTable}', '{column}') IS NOT NULL
+                ALTER TABLE {physicalTable} DROP COLUMN {column};
+            ALTER TABLE {physicalTable} ADD {column} {sqlType} NULL;
+            """, cancellationToken: ct));
+        return true;
+    }
+
+    public async Task DropMaterializedColumnAsync(long tableId, int fid, CancellationToken ct = default)
+    {
+        var physicalTable = PhysicalNaming.FullTableName(tableId);
+        var column = PhysicalNaming.MaterializedColumnName(fid);
+        await using var connection = await _connectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition($"""
+            DROP INDEX IF EXISTS IX_{PhysicalNaming.TableName(tableId)}_{column} ON {physicalTable};
+            DROP INDEX IF EXISTS UX_{PhysicalNaming.TableName(tableId)}_{column} ON {physicalTable};
+            IF COL_LENGTH('{physicalTable}', '{column}') IS NOT NULL
+                ALTER TABLE {physicalTable} DROP COLUMN {column};
+            """, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyList<string>> EnsureMaterializedUniqueIndexAsync(long tableId, int fid, CancellationToken ct = default)
+    {
+        var physicalTable = PhysicalNaming.FullTableName(tableId);
+        var column = PhysicalNaming.MaterializedColumnName(fid);
+        var indexName = $"UX_{PhysicalNaming.TableName(tableId)}_{column}";
+        await using var connection = await _connectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+
+        var exists = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT COUNT(*) FROM sys.indexes WHERE object_id = OBJECT_ID(@physicalTable) AND name = @indexName",
+            new { physicalTable, indexName }, cancellationToken: ct)) > 0;
+        if (exists) return [];
+
+        var duplicates = (await connection.QueryAsync<string>(new CommandDefinition($"""
+            SELECT TOP (5) CAST({column} AS NVARCHAR(400))
+            FROM {physicalTable}
+            WHERE IsDeleted = 0 AND {column} IS NOT NULL
+            GROUP BY {column}
+            HAVING COUNT(*) > 1
+            """, commandTimeout: 600, cancellationToken: ct))).AsList();
+        if (duplicates.Count > 0) return duplicates;
+
+        try
+        {
+            await connection.ExecuteAsync(new CommandDefinition($"""
+                CREATE UNIQUE NONCLUSTERED INDEX {indexName} ON {physicalTable} ({column})
+                    WHERE IsDeleted = 0 AND {column} IS NOT NULL;
+                """, commandTimeout: 600, cancellationToken: ct));
+        }
+        catch (SqlException ex) when (ex.Number is 1505 or 2601)
+        {
+            return ["(a value saved while the index was being created)"];   // a duplicate arrived between the check and the index
+        }
+        return [];
+    }
+
+    public async Task DropMaterializedUniqueIndexAsync(long tableId, int fid, CancellationToken ct = default)
+    {
+        var physicalTable = PhysicalNaming.FullTableName(tableId);
+        var indexName = $"UX_{PhysicalNaming.TableName(tableId)}_{PhysicalNaming.MaterializedColumnName(fid)}";
+        await using var connection = await _connectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition($"DROP INDEX IF EXISTS {indexName} ON {physicalTable};", cancellationToken: ct));
+    }
+
+    internal static string MaterializedIndexName(long tableId, int fid) =>
+        $"IX_{PhysicalNaming.TableName(tableId)}_{PhysicalNaming.MaterializedColumnName(fid)}";
+
+    /// <summary>The CREATE INDEX for a stored column's sort / filter index (the same filter as the table's other indexes).</summary>
+    internal static string CreateMaterializedIndexSql(long tableId, int fid, bool online) =>
+        $"CREATE NONCLUSTERED INDEX {MaterializedIndexName(tableId, fid)} ON {PhysicalNaming.FullTableName(tableId)} ({PhysicalNaming.MaterializedColumnName(fid)})" +
+        $" WHERE IsDeleted = 0{(online ? " WITH (ONLINE = ON)" : "")};";
+
+    public async Task<bool> EnsureMaterializedIndexAsync(long tableId, int fid, CancellationToken ct = default)
+    {
+        var physicalTable = PhysicalNaming.FullTableName(tableId);
+        var indexName = MaterializedIndexName(tableId, fid);
+        await using var connection = await _connectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+
+        var exists = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT COUNT(*) FROM sys.indexes WHERE object_id = OBJECT_ID(@physicalTable) AND name = @indexName",
+            new { physicalTable, indexName }, cancellationToken: ct)) > 0;
+        if (exists) return false;
+
+        try
+        {
+            await connection.ExecuteAsync(new CommandDefinition(CreateMaterializedIndexSql(tableId, fid, online: true), commandTimeout: 3600, cancellationToken: ct));
+        }
+        catch (SqlException ex) when (ex.Number == 1712)
+        {
+            // "Online index operations can only be performed in Enterprise edition" (local Express / Standard): build it offline.
+            await connection.ExecuteAsync(new CommandDefinition(CreateMaterializedIndexSql(tableId, fid, online: false), commandTimeout: 3600, cancellationToken: ct));
+        }
+        catch (SqlException ex) when (ex.Number == 1913)
+        {
+            return false;   // another worker created it between the check and the CREATE
+        }
+        return true;
+    }
+
+    public async Task DropMaterializedIndexAsync(long tableId, int fid, CancellationToken ct = default)
+    {
+        await using var connection = await _connectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(
+            $"DROP INDEX IF EXISTS {MaterializedIndexName(tableId, fid)} ON {PhysicalNaming.FullTableName(tableId)};", cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlySet<int>> ListMaterializedIndexesAsync(long tableId, CancellationToken ct = default)
+    {
+        var physicalTable = PhysicalNaming.FullTableName(tableId);
+        var prefix = $"IX_{PhysicalNaming.TableName(tableId)}_c_";
+        await using var connection = await _connectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        var names = await connection.QueryAsync<string>(new CommandDefinition(
+            "SELECT name FROM sys.indexes WHERE object_id = OBJECT_ID(@physicalTable) AND name LIKE @pattern",
+            new { physicalTable, pattern = prefix.Replace("_", "[_]") + "%" }, cancellationToken: ct));
+        return names.Select(n => int.TryParse(n[prefix.Length..], out var fid) ? fid : (int?)null)
+            .Where(f => f.HasValue).Select(f => f!.Value).ToHashSet();
+    }
+
     public async Task ScaleNumericColumnForPercentAsync(AppTable table, AppField field, bool toPercent, CancellationToken ct = default)
     {
         var physicalTable = PhysicalNaming.FullTableName(table.Id);

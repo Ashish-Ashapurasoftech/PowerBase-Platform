@@ -7,6 +7,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Common.Models;
+using PowerBase.Application.Compute;
 using PowerBase.Application.Imports;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -26,12 +27,62 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
     private readonly ILogger<ImportDataStore> _logger;
     private readonly ISearchOutbox? _outbox;
     private bool _searchIndexingFailed;
+    private readonly IComputeOutbox? _computeOutbox;
+    private readonly IComputeQueuePublisher? _computePublisher;
+    private readonly IMaterializedFieldState? _materialized;
+
+    /// <summary>
+    /// Design section 5 / decision Q10: a unique formula is computed inside each save (RecordRepository). A bulk import would bypass that
+    /// check, so a table with a stored (Ready) unique formula field refuses imports until bulk enforcement exists: loudly, nothing written.
+    /// </summary>
+    private async Task RefuseUniqueFormulaTableAsync(IReadOnlyList<AppField> fields, CancellationToken ct)
+    {
+        if (_materialized is null) return;
+        var unique = fields.Where(f => f.IsUnique && f.TypeCode is not ("Lookup" or "Summary") && PhysicalNaming.IsMaterializableTypeCode(f.TypeCode)).ToList();
+        if (unique.Count == 0) return;
+        var ready = await _materialized.ReadyFieldIdsAsync(ct);
+        if (unique.FirstOrDefault(f => ready.Contains(f.Id)) is { } field)
+        {
+            var label = string.IsNullOrWhiteSpace(field.Label) ? field.Name : field.Label;
+            throw new ImportRowRejectedException(
+                $"'{label}' is a unique formula field; importing into this table is not supported yet, because an import would bypass its unique check. " +
+                "Add the records through the app, or switch the field's stored column off for the import.");
+        }
+    }
+
+    /// <summary>
+    /// A chunk queues ONE table-level row ("recompute this table") in the chunk's own transaction, never one row per imported record.
+    /// No-op while stored columns are off for the tenant.
+    /// </summary>
+    private Task<bool> RecordComputeWorkAsync(AppTable table, IEnumerable<AppField> written, IDbTransaction tx, CancellationToken ct) =>
+        _computeOutbox == null
+            ? Task.FromResult(false)
+            : _computeOutbox.AddAsync(
+                [new ComputeChange(table.Id, ComputeChangeReason.TableWide, ChangedFids: written.Select(f => f.Fid!.Value).ToList())], tx, ct);
+
+    /// <summary>After commit: tell the compute queue. A failed send only delays the work; the relay re-publishes the outbox row.</summary>
+    private async Task PublishComputeAsync(AppTable table, bool queued, CancellationToken ct)
+    {
+        if (!queued || _computePublisher == null) return;
+        try
+        {
+            await _computePublisher.PublishAsync(new ComputeQueueMessage(QueryContext.TenantId, table.Id), ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Import: could not publish compute work for table {TableId}; the outbox relay will re-publish it.", table.Id);
+        }
+    }
 
     public ImportDataStore(ITenantConnectionFactory connections, IQueryContext context, IEncryptionService encryption,
-        IMessagePublisher publisher, ILogger<ImportDataStore> logger, ISearchOutbox? outbox = null)
+        IMessagePublisher publisher, ILogger<ImportDataStore> logger, ISearchOutbox? outbox = null,
+        IComputeOutbox? computeOutbox = null, IComputeQueuePublisher? computePublisher = null, IMaterializedFieldState? materialized = null)
         : base(connections, context)
     {
+        _materialized = materialized;
         _outbox = outbox;
+        _computeOutbox = computeOutbox;
+        _computePublisher = computePublisher;
         _encryption = encryption;
         _publisher = publisher;
         _logger = logger;
@@ -92,6 +143,7 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
         long createdBy, CancellationToken ct = default)
     {
         if (rows.Count == 0) return [];
+        await RefuseUniqueFormulaTableAsync(fields, ct);
         // Rows may set different fields (a blank skipped by "Ignore blanks" leaves that field out): a field a row does
         // not set is stored as NULL, exactly like a field the import never mapped.
         var written = WrittenFields(fields, rows.SelectMany(r => r.Keys));
@@ -118,12 +170,14 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
         }
 
         var messages = PrepareSearchMessages(table, fields, rows, publicIds);
+        var computeQueued = false;
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(ct);
         try
         {
             await BulkCopyAsync(conn, tx, PhysicalNaming.FullTableName(table.Id), data, ct);
             // Same transaction as the rows: they cannot be saved without their index change being recorded.
             if (_outbox != null) await _outbox.AddAsync(messages, tx, ct);
+            computeQueued = await RecordComputeWorkAsync(table, written, tx, ct);
             await tx.CommitAsync(ct);
         }
         catch (Exception ex) when (IsRowError(ex))
@@ -133,6 +187,7 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
         }
 
         await PublishSearchUpdatesAsync(table, messages, ct);
+        await PublishComputeAsync(table, computeQueued, ct);
         return await RecordIdsAsync(conn, table, publicIds, ct);
     }
 
@@ -155,6 +210,7 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<ImportUpdateRow> rows, long modifiedBy, CancellationToken ct = default)
     {
         if (rows.Count == 0) return;
+        await RefuseUniqueFormulaTableAsync(fields, ct);
         var written = WrittenFields(fields, rows.SelectMany(r => r.Values.Keys));
         if (written.Count == 0) return;
 
@@ -200,6 +256,7 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
         IReadOnlyList<(long Id, Guid PublicId)> updated;
         var byId = rows.ToDictionary(r => r.RecordId, r => r.Values);
         List<SearchIndexMessage> messages;
+        var computeQueued = false;
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(ct);
         try
         {
@@ -210,6 +267,7 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
             var changed = updated.Where(u => byId.ContainsKey(u.Id)).ToList();
             messages = PrepareSearchMessages(table, fields, changed.Select(u => byId[u.Id]).ToList(), changed.Select(u => u.PublicId).ToList());
             if (_outbox != null) await _outbox.AddAsync(messages, tx, ct);
+            computeQueued = await RecordComputeWorkAsync(table, written, tx, ct);
             await tx.CommitAsync(ct);
         }
         catch (Exception ex) when (IsRowError(ex))
@@ -219,6 +277,7 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
         }
 
         await PublishSearchUpdatesAsync(table, messages, ct);
+        await PublishComputeAsync(table, computeQueued, ct);
     }
 
     public async IAsyncEnumerable<object> StreamColumnValuesAsync(

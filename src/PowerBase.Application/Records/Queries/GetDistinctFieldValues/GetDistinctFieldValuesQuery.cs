@@ -19,6 +19,7 @@ public class GetDistinctFieldValuesQueryHandler
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly IRelationalProjector _relationalProjector;
     private readonly IFormulaProjector _formulaProjector;
+    private readonly PowerBase.Application.Compute.IMaterializedFieldState? _materialized;
 
     public GetDistinctFieldValuesQueryHandler(
         IAppTableRepository tableRepo,
@@ -27,8 +28,10 @@ public class GetDistinctFieldValuesQueryHandler
         IUserRepository userRepo,
         IRolePermissionEnforcer enforcer,
         IRelationalProjector relationalProjector,
-        IFormulaProjector formulaProjector)
+        IFormulaProjector formulaProjector,
+        PowerBase.Application.Compute.IMaterializedFieldState? materialized = null)
     {
+        _materialized = materialized;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
@@ -46,10 +49,17 @@ public class GetDistinctFieldValuesQueryHandler
         var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
         var field = fields.FirstOrDefault(f => f.Fid == query.FieldFid);
         if (field == null) return new DistinctValuesResponse(new List<string>(), false);
+        var fieldForValues = field;
 
-        // Formula fields have no physical column — return empty (frontend falls back to text input)
+        // Calculated fields have no f_ column. A Ready stored one (c_{fid}) lists its stored values — the ones the report filter compares;
+        // any other returns empty (the frontend falls back to text input).
         if (FormulaTypeMap.IsComputedField(field.TypeCode, field.Settings))
-            return new DistinctValuesResponse(new List<string>(), true);
+        {
+            var ready = _materialized is null ? new HashSet<long>() : await _materialized.ReadyFieldIdsAsync(ct);
+            if (!ready.Contains(field.Id) || Compute.MaterializedReadFields.StandIn(field) is not { } standIn)
+                return new DistinctValuesResponse(new List<string>(), true);
+            fieldForValues = standIn;
+        }
 
         // Only values of records the role may view, and only for a field it may see — otherwise the dropdown
         // would reveal values from records hidden by its Custom Rules / Own records scope.
@@ -57,11 +67,12 @@ public class GetDistinctFieldValuesQueryHandler
         if (!access.CanView || !access.VisibleFields.Any(f => f.Id == field.Id))
             return new DistinctValuesResponse(new List<string>(), false);
         var onlyRowIds = await Records.ViewableRowIds.ResolveAsync(
-            access, table, fields, _recordRepo, _relationalProjector, _formulaProjector, ct);
+            access, table, fields, _recordRepo, _relationalProjector, _formulaProjector, ct,
+            _materialized is null ? null : await _materialized.ReadyFieldIdsAsync(ct));
         if (onlyRowIds is { Count: 0 }) return new DistinctValuesResponse(new List<string>(), false);
 
         var (values, exceedsLimit) = await _recordRepo.GetDistinctFieldValuesAsync(
-            table, field, query.Limit, query.SubField, ct, onlyRowIds);
+            table, fieldForValues, query.Limit, query.SubField, ct, onlyRowIds);
 
         // User/MultiUser (incl. the built-in Record Owner/Last Modified By system fields) store
         // a plain core.[User].Id (BIGINT) in the tenant column — RecordRepository intentionally

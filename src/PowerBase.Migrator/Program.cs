@@ -26,6 +26,7 @@ var tenantMigrationsPath  = Path.Combine(dbRoot, "migrations", "tenant");
 //   dotnet run -- backfill-field-names         → same, for ALL provisioned tenant DBs
 //   dotnet run -- inspect-exempt-encryption    → scan all tenants for exempt-but-encrypted fields
 //   dotnet run -- migrate-exempt-encryption    → decrypt & alter exempt columns to native SQL types
+//   dotnet run -- materialize --id N status   → stored columns (c_): status | on --field ID | off --field ID | reset --field ID
 
 Console.WriteLine("PowerBase Migrator");
 Console.WriteLine($"Server   : {MaskConnectionString(controlConnectionString)}");
@@ -51,6 +52,8 @@ try
                                     ? await RunMigrateExemptEncryptionAsync(dryRun: false, singleTableOnly: true)
                                     : args is ["migrate-exempt-encryption"]
                                         ? await RunMigrateExemptEncryptionAsync(dryRun: false)
+                                        : args is ["materialize", "--id", var materializeIdStr, .. var materializeRest]
+                                            ? await RunMaterializeAsync(materializeIdStr, materializeRest)
                                         : await RunRootAsync();
 
     return exitCode;
@@ -64,6 +67,18 @@ catch (Exception ex)
 }
 
 // ── modes ────────────────────────────────────────────────────────────────────
+
+async Task<int> RunMaterializeAsync(string idStr, string[] rest)
+{
+    if (!long.TryParse(idStr, out var tenantId))
+    {
+        Console.WriteLine($"Invalid tenant id: {idStr}");
+        return 1;
+    }
+    var (databaseName, _) = await GetTenantRoutingAsync(tenantId);
+    Console.WriteLine($"Mode     : stored columns, tenant {tenantId} ({databaseName})");
+    return await PowerBase.Migrator.MaterializeCommands.RunAsync(BuildTenantConnectionString(controlConnectionString, databaseName), rest);
+}
 
 async Task<int> RunRootAsync()
 {

@@ -75,4 +75,37 @@ public interface ISchemaEngineService
     /// NULLs are left alone; the physical column type is unchanged.
     /// </summary>
     Task ScaleNumericColumnForPercentAsync(AppTable table, AppField field, bool toPercent, CancellationToken ct = default);
+
+    /// <summary>
+    /// Makes sure the stored cache column c_{fid} of a Lookup / Summary / Formula field exists with <paramref name="sqlType"/> (one of
+    /// the few types a stored column may have). A column of another type (the field's output type changed) is dropped and added again,
+    /// empty. Adding an empty NULL column is a metadata-only change. Never touches f_ columns.
+    /// Returns false — changing nothing — when the table is too close to SQL Server's 1,024-column limit.
+    /// </summary>
+    Task<bool> EnsureMaterializedColumnAsync(long tableId, int fid, string sqlType, CancellationToken ct = default);
+
+    /// <summary>Drops the stored cache column c_{fid} (and any index on it) if it exists.</summary>
+    Task DropMaterializedColumnAsync(long tableId, int fid, CancellationToken ct = default);
+
+    /// <summary>
+    /// The filtered UNIQUE index that enforces a unique formula (design section 5):
+    /// <c>UX_t_X_c_N ON data.t_X (c_N) WHERE IsDeleted = 0 AND c_N IS NOT NULL</c>. Returns up to five values that already appear more than
+    /// once (then nothing is created); empty when the index exists.
+    /// </summary>
+    Task<IReadOnlyList<string>> EnsureMaterializedUniqueIndexAsync(long tableId, int fid, CancellationToken ct = default);
+
+    /// <summary>Drops that UNIQUE index if it exists (the formula is no longer unique).</summary>
+    Task DropMaterializedUniqueIndexAsync(long tableId, int fid, CancellationToken ct = default);
+
+    /// <summary>
+    /// The sort / filter index of a stored column: IX_t_X_c_N ON data.t_X (c_N) WHERE IsDeleted = 0, built ONLINE where the SQL edition
+    /// allows it so the table stays usable. False when it already existed.
+    /// </summary>
+    Task<bool> EnsureMaterializedIndexAsync(long tableId, int fid, CancellationToken ct = default);
+
+    /// <summary>Drops IX_t_X_c_N (no error when it is not there).</summary>
+    Task DropMaterializedIndexAsync(long tableId, int fid, CancellationToken ct = default);
+
+    /// <summary>The Fids of the stored columns of the table that have an IX_t_X_c_N index now.</summary>
+    Task<IReadOnlySet<int>> ListMaterializedIndexesAsync(long tableId, CancellationToken ct = default);
 }

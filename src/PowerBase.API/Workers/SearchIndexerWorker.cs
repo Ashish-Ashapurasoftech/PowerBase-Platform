@@ -202,12 +202,17 @@ public class SearchIndexerWorker : BackgroundService
 
     /// <summary>One page of a paging job, by record id. A message queued before paging by id existed carries only a page number: it is
     /// read by position once, and its follow-up continues by id.</summary>
-    private static Task<(IReadOnlyList<SearchIndexDocument> Documents, long LastId)> ReadPageAsync(
-        IRecordRepository recordRepo, SearchIndexMessage message, CancellationToken ct) =>
-        message.AfterId is long afterId
-            ? recordRepo.GetTableIndexPageAsync(message.TenantId, message.TableId, afterId, SearchWideMigration.PageSize, ct)
-            : recordRepo.GetTableIndexPageAsync(message.TenantId, message.TableId, 0, SearchWideMigration.PageSize, ct,
+    private static async Task<(IReadOnlyList<SearchIndexDocument> Documents, long LastId)> ReadPageAsync(
+        IRecordRepository recordRepo, SearchIndexMessage message, CancellationToken ct)
+    {
+        // A whole-table paging job (re-index, field-slot copy): a background read that may come from the read replica when it is on
+        // (up to ReadReplica:BackgroundMaxLagSeconds behind). Live single-record index events never read the replica.
+        using var replicaScope = PowerBase.Application.Common.ReadReplicaScope.Begin(PowerBase.Application.Common.ReadReplicaLane.Background);
+        return message.AfterId is long afterId
+            ? await recordRepo.GetTableIndexPageAsync(message.TenantId, message.TableId, afterId, SearchWideMigration.PageSize, ct)
+            : await recordRepo.GetTableIndexPageAsync(message.TenantId, message.TableId, 0, SearchWideMigration.PageSize, ct,
                 skip: (Math.Max(1, message.Page) - 1) * SearchWideMigration.PageSize);
+    }
 
     private async Task ProcessMessageBatchAsync(IReadOnlyList<ServiceBusReceivedMessage> messages, CancellationToken stoppingToken)
     {
@@ -656,6 +661,10 @@ public class SearchIndexerWorker : BackgroundService
             fields = await fieldRepo.ListByTableAsync(tableId, ct);
         }
 
+        // Ready stored Lookup / Summary / Formula fields are indexed from their c_ value (decision Q7): as stand-ins of their value type
+        // they join the quick-search text; the shown value stays dynamic.
+        if (scope.ServiceProvider.GetService<PowerBase.Application.Compute.IMaterializedFieldState>() is { } materialized)
+            fields = PowerBase.Application.Compute.MaterializedReadFields.Substitute(fields, await materialized.ReadyFieldIdsAsync(ct));
         var info = SearchTableSlotInfo.From(tableId, fields);
         _tableSlotCache[key] = (info, DateTime.UtcNow);
 

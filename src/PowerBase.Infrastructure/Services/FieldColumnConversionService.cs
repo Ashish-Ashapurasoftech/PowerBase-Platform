@@ -2,6 +2,7 @@ using System.Data.Common;
 using Dapper;
 using Microsoft.Data.SqlClient;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Compute;
 using PowerBase.Application.Fields.TypeConversion;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -34,10 +35,15 @@ public sealed class FieldColumnConversionService : IFieldColumnConversionService
     private readonly IQueryContext _queryContext;
     private readonly IMetadataCache _metadataCache;
     private readonly IEncryptionService _encryptionService;
+    private readonly IComputeOutbox? _computeOutbox;
+    private readonly IMaterializedFieldState? _materialized;
 
     public FieldColumnConversionService(
-        ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache metadataCache, IEncryptionService encryptionService)
+        ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache metadataCache, IEncryptionService encryptionService,
+        IComputeOutbox? computeOutbox = null, IMaterializedFieldState? materialized = null)
     {
+        _computeOutbox = computeOutbox;
+        _materialized = materialized;
         _connectionFactory = connectionFactory;
         _queryContext = queryContext;
         _metadataCache = metadataCache;
@@ -253,6 +259,15 @@ public sealed class FieldColumnConversionService : IFieldColumnConversionService
             modifiedBy = _queryContext.UserId,
         }, tx, CommandTimeoutSeconds, cancellationToken: ct));
         if (affected == 0) throw new NotFoundException("Field", field.PublicId);
+
+        // Every type change (with or without a value rewrite) ends here, inside its transaction: the values lookups, summaries and
+        // formulas read from this field changed, so queue "recompute this table". The relay publishes it once due (no-op while off).
+        if (_computeOutbox != null && field.Fid.HasValue)
+            await _computeOutbox.AddAsync(
+                [new ComputeChange(field.AppTableId, ComputeChangeReason.TableWide, ChangedFids: [field.Fid.Value])], tx, ct);
+        // The value type changed: stored columns built from this field (its own, lookups and summaries of it) are rebuilt (design 12B).
+        if (_materialized != null)
+            await _materialized.InvalidateAsync([field.Id], tx, ct);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

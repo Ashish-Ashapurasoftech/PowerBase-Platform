@@ -59,14 +59,14 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     // Every field of the table, deleted ones included: a slot held by a deleted field must stay reserved.
     private const string ListAllForSlotSql = """
-        SELECT af.Id, af.AppTableId, af.Fid, af.IsDeleted, af.IsSearchable, af.IsFilterable, af.SearchSlot, ft.Code AS TypeCode
+        SELECT af.Id, af.AppTableId, af.Fid, af.IsDeleted, af.IsSearchable, af.IsFilterable, af.SearchSlot, ft.Code AS TypeCode, af.Settings
         FROM meta.AppField af
         JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
         WHERE af.AppTableId = @tableId
         """;
 
     private const string ListAllForSlotsSql = """
-        SELECT af.Id, af.AppTableId, af.Fid, af.IsDeleted, af.IsSearchable, af.IsFilterable, af.SearchSlot, af.SearchSlotEnd, ft.Code AS TypeCode
+        SELECT af.Id, af.AppTableId, af.Fid, af.IsDeleted, af.IsSearchable, af.IsFilterable, af.SearchSlot, af.SearchSlotEnd, ft.Code AS TypeCode, af.Settings
         FROM meta.AppField af
         JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
         WHERE af.AppTableId = @tableId
@@ -319,11 +319,31 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     private const string FieldsCacheGroup = MetadataCacheGroups.Fields;
 
     private readonly IMetadataCache _cache;
+    /// <summary>Stored columns (c_{fid}): a definition change stops the columns that read the field from being used until rebuilt.</summary>
+    private readonly PowerBase.Application.Compute.IMaterializedFieldState? _materialized;
 
-    public AppFieldRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache cache)
+    public AppFieldRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache cache,
+        PowerBase.Application.Compute.IMaterializedFieldState? materialized = null)
         : base(connectionFactory, queryContext)
     {
         _cache = cache;
+        _materialized = materialized;
+    }
+
+    /// <summary>Design 12B: after a change to what a field IS (settings, type, deletion, encryption), every stored column built from it —
+    /// its own, and every Lookup / Summary reading it — goes back to "not built" and is rebuilt by the worker; reads use the dynamic path
+    /// meanwhile. In the change's own transaction when it has one.</summary>
+    private Task InvalidateMaterializedAsync(IReadOnlyCollection<long> fieldIds, IDbTransaction? transaction, CancellationToken ct) =>
+        _materialized is null || fieldIds.Count == 0 ? Task.CompletedTask : _materialized.InvalidateAsync(fieldIds, transaction, ct);
+
+    private async Task<IReadOnlyList<long>> FieldIdsAsync(IEnumerable<Guid> publicIds, long tableId, IDbTransaction? transaction, CancellationToken ct)
+    {
+        if (_materialized is null) return [];
+        const string sql = "SELECT Id FROM meta.AppField WHERE PublicId IN @publicIds AND AppTableId = @tableId";
+        if (transaction is not null)
+            return (await transaction.Connection!.QueryAsync<long>(new CommandDefinition(sql, new { publicIds, tableId }, transaction, cancellationToken: ct))).AsList();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return (await connection.QueryAsync<long>(new CommandDefinition(sql, new { publicIds, tableId }, cancellationToken: ct))).AsList();
     }
 
     /// <summary>Drops the cached field lists of this tenant. Called BEFORE each write below (see <see cref="IMetadataCache.Invalidate"/>).</summary>
@@ -713,6 +733,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateSettingsSql, new { id, settings, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
+        await InvalidateMaterializedAsync([id], null, ct);
     }
 
     public async Task SetSearchableReportableAsync(long id, bool isSearchable, bool isReportable, CancellationToken ct = default)
@@ -730,6 +751,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateFieldTypeSql,
                 new { id, fieldTypeId, settings, isRequired, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
+        await InvalidateMaterializedAsync([id], null, ct);
     }
 
     public async Task RevertToNumberFieldAsync(long fieldId, CancellationToken ct = default)
@@ -758,6 +780,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
                 """,
                 new { fieldId, numberTypeId, modifiedBy = QueryContext.UserId },
                 cancellationToken: ct));
+        await InvalidateMaterializedAsync([fieldId], null, ct);
     }
 
 
@@ -782,26 +805,56 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             modifiedBy = QueryContext.UserId,
         };
 
-        // No index column is added on update either (see CreateAsync): the field's slot is allocated by the search sync that follows.
-        if (transaction is not null)
-            return await transaction.Connection!.ExecuteAsync(new CommandDefinition(UpdateFieldSql, parameters, transaction, cancellationToken: ct));
+        // Stored columns care only about what the field IS: a label or flag edit must not throw away a built column.
+        (long Id, string? Settings, bool IsEncrypted, bool IsUnique)? before = null;
+        if (_materialized is not null)
+        {
+            const string beforeSql = "SELECT Id, Settings, IsEncrypted, IsUnique FROM meta.AppField WHERE PublicId = @publicId AND AppTableId = @tableId AND IsDeleted = 0";
+            if (transaction is not null)
+                before = await transaction.Connection!.QuerySingleOrDefaultAsync<(long, string?, bool, bool)?>(
+                    new CommandDefinition(beforeSql, new { publicId, tableId }, transaction, cancellationToken: ct));
+            else
+            {
+                await using var beforeConnection = await ConnectionFactory.CreateAsync(ct);
+                before = await beforeConnection.QuerySingleOrDefaultAsync<(long, string?, bool, bool)?>(
+                    new CommandDefinition(beforeSql, new { publicId, tableId }, cancellationToken: ct));
+            }
+        }
 
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        return await connection.ExecuteAsync(new CommandDefinition(UpdateFieldSql, parameters, cancellationToken: ct));
+        // No index column is added on update either (see CreateAsync): the field's slot is allocated by the search sync that follows.
+        int affected;
+        if (transaction is not null)
+            affected = await transaction.Connection!.ExecuteAsync(new CommandDefinition(UpdateFieldSql, parameters, transaction, cancellationToken: ct));
+        else
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            affected = await connection.ExecuteAsync(new CommandDefinition(UpdateFieldSql, parameters, cancellationToken: ct));
+        }
+
+        if (affected > 0 && before is { } b && (!string.Equals(b.Settings, settings, StringComparison.Ordinal) || b.IsEncrypted != isEncrypted || b.IsUnique != isUnique))
+            await InvalidateMaterializedAsync([b.Id], transaction, ct);
+        return affected;
     }
 
     public async Task<int> DeleteAsync(Guid publicId, long tableId, CancellationToken ct = default, IDbTransaction? transaction = null)
     {
         FieldsChanging(transaction is not null);
         var parameters = new { publicId, tableId, deletedBy = QueryContext.UserId };
+        var ids = await FieldIdsAsync([publicId], tableId, transaction, ct);
+        int affected;
         if (transaction is not null)
         {
-            return await transaction.Connection!.ExecuteAsync(
+            affected = await transaction.Connection!.ExecuteAsync(
                 new CommandDefinition(SoftDeleteFieldSql, parameters, transaction, cancellationToken: ct));
         }
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        return await connection.ExecuteAsync(
-            new CommandDefinition(SoftDeleteFieldSql, parameters, cancellationToken: ct));
+        else
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            affected = await connection.ExecuteAsync(
+                new CommandDefinition(SoftDeleteFieldSql, parameters, cancellationToken: ct));
+        }
+        if (affected > 0) await InvalidateMaterializedAsync(ids, transaction, ct);
+        return affected;
     }
 
     public async Task<int> BulkDeleteAsync(IEnumerable<Guid> publicIds, long tableId, CancellationToken ct = default, IDbTransaction? transaction = null)
@@ -809,14 +862,21 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         if (!publicIds.Any()) return 0;
         FieldsChanging(transaction is not null);
         var parameters = new { publicIds, tableId, deletedBy = QueryContext.UserId };
+        var ids = await FieldIdsAsync(publicIds, tableId, transaction, ct);
+        int affected;
         if (transaction is not null)
         {
-            return await transaction.Connection!.ExecuteAsync(
+            affected = await transaction.Connection!.ExecuteAsync(
                 new CommandDefinition(SoftBulkDeleteFieldsSql, parameters, transaction, cancellationToken: ct));
         }
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        return await connection.ExecuteAsync(
-            new CommandDefinition(SoftBulkDeleteFieldsSql, parameters, cancellationToken: ct));
+        else
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            affected = await connection.ExecuteAsync(
+                new CommandDefinition(SoftBulkDeleteFieldsSql, parameters, cancellationToken: ct));
+        }
+        if (affected > 0) await InvalidateMaterializedAsync(ids, transaction, ct);
+        return affected;
     }
 
     public async Task<FieldUsageDto> GetFieldUsageAsync(long tableId, long fieldId, int fid, long appId, CancellationToken ct = default)

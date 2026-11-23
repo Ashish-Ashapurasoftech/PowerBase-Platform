@@ -27,6 +27,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="PowerBase.UnitTests" />
+    <InternalsVisibleTo Include="PowerBase.IntegrationTests" />
   </ItemGroup>
 
 </Project>

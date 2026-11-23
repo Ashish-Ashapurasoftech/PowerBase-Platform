@@ -10,6 +10,37 @@ public static class PhysicalNaming
     /// <summary>Second physical column for range field types (end / max).</summary>
     public static string EndColumnName(int fid) => $"f_{fid}_e";
 
+    /// <summary>
+    /// The stored cache column of a Lookup/Summary/Formula field. A different prefix from <see cref="ColumnName"/> on purpose: many
+    /// callers read "computed type =&gt; no f_ column" (see <see cref="IsComputedTypeCode"/>), and reusing f_{fid} would make them
+    /// read or write this column by accident. Only the compute worker writes it (unique formula fields: the save transaction).
+    /// </summary>
+    public static string MaterializedColumnName(int fid) => $"c_{fid}";
+
+    /// <summary>
+    /// True when a read may use the stored column c_{fid} (sort, filter, search, export, totals): the field is switched on AND its
+    /// column is fully built for the current version. Anything else falls back to today's dynamic path, so a half-built column
+    /// never produces a wrong answer.
+    /// </summary>
+    public static bool IsMaterializedReady(AppField field) =>
+        field.Fid.HasValue
+        && field.MaterializeMode == MaterializeModes.On
+        && field.MaterializeState == MaterializeStates.Ready;
+
+    /// <summary>
+    /// The cheap, type-level part of "may this field be stored": a Lookup, Summary or Formula(_*) that is not marked
+    /// <see cref="MaterializeModes.NotAllowed"/>. The content rules (Today(), User(), cycles, encrypted sources, ...) live in
+    /// MaterializeRules, which sets NotAllowed.
+    /// </summary>
+    public static bool CanMaterialize(AppField field) =>
+        field.Fid.HasValue
+        && field.MaterializeMode != MaterializeModes.NotAllowed
+        && IsMaterializableTypeCode(field.TypeCode);
+
+    /// <summary>Lookup, Summary and every Formula variant. ReportLink and ActionButton are computed but have no value to store.</summary>
+    public static bool IsMaterializableTypeCode(string typeCode) =>
+        typeCode is "Lookup" or "Summary" or "Formula" || IsFormulaVariantTypeCode(typeCode);
+
     public static string GetPhysicalColumnName(AppField field)
     {
         return field.IsSystem && !string.IsNullOrWhiteSpace(field.PhysicalColumnName)

@@ -260,6 +260,8 @@ else
 }
 builder.Services.AddSingleton<ITenantConnectionResolver, TenantConnectionResolver>();
 builder.Services.AddScoped<ITenantConnectionFactory, TenantConnectionFactory>();
+// Read-replica lag check for CreateReadOnlyAsync. Unused while ReadReplica:Enabled is off (the default): every read stays on the primary.
+builder.Services.AddSingleton<IReplicaLagMonitor, ReplicaLagMonitor>();
 builder.Services.AddScoped<ControlUnitOfWork>();
 builder.Services.AddScoped<IControlUnitOfWork>(sp => sp.GetRequiredService<ControlUnitOfWork>());
 builder.Services.AddScoped<TenantUnitOfWork>();
@@ -427,6 +429,13 @@ builder.Services.AddScoped<IFieldVersionRepository, FieldVersionRepository>();
 builder.Services.AddScoped<IFieldTypeRepository, FieldTypeRepository>();
 builder.Services.AddScoped<IRecordRepository, RecordRepository>();
 builder.Services.AddScoped<ISearchOutbox, SearchOutboxRepository>();
+// Stored columns (c_{fid}) for Lookup/Summary/Formula: change capture only. Writes nothing until Compute:Enabled AND the tenant's
+// ComputeEnabled flag are both on; the work itself runs in PowerBase.ComputeWorker, never in the API.
+builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.IComputeSettings, PowerBase.Infrastructure.Compute.ComputeSettings>();
+builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IComputeOutbox, PowerBase.Infrastructure.Compute.ComputeOutboxRepository>();
+builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.IComputeQueuePublisher, PowerBase.Infrastructure.Compute.ServiceBusComputePublisher>();
+// Read side: which stored columns are Ready (a few seconds' cache, independent of the field metadata cache) and the 12B invalidation.
+builder.Services.AddScoped<PowerBase.Application.Compute.IMaterializedFieldState, PowerBase.Infrastructure.Compute.MaterializedFieldStateRepository>();
 builder.Services.AddScoped<ISearchFieldJobs, SearchFieldJobRepository>();
 
 // Import (Table-to-Table / file) — see PowerBase.Application/Imports

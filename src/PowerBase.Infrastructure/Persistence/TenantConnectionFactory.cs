@@ -10,10 +10,16 @@ public class TenantConnectionFactory : ITenantConnectionFactory
     private string? _resolvedConnStr;
     private readonly SemaphoreSlim _lock = new(1, 1);
 
-    public TenantConnectionFactory(ITenantConnectionResolver resolver, IQueryContext queryContext)
+    private readonly IReplicaLagMonitor? _lagMonitor;
+    private readonly Microsoft.Extensions.Configuration.IConfiguration? _configuration;
+
+    public TenantConnectionFactory(ITenantConnectionResolver resolver, IQueryContext queryContext,
+        IReplicaLagMonitor? lagMonitor = null, Microsoft.Extensions.Configuration.IConfiguration? configuration = null)
     {
         _resolver = resolver;
         _queryContext = queryContext;
+        _lagMonitor = lagMonitor;
+        _configuration = configuration;
     }
 
     private long _currentTenantId;
@@ -48,5 +54,23 @@ public class TenantConnectionFactory : ITenantConnectionFactory
         }
 
         return new SqlConnection(_resolvedConnStr);
+    }
+
+    /// <summary>
+    /// See <see cref="ITenantConnectionFactory.CreateReadOnlyAsync"/>. Primary unless the replica is switched on for the tenant AND its
+    /// heartbeat says it is close enough behind; any doubt (no lag monitor, unknown lag, an error) means primary.
+    /// </summary>
+    public async Task<SqlConnection> CreateReadOnlyAsync(ReadReplicaIntent intent = ReadReplicaIntent.Interactive, CancellationToken ct = default)
+    {
+        if (_lagMonitor is null || _configuration is null || _queryContext.TenantId == 0) return await CreateAsync(ct);
+
+        var options = Compute.ComputeConfig.ReadReplica(_configuration);
+        if (!options.Enabled) return await CreateAsync(ct);
+
+        var readOnly = await _resolver.ResolveReadOnlyAsync(_queryContext.TenantId, ct);
+        if (readOnly is null) return await CreateAsync(ct);
+
+        var lag = await _lagMonitor.GetLagSecondsAsync(_queryContext.TenantId, readOnly, ct);
+        return ReadReplicaRouting.IsTooFarBehind(lag, intent, options) ? await CreateAsync(ct) : new SqlConnection(readOnly);
     }
 }

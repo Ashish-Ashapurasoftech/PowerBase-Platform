@@ -52,8 +52,8 @@ public sealed record SearchTableSlotInfo(
             // The stored slot of ANY field (even one switched off), so a switch-off can clear it.
             if (isWide)
                 stored[fid] = SearchSlotResolver.WideRef(f);
-            else if (SearchSlotResolver.SlotMatchesType(f.SearchSlot, f.TypeCode))
-                stored[fid] = new SlotRef(f.SearchSlot!, f.TypeCode, f.SearchSlotEnd);
+            else if (SearchSlotResolver.SlotMatchesType(f.SearchSlot, SearchSlotResolver.SlotTypeCode(f)))
+                stored[fid] = new SlotRef(f.SearchSlot!, SearchSlotResolver.SlotTypeCode(f), f.SearchSlotEnd);
 
             if (!SearchSlotResolver.IsSearchEligible(f)) continue;
             eligibleFids.Add(fid);
@@ -73,10 +73,11 @@ public sealed record SearchTableSlotInfo(
                 mapped[fid] = wide;
                 if (f.IsSearchable) searchText.Add(wide.Slot);
             }
-            else if (SearchSlotResolver.SlotMatchesType(f.SearchSlot, f.TypeCode))
+            else if (SearchSlotResolver.SlotMatchesType(f.SearchSlot, SearchSlotResolver.SlotTypeCode(f)))
             {
                 // No valid slot (not allocated yet, or its pool is full) means "answered from SQL, not indexed here".
-                mapped[fid] = new SlotRef(f.SearchSlot!, f.TypeCode, f.SearchSlotEnd);
+                // A Lookup / Summary / Formula is matched by the type of the value it shows (Settings), like a Ready stand-in of it.
+                mapped[fid] = new SlotRef(f.SearchSlot!, SearchSlotResolver.SlotTypeCode(f), f.SearchSlotEnd);
                 if (f.IsSearchable) searchText.Add(f.SearchSlot!);
             }
         }

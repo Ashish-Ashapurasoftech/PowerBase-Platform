@@ -4,6 +4,7 @@ using Dapper;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Data.SqlClient;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Compute;
 using PowerBase.Application.Relationships;
 using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Validation;
@@ -22,6 +23,102 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     private readonly IControlConnectionFactory _controlConnectionFactory;
     /// <summary>Durable record of index changes, written in the record's own transaction (null where the repository is built by hand).</summary>
     private readonly ISearchOutbox? _outbox;
+    /// <summary>Durable record of stored-column (c_{fid}) work, written in the same transaction as the data change. Null where the
+    /// repository is built by hand; also writes nothing while the feature is off for the tenant.</summary>
+    private readonly IComputeOutbox? _computeOutbox;
+    private readonly IComputeQueuePublisher? _computePublisher;
+    /// <summary>Which stored columns are Ready: a Ready unique formula is computed inside the save (design section 5).</summary>
+    private readonly IMaterializedFieldState? _materialized;
+    private static readonly StoredFormulaEvaluator UniqueFormulaEvaluator = new();
+
+    /// <summary>
+    /// The unique formula fields of the table whose stored column is Ready (built, with its UNIQUE index). Only same-record formulas get
+    /// there (the rules refuse others), so each is computed from the saved row alone. Empty when stored columns are off for the tenant.
+    /// </summary>
+    private async Task<IReadOnlyList<(AppField Field, FormulaPlan Plan)>> UniqueFormulasAsync(IReadOnlyList<AppField> fields, CancellationToken ct)
+    {
+        if (_materialized is null) return [];
+        var candidates = fields.Where(f => f.IsUnique && f.Fid.HasValue && PhysicalNaming.IsMaterializableTypeCode(f.TypeCode)
+            && f.TypeCode is not ("Lookup" or "Summary")).ToList();
+        if (candidates.Count == 0) return [];
+        var ready = await _materialized.ReadyFieldIdsAsync(ct);
+        var plans = new List<(AppField, FormulaPlan)>();
+        foreach (var f in candidates.Where(c => ready.Contains(c.Id)))
+        {
+            if (FormulaAnalysis.Analyze(f, fields) is not { HasErrors: false, UsesDynamicFieldReference: false, UsesVariables: false } info) continue;
+            if (FormulaAnalysis.StoredSqlType(info.ResultType) is null) continue;
+            var reads = info.Reads.Where(r => r != f.Fid).Select(r => (int)r).ToList();
+            plans.Add((f, new FormulaPlan(f.AppTableId, f.Fid!.Value, f.Id, info.Expression, info.ResultType, reads, [], IsUnique: true)));
+        }
+        return plans;
+    }
+
+    /// <summary>
+    /// Computes the Ready unique formulas for the rows <paramref name="predicate"/> selects and writes them to c_{fid} in the save's own
+    /// transaction. The filtered UNIQUE index is the final authority: two users saving the same value at the same moment — one save fails
+    /// with a validation message, and nothing of it is kept.
+    /// </summary>
+    private async Task ApplyUniqueFormulasAsync(AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<(AppField Field, FormulaPlan Plan)> plans,
+        string predicate, object predicateArgs, IDbTransaction transaction, CancellationToken ct)
+    {
+        if (plans.Count == 0) return;
+        var connection = transaction.Connection!;
+        // READPAST: the rows asked for were written by THIS transaction a moment ago, so a row another save has locked cannot be one of
+        // them. Without it, two saves at once (each holding a new row) scan past each other's uncommitted row and deadlock (SQL 1205)
+        // on a server where READ_COMMITTED_SNAPSHOT is off; the loser must get the "must be unique" message, not a deadlock error.
+        var rows = (await connection.QueryAsync(new CommandDefinition(
+                $"SELECT Id, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{BuildFieldColumnList(fields)} FROM {PhysicalNaming.FullTableName(table.Id)} WITH (READPAST) WHERE {predicate}",
+                predicateArgs, transaction, cancellationToken: ct)))
+            .Select(r => (IReadOnlyDictionary<string, object?>)((IDictionary<string, object?>)r).ToDictionary(kv => kv.Key, kv => kv.Value is DBNull ? null : kv.Value))
+            .ToList();
+        if (rows.Count == 0) return;
+
+        foreach (var (field, plan) in plans)
+        {
+            var values = UniqueFormulaEvaluator.Evaluate(plan, fields, rows);
+            var column = PhysicalNaming.MaterializedColumnName(plan.Fid);
+            foreach (var chunk in values.Chunk(900))
+            {
+                var parameters = new DynamicParameters();
+                var tuples = new List<string>(chunk.Length);
+                for (var i = 0; i < chunk.Length; i++)
+                {
+                    tuples.Add($"(@i{i}, @v{i})");
+                    parameters.Add($"i{i}", chunk[i].Id);
+                    parameters.Add($"v{i}", StoredFormulaEvaluator.Normalize(StoredFormulaEvaluator.ToStored(chunk[i].Value, plan.ResultType)));
+                }
+                var sql = $"""
+                    UPDATE x SET x.{column} = v.v
+                    FROM {PhysicalNaming.FullTableName(table.Id)} x
+                    JOIN (VALUES {string.Join(", ", tuples)}) v (Id, v) ON v.Id = x.Id
+                    """;
+                try
+                {
+                    await connection.ExecuteAsync(new CommandDefinition(sql, parameters, transaction, cancellationToken: ct));
+                }
+                catch (SqlException ex) when (ex.Number is 2601 or 2627)
+                {
+                    var label = string.IsNullOrWhiteSpace(field.Label) ? field.Name : field.Label;
+                    throw new ConflictException($"'{label}' must be unique — another record already has the same value.");
+                }
+            }
+        }
+    }
+
+    /// <summary>A save that has no transaction but must compute a unique formula runs in one of its own, so the value and the record are saved
+    /// together or not at all. The index message is sent after the commit, as before.</summary>
+    private async Task<T> InOwnTransactionAsync<T>(Func<IDbTransaction, Action<PowerBase.Application.Common.Models.SearchIndexMessage>, Task<T>> save,
+        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated, CancellationToken ct)
+    {
+        var messages = new List<PowerBase.Application.Common.Models.SearchIndexMessage>();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        await using var tx = (SqlTransaction)await connection.BeginTransactionAsync(ct);
+        var result = await save(tx, onIndexMessageCreated ?? messages.Add);
+        await tx.CommitAsync(ct);
+        foreach (var message in messages) Send(() => _messagePublisher.PublishAsync(message, default));
+        return result;
+    }
     /// <summary>Resolves the projectors lazily (they depend on this repository, so they can't be constructor-injected).</summary>
     private readonly IServiceProvider? _services;
 
@@ -32,10 +129,16 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         IEncryptionService encryptionService,
         IControlConnectionFactory controlConnectionFactory,
         IServiceProvider? services = null,
-        ISearchOutbox? outbox = null)
+        ISearchOutbox? outbox = null,
+        IComputeOutbox? computeOutbox = null,
+        IComputeQueuePublisher? computePublisher = null,
+        IMaterializedFieldState? materialized = null)
         : base(connectionFactory, queryContext)
     {
         _outbox = outbox;
+        _computeOutbox = computeOutbox;
+        _computePublisher = computePublisher;
+        _materialized = materialized;
         _services = services;
         _messagePublisher = messagePublisher;
         _encryptionService = encryptionService;
@@ -53,7 +156,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     // TypeCode is not a column of meta.AppField (the type is a join to core.FieldType). The previous query selected it directly and
     // would have failed on every call.
     private const string IndexFieldsSql = """
-        SELECT af.Id, af.AppTableId, af.Name, ft.Code AS TypeCode, af.PhysicalColumnName, af.Fid, af.IsSystem, af.IsSearchable, af.IsFilterable, af.IsEncrypted
+        SELECT af.Id, af.AppTableId, af.Name, ft.Code AS TypeCode, af.PhysicalColumnName, af.Fid, af.IsSystem, af.IsSearchable, af.IsFilterable, af.IsEncrypted, af.Settings
         FROM meta.AppField af
         JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
         WHERE af.AppTableId = @tableId AND af.IsDeleted = 0 AND af.Fid IS NOT NULL
@@ -67,19 +170,25 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     private static string IndexColumn(AppField f) =>
         f.IsSystem && !string.IsNullOrWhiteSpace(f.PhysicalColumnName) ? f.PhysicalColumnName! : PhysicalNaming.ColumnName(f.Fid!.Value);
 
-    private static async Task<(long AppId, List<AppField> Fields)?> LoadIndexTableAsync(System.Data.IDbConnection connection, long tableId)
+    private async Task<(long AppId, List<AppField> Fields)?> LoadIndexTableAsync(System.Data.IDbConnection connection, long tableId)
     {
         var appId = await connection.QueryFirstOrDefaultAsync<long?>("SELECT AppId FROM meta.AppTable WHERE Id = @tableId AND IsDeleted = 0", new { tableId });
         if (appId == null) return null;
-        var fields = (await connection.QueryAsync<AppField>(IndexFieldsSql, new { tableId })).Where(IsIndexedField).ToList();
+        var all = (await connection.QueryAsync<AppField>(IndexFieldsSql, new { tableId })).ToList();
+        // Decision Q7: a Ready stored Lookup / Summary / Formula is indexed from its c_ column (as a stand-in of its value type), so global
+        // search finds records by those values too. Nothing changes while stored columns are off for the tenant.
+        var ready = _materialized is null ? new HashSet<long>() : await _materialized.ReadyFieldIdsAsync();
+        var fields = MaterializedReadFields.Substitute(all, ready).Where(IsIndexedField).ToList();
         return (appId.Value, fields);
     }
 
     /// <summary>Reads <paramref name="fields"/> of the rows selected by <paramref name="tail"/> (a WHERE/ORDER clause on alias t). A range
     /// comes back as {start,end}. Encrypted values are decrypted; a value that cannot be decrypted is left out, never indexed as ciphertext.</summary>
     private async Task<List<(long Id, Guid PublicId, Dictionary<long, object?> Values)>> ReadIndexRowsAsync(
-        System.Data.IDbConnection connection, long tableId, long appId, IReadOnlyList<AppField> fields, string tail, object parameters, CancellationToken ct)
+        System.Data.IDbConnection connection, long tableId, long appId, IReadOnlyList<AppField> fields, string tail, object parameters, CancellationToken ct,
+        System.Data.IDbConnection? dataConnection = null)
     {
+        // dataConnection (a replica) serves only the row query; the app's encryption metadata always comes from `connection` (the primary).
         var cols = new List<string>();
         foreach (var f in fields)
         {
@@ -88,7 +197,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         // The row's id (to page after) comes back as RowId, so it never collides with Record ID#, which reads the same column.
         var sql = $"SELECT t.Id AS RowId, t.PublicId{(cols.Count > 0 ? ", " + string.Join(", ", cols) : "")} FROM {PhysicalNaming.FullTableName(tableId)} t {tail}";
-        var rows = (await connection.QueryAsync<dynamic>(new CommandDefinition(sql, parameters, cancellationToken: ct))).ToList();
+        var rows = (await (dataConnection ?? connection).QueryAsync<dynamic>(new CommandDefinition(sql, parameters, cancellationToken: ct))).ToList();
 
         var result = new List<(long, Guid, Dictionary<long, object?>)>(rows.Count);
         if (rows.Count == 0) return result;
@@ -172,9 +281,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var table = await LoadIndexTableAsync(connection, tableId);
         if (table == null) return ([], afterId);
 
-        var rows = await ReadIndexRowsAsync(connection, tableId, table.Value.AppId, table.Value.Fields,
-            "WHERE t.IsDeleted = 0 AND t.Id > @afterId ORDER BY t.Id OFFSET @skip ROWS FETCH NEXT @pageSize ROWS ONLY",
-            new { afterId, skip = Math.Max(0, skip), pageSize }, ct);
+        const string pageTail = "WHERE t.IsDeleted = 0 AND t.Id > @afterId ORDER BY t.Id OFFSET @skip ROWS FETCH NEXT @pageSize ROWS ONLY";
+        var pageParameters = new { afterId, skip = Math.Max(0, skip), pageSize };
+        // Metadata (the table and its fields, the encryption key) is read from the primary above; only the page of rows may come from
+        // the read replica, and only inside a ReadReplicaScope (the search re-index jobs). Not for live single-record index events.
+        var rows = ReplicaIntentOfScope() is null
+            ? await ReadIndexRowsAsync(connection, tableId, table.Value.AppId, table.Value.Fields, pageTail, pageParameters, ct)
+            : await ReadDataAsync(replica => ReadIndexRowsAsync(connection, tableId, table.Value.AppId, table.Value.Fields, pageTail, pageParameters, ct, replica), ct);
         var docs = rows.Select(r => new PowerBase.Application.Common.Interfaces.SearchIndexDocument(tenantId, table.Value.AppId, tableId, r.PublicId, r.Values)).ToList();
         return (docs, rows.Count > 0 ? rows[^1].Id : afterId);
     }
@@ -192,6 +305,28 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
 
         return new Dictionary<long, object?>();
+    }
+
+    /// <summary>The replica intent of the surrounding <see cref="Application.Common.ReadReplicaScope"/>; null = no scope, read the primary.</summary>
+    private static ReadReplicaIntent? ReplicaIntentOfScope() =>
+        Application.Common.ReadReplicaScope.Current is { } lane
+            ? (lane == Application.Common.ReadReplicaLane.Background ? ReadReplicaIntent.Background : ReadReplicaIntent.Interactive)
+            : null;
+
+    /// <summary>
+    /// Runs a heavy DATA read. Inside a <see cref="Application.Common.ReadReplicaScope"/> it may be served by the tenant's read replica
+    /// (only when ReadReplica is switched on and fresh enough; a replica that does not know a column yet is retried on the primary).
+    /// Outside a scope it is the plain primary connection, exactly as before. Never use it for anything that must be current
+    /// (saves, metadata, permission or unique checks).
+    /// </summary>
+    private async Task<T> ReadDataAsync<T>(Func<SqlConnection, Task<T>> read, CancellationToken ct)
+    {
+        if (ReplicaIntentOfScope() is not { } intent)
+        {
+            await using var primary = await ConnectionFactory.CreateAsync(ct);
+            return await read(primary);
+        }
+        return await ReadReplicaFallback.RunAsync(ConnectionFactory, intent, read, ct);
     }
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
@@ -219,8 +354,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
             """;
 
+        // The primary connection also serves the app's encryption metadata below; the rows themselves may come from the replica
+        // when a ReadReplicaScope is open (exports, report totals).
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        var listCommand = new CommandDefinition(sql, parameters, cancellationToken: ct);
+        var rows = ReplicaIntentOfScope() is null
+            ? await connection.QueryAsync(listCommand)
+            : await ReadDataAsync<IEnumerable<dynamic>>(c => c.QueryAsync(listCommand), ct);
 
         // Use mutable Dictionary so DecryptRowsAsync can mutate values in-place
         var mutableRows = rows.Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
@@ -294,7 +434,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         // commandTimeout 0 = no timeout: a report over every record can legitimately take longer than
         // SqlClient's 30 s default. The request's cancellation token still aborts it.
-        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct));
+        var allCommand = new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct);
+        var rows = ReplicaIntentOfScope() is null
+            ? await connection.QueryAsync(allCommand)
+            : await ReadDataAsync<IEnumerable<dynamic>>(c => c.QueryAsync(allCommand), ct);
         var mutableRows = rows.Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
 
         var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
@@ -326,7 +469,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             """;
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct));
+        var batchCommand = new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct);
+        var rows = ReplicaIntentOfScope() is null
+            ? await connection.QueryAsync(batchCommand)
+            : await ReadDataAsync<IEnumerable<dynamic>>(c => c.QueryAsync(batchCommand), ct);
         var mutableRows = rows.Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
 
         var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
@@ -381,8 +527,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                     WHERE st.object_id = OBJECT_ID('{PhysicalNaming.FullTableName(table.Id)}')
                       AND i.name = 'UX_{PhysicalNaming.TableName(table.Id)}_PublicId'
                       AND i.has_filter = 1;";
-                await using var fastConn = await ConnectionFactory.CreateAsync(ct);
-                var fastCount = await fastConn.ExecuteScalarAsync<long>(new CommandDefinition(fastSql, cancellationToken: ct));
+                var fastCount = await ReadDataAsync(c => c.ExecuteScalarAsync<long>(new CommandDefinition(fastSql, cancellationToken: ct)), ct);
                 if (fastCount > 0)
                 {
                     return (int)Math.Min(fastCount, int.MaxValue);
@@ -395,8 +540,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
 
         var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(table.Id)}{ReportFromAlias(sqlLookupFids)} WHERE IsDeleted = 0{filterWhere}";
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        return await ReadDataAsync(c => c.ExecuteScalarAsync<int>(new CommandDefinition(sql, parameters, cancellationToken: ct)), ct);
     }
 
     public async Task<IReadOnlyDictionary<long, Application.Records.ColumnTotal>> AggregateColumnsAsync(
@@ -424,8 +568,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
 
         var sql = $"SELECT {string.Join(", ", selects)} FROM {PhysicalNaming.FullTableName(table.Id)}{ReportFromAlias(sqlLookupFids)} WHERE IsDeleted = 0{filterWhere}";
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var row = (IDictionary<string, object?>)(await connection.QuerySingleAsync<dynamic>(new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct)));
+        var row = (IDictionary<string, object?>)(await ReadDataAsync<dynamic>(c => c.QuerySingleAsync<dynamic>(new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct)), ct));
 
         var rowCount = Convert.ToInt64(row["totalRows"] ?? 0L);
         foreach (var f in targets)
@@ -699,11 +842,19 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var labelExpr = primaryLabelField is not null ? SelectLabelExpr(primaryLabelField) : searchColExpr;
         selectCols.Add($"{labelExpr} AS Label");
 
-        // A report-based picker's own sort; levels on computed fields have no column and are skipped.
+        // A report-based picker's own sort; levels on computed fields have no column and are skipped — except a Ready stored one,
+        // which sorts by its c_{fid} column through its stand-in.
+        var sortLookup = parentFieldLookup;
+        if (orderBy is { Count: > 0 } && _materialized is not null && allParentFields is { Count: > 0 })
+        {
+            var ready = await _materialized.ReadyFieldIdsAsync(ct);
+            var swapped = MaterializedReadFields.Substitute(allParentFields, ready);
+            if (!ReferenceEquals(swapped, allParentFields)) sortLookup = BuildFieldLookup(swapped);
+        }
         var physicalSort = orderBy?
-            .Where(s => !parentFieldLookup.TryGetValue(s.FieldId, out var sf) || !PhysicalNaming.IsComputedTypeCode(sf.TypeCode))
+            .Where(s => !sortLookup.TryGetValue(s.FieldId, out var sf) || !PhysicalNaming.IsComputedTypeCode(sf.TypeCode))
             .ToList();
-        var reportOrderBy = physicalSort is { Count: > 0 } ? BuildReportOrderBy(physicalSort, parentFieldLookup, null) : "Id";
+        var reportOrderBy = physicalSort is { Count: > 0 } ? BuildReportOrderBy(physicalSort, sortLookup, null) : "Id";
         var orderByExpr = physicalSort is { Count: > 0 } && reportOrderBy != "Id" ? reportOrderBy : searchColExpr;
 
         var sql = $"""
@@ -999,6 +1150,32 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return result;
     }
 
+    /// <summary>The column of the inner summary query that holds each child's target value.</summary>
+    internal const string SummaryTargetAlias = "TargetValue";
+
+    /// <summary>
+    /// The aggregate a summary function runs over <see cref="SummaryTargetAlias"/>. Shared by the dynamic read
+    /// (<see cref="AggregateByReferenceAsync"/>) and the stored-column writer (MaterializedColumnWriter), so a stored c_ value is
+    /// produced by exactly the SQL that produces the value shown.
+    /// </summary>
+    internal static string SummaryAggregateExpr(string function, bool hasTarget)
+    {
+        const string target = SummaryTargetAlias;
+        return function switch
+        {
+            "Count" => "COUNT(*)",
+            "Exists" => "CAST(CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END AS BIT)",
+            "Sum" when hasTarget => $"SUM(CAST({target} AS DECIMAL(18,4)))",
+            "Avg" when hasTarget => $"AVG(CAST({target} AS DECIMAL(18,4)))",
+            "Min" when hasTarget => $"MIN({target})",
+            "Max" when hasTarget => $"MAX({target})",
+            // Any column type: cast to text so NULLIF can also drop blank strings (a cleared text
+            // field) alongside the NULLs COUNT already skips — NULLIF(decimalCol, '') would throw.
+            "DistinctCount" when hasTarget => $"COUNT(DISTINCT NULLIF(CAST({target} AS NVARCHAR(MAX)), N''))",
+            _ => "COUNT(*)",
+        };
+    }
+
     public async Task<IReadOnlyDictionary<object, object?>> AggregateByReferenceAsync(
         AppTable childTable, int referenceFid, string function, int? targetFid,
         IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree, string? targetSubField = null,
@@ -1011,20 +1188,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var refCol = PhysicalNaming.ColumnName(referenceFid);
         // Aggregated over the inner query's TargetValue column: a lookup target is a subquery on
         // the parent table, and SQL Server can't aggregate an expression containing a subquery.
-        const string target = "TargetValue";
-        var aggExpr = function switch
-        {
-            "Count" => "COUNT(*)",
-            "Exists" => "CAST(CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END AS BIT)",
-            "Sum" when targetFid.HasValue => $"SUM(CAST({target} AS DECIMAL(18,4)))",
-            "Avg" when targetFid.HasValue => $"AVG(CAST({target} AS DECIMAL(18,4)))",
-            "Min" when targetFid.HasValue => $"MIN({target})",
-            "Max" when targetFid.HasValue => $"MAX({target})",
-            // Any column type: cast to text so NULLIF can also drop blank strings (a cleared text
-            // field) alongside the NULLs COUNT already skips — NULLIF(decimalCol, '') would throw.
-            "DistinctCount" when targetFid.HasValue => $"COUNT(DISTINCT NULLIF(CAST({target} AS NVARCHAR(MAX)), N''))",
-            _ => "COUNT(*)",
-        };
+        const string target = SummaryTargetAlias;
+        var aggExpr = SummaryAggregateExpr(function, targetFid.HasValue);
         var targetSelect = targetFid.HasValue ? $", {TargetColumnExpr(targetFid.Value, targetSubField, fieldLookup)} AS {target}" : "";
 
         var parameters = new DynamicParameters();
@@ -1240,6 +1405,17 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             linked.AddRange(await connection.QueryAsync<(Guid, long)>(new CommandDefinition(
                 sql, new { links, modifiedBy = QueryContext.UserId }, transaction, RelinkCommandTimeoutSeconds, cancellationToken: ct)));
         }
+
+        // Children were linked to parents: each parent's Summary changes, each child's Lookup gets a value. Only rows that had NO parent
+        // are linked here, so the old parent is always null.
+        if (linked.Count > 0 && reference.Fid.HasValue && await ComputeEnabledAsync(ct))
+        {
+            var refFid = reference.Fid.Value;
+            await RecordComputeChangesAsync(
+                linked.Select(l => new ComputeChange(child.Id, ComputeChangeReason.Relink, RecordPublicId: l.PublicId,
+                    ChangedFids: [refFid], OldRefs: new Dictionary<int, long?> { [refFid] = null })).ToList(),
+                transaction, ct);
+        }
         return linked;
     }
 
@@ -1247,7 +1423,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     /// column, a system field's own column (Id, CreatedOn, …), a Lookup's parent column (see
     /// <see cref="LookupColumnExpr"/>), or — for a composite Address field's sub-key — the
     /// JSON_VALUE-extracted part (same pattern as Address report filters).</summary>
-    private static string TargetColumnExpr(int targetFid, string? targetSubField, IReadOnlyDictionary<long, AppField>? fieldLookup)
+    internal static string TargetColumnExpr(int targetFid, string? targetSubField, IReadOnlyDictionary<long, AppField>? fieldLookup)
     {
         if (fieldLookup is not null && fieldLookup.TryGetValue(targetFid, out var field))
         {
@@ -1562,6 +1738,28 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         _outbox == null ? Task.CompletedTask : _outbox.AddAsync(changes, transaction, ct);
 
     /// <summary>
+    /// Records the stored-column work durably, in the record write's own transaction, then tells the compute queue once that write has
+    /// committed. One row per changed record; a write that touches more than <see cref="ComputeOutboxPlanner.TableWideThreshold"/>
+    /// records becomes ONE table-wide row. The API never computes anything here: the worker does. A no-op while the feature is off for
+    /// the tenant, so a switched-off tenant behaves (and writes SQL) exactly as before.
+    /// </summary>
+    private async Task RecordComputeChangesAsync(IReadOnlyCollection<ComputeChange> changes, IDbTransaction? transaction, CancellationToken ct)
+    {
+        if (_computeOutbox == null || changes.Count == 0) return;
+        var planned = ComputeOutboxPlanner.CollapseLargeBatch(changes);
+        if (!await _computeOutbox.AddAsync(planned, transaction, ct) || _computePublisher == null) return;
+
+        var messages = ComputeOutboxPlanner.ToMessages(QueryContext.TenantId, planned.Select(c => new ComputeOutboxEntry(0, c.TableId, 0)));
+        var publisher = _computePublisher;
+        // The outbox row is the durable record, so (as for search) a write in someone else's transaction publishes nothing here: the
+        // relay does once the row is due.
+        SendWhenCommitted(transaction, hasOutbox: true, _services?.GetService<ITenantUnitOfWork>(), () => publisher.PublishBatchAsync(messages, default));
+    }
+
+    private Task<bool> ComputeEnabledAsync(CancellationToken ct) =>
+        _computeOutbox == null ? Task.FromResult(false) : _computeOutbox.IsEnabledAsync(ct);
+
+    /// <summary>
     /// Sends a write's index message(s) once the write is committed, for a caller that did not take them to send itself. The indexer
     /// reads the record from the database, so a message sent while the caller's transaction is still open would find the record as it
     /// was (or not at all), and a rolled-back write must not reach the index. Without a transaction the write has committed already:
@@ -1600,6 +1798,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     public async Task<Guid> CreateAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyDictionary<long, object?> values, IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
     {
+        var uniqueFormulas = await UniqueFormulasAsync(fields, ct);
+        if (uniqueFormulas.Count > 0 && transaction is null)
+            return await InOwnTransactionAsync((tx, onMessage) => CreateAsync(table, fields, values, tx, ct, onMessage), onIndexMessageCreated, ct);
+
         var relevantFields = fields.Where(f => f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value) && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)).ToList();
 
         // Build the SQL shape first (column names only, no values yet)
@@ -1696,6 +1898,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             insertedPublicId = await ExecuteTranslatingUniqueViolationsAsync(() =>
                 connection.ExecuteScalarAsync<Guid>(new CommandDefinition(sql, parameters, cancellationToken: ct)));
         }
+        if (uniqueFormulas.Count > 0)
+            await ApplyUniqueFormulasAsync(table, fields, uniqueFormulas, "PublicId = @pid", new { pid = insertedPublicId }, transaction!, ct);
 
         // Push searchable/filterable fields to Azure AI Search (using ORIGINAL plaintext values)
         var searchableValues = fields
@@ -1721,6 +1925,11 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         {
             SendWhenCommitted(transaction, () => _messagePublisher.PublishPriorityAsync(msg, default));
         }
+
+        await RecordComputeChangesAsync(
+            [new ComputeChange(table.Id, ComputeChangeReason.Create, RecordPublicId: insertedPublicId,
+                ChangedFids: relevantFields.Select(f => f.Fid!.Value).ToList())],
+            transaction, ct);
 
         return insertedPublicId;
     }
@@ -1804,6 +2013,11 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             }
         }
 
+        var uniqueFormulas = await UniqueFormulasAsync(fields, ct);
+        if (uniqueFormulas.Count > 0)
+            await ApplyUniqueFormulasAsync(table, fields, uniqueFormulas, "PublicId IN (SELECT CAST(k AS UNIQUEIDENTIFIER) FROM OPENJSON(@ids) WITH (k NVARCHAR(36) '$'))",
+                new { ids = JsonSerializer.Serialize(publicIds) }, transaction, ct);
+
         // Search-index messages carry the ORIGINAL plaintext values, like CreateAsync.
         var messages = new List<PowerBase.Application.Common.Models.SearchIndexMessage>(rows.Count);
         var searchable = fields.Where(f => (f.IsSearchable || f.IsFilterable) && f.Fid.HasValue).ToList();
@@ -1829,6 +2043,19 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             SendWhenCommitted(transaction, () => _messagePublisher.PublishPriorityBatchAsync(messages, default));
         else
             SendWhenCommitted(transaction, () => _messagePublisher.PublishBatchAsync(messages, default));
+
+        if (await ComputeEnabledAsync(ct))
+        {
+            var computeChanges = new List<ComputeChange>(rows.Count);
+            for (var r = 0; r < rows.Count; r++)
+            {
+                var rowValues = rows[r];
+                computeChanges.Add(new ComputeChange(table.Id, ComputeChangeReason.Create, RecordPublicId: publicIds[r],
+                    ChangedFids: fields.Where(f => f.Fid.HasValue && rowValues.ContainsKey((long)f.Fid.Value) && !PhysicalNaming.IsComputedTypeCode(f.TypeCode))
+                        .Select(f => f.Fid!.Value).ToList()));
+            }
+            await RecordComputeChangesAsync(computeChanges, transaction, ct);
+        }
 
         return publicIds;
     }
@@ -1861,6 +2088,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         AppTable table, IReadOnlyList<AppField> fields, Guid publicId,
         IReadOnlyDictionary<long, object?> values, IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
     {
+        var uniqueFormulas = await UniqueFormulasAsync(fields, ct);
+        if (uniqueFormulas.Count > 0 && transaction is null)
+        {
+            await InOwnTransactionAsync<bool>(async (tx, onMessage) => { await UpdateAsync(table, fields, publicId, values, tx, ct, onMessage); return true; }, onIndexMessageCreated, ct);
+            return;
+        }
+
         var relevantFields = fields.Where(f => f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value) && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)).ToList();
         if (relevantFields.Count == 0) return;
 
@@ -1913,25 +2147,39 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             }
         }
 
-        var updateSql = $"""
-            UPDATE {PhysicalNaming.FullTableName(table.Id)}
-            SET {string.Join(", ", setClauses)}, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
-            WHERE PublicId = @publicId AND IsDeleted = 0
-            """;
+        // Stored-column capture only: when a Reference field is written, the row's OLD parent comes back from the UPDATE itself
+        // (OUTPUT deleted.f_ref, no extra read) so the old parent's Summary can be recomputed too. Untouched while the feature is off.
+        var refFids = await ComputeEnabledAsync(ct)
+            ? relevantFields.Where(f => f.TypeCode == "Reference").Select(f => f.Fid!.Value).ToList()
+            : new List<int>();
+        var updateSql = BuildUpdateByPublicIdSql(PhysicalNaming.FullTableName(table.Id), setClauses, refFids);
+        IReadOnlyDictionary<int, long?>? oldRefs = null;
+
+        async Task<int> RunUpdateAsync(IDbConnection conn, IDbTransaction? tx)
+        {
+            if (refFids.Count == 0)
+                return await ExecuteTranslatingUniqueViolationsAsync(() =>
+                    conn.ExecuteAsync(new CommandDefinition(updateSql, parameters, tx, cancellationToken: ct)));
+
+            var changed = (await ExecuteTranslatingUniqueViolationsAsync(() =>
+                conn.QueryAsync(new CommandDefinition(updateSql, parameters, tx, cancellationToken: ct)))).ToList();
+            if (changed.Count > 0) oldRefs = ReadOldRefs(changed[0], refFids);
+            return changed.Count;
+        }
 
         if (transaction is not null)
         {
-            var affectedTx = await ExecuteTranslatingUniqueViolationsAsync(() =>
-                transaction.Connection!.ExecuteAsync(new CommandDefinition(updateSql, parameters, transaction, cancellationToken: ct)));
+            var affectedTx = await RunUpdateAsync(transaction.Connection!, transaction);
             if (affectedTx == 0) throw new NotFoundException("Record", publicId);
         }
         else
         {
             await using var connection = await ConnectionFactory.CreateAsync(ct);
-            var affected = await ExecuteTranslatingUniqueViolationsAsync(() =>
-                connection.ExecuteAsync(new CommandDefinition(updateSql, parameters, cancellationToken: ct)));
+            var affected = await RunUpdateAsync(connection, null);
             if (affected == 0) throw new NotFoundException("Record", publicId);
         }
+        if (uniqueFormulas.Count > 0)
+            await ApplyUniqueFormulasAsync(table, fields, uniqueFormulas, "PublicId = @pid", new { pid = publicId }, transaction!, ct);
 
 
         // Update Azure AI Search with searchable/filterable fields (using ORIGINAL plaintext values)
@@ -1958,6 +2206,41 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         {
             SendWhenCommitted(transaction, () => _messagePublisher.PublishAsync(msg, default));
         }
+
+        await RecordComputeChangesAsync(
+            [new ComputeChange(table.Id, ComputeChangeReason.Update, RecordPublicId: publicId,
+                ChangedFids: relevantFields.Select(f => f.Fid!.Value).ToList(), OldRefs: oldRefs)],
+            transaction, ct);
+    }
+
+    /// <summary>
+    /// The single-record UPDATE of <see cref="UpdateAsync"/>. With <paramref name="oldRefFids"/> it also returns the row's old Reference
+    /// values (<c>OUTPUT deleted.f_N AS f_N</c>), which is how the OLD parent is captured without an extra read. Internal so the unit
+    /// tests can check the SQL text.
+    /// </summary>
+    internal static string BuildUpdateByPublicIdSql(string fullTableName, IReadOnlyCollection<string> setClauses, IReadOnlyCollection<int> oldRefFids)
+    {
+        var output = oldRefFids.Count == 0
+            ? ""
+            : "OUTPUT " + string.Join(", ", oldRefFids.Select(fid => $"deleted.{PhysicalNaming.ColumnName(fid)} AS {PhysicalNaming.ColumnName(fid)}")) + Environment.NewLine;
+        return $"""
+            UPDATE {fullTableName}
+            SET {string.Join(", ", setClauses)}, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+            {output}WHERE PublicId = @publicId AND IsDeleted = 0
+            """;
+    }
+
+    /// <summary>The old parent of each Reference field, from the row an <c>OUTPUT deleted.f_N</c> returned (null = it had no parent).</summary>
+    internal static IReadOnlyDictionary<int, long?> ReadOldRefs(object outputRow, IReadOnlyCollection<int> refFids)
+    {
+        var row = (IDictionary<string, object?>)outputRow;
+        var result = new Dictionary<int, long?>(refFids.Count);
+        foreach (var fid in refFids)
+        {
+            row.TryGetValue(PhysicalNaming.ColumnName(fid), out var raw);
+            result[fid] = raw is null or DBNull ? null : Convert.ToInt64(raw);
+        }
+        return result;
     }
 
     public async Task<int> MassUpdateAsync(
@@ -1966,6 +2249,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     {
         var relevantFields = fields.Where(f => f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value) && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)).ToList();
         if (relevantFields.Count == 0 || recordIds.Count == 0) return 0;
+        var uniqueFormulas = await UniqueFormulasAsync(fields, ct);
+        if (uniqueFormulas.Count > 0 && transaction is null)
+            return await InOwnTransactionAsync((tx, onMessage) => MassUpdateAsync(table, fields, recordIds, values, ct, onIndexMessageCreated ?? onMessage, tx), onIndexMessageCreated, ct);
 
         Services.FieldEncryptionContext enc;
         IReadOnlyDictionary<long, object?> encryptedValues;
@@ -2001,15 +2287,41 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             }
         }
 
+        // Stored-column capture only (see UpdateAsync): each row's OLD parent comes back from the UPDATE when a Reference field is written.
+        var refFids = await ComputeEnabledAsync(ct)
+            ? relevantFields.Where(f => f.TypeCode == "Reference").Select(f => f.Fid!.Value).ToList()
+            : new List<int>();
+        var outputClause = refFids.Count == 0
+            ? ""
+            : "OUTPUT deleted.Id AS Id, " + string.Join(", ", refFids.Select(fid => $"deleted.{PhysicalNaming.ColumnName(fid)} AS {PhysicalNaming.ColumnName(fid)}")) + Environment.NewLine;
+
         // Enlist the mutation in the same transaction as its pipeline outbox entries.
         var sql = $"""
             UPDATE {PhysicalNaming.FullTableName(table.Id)}
             SET {string.Join(", ", setClauses)}, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
-            WHERE Id IN @ids AND IsDeleted = 0
+            {outputClause}WHERE Id IN @ids AND IsDeleted = 0
             """;
 
-        var affected = await ExecuteTranslatingUniqueViolationsAsync(() =>
-            connection.ExecuteAsync(new CommandDefinition(sql, parameters, transaction, cancellationToken: ct)));
+        Dictionary<long, IReadOnlyDictionary<int, long?>>? oldRefsById = null;
+        int affected;
+        if (refFids.Count == 0)
+        {
+            affected = await ExecuteTranslatingUniqueViolationsAsync(() =>
+                connection.ExecuteAsync(new CommandDefinition(sql, parameters, transaction, cancellationToken: ct)));
+        }
+        else
+        {
+            var changedRows = (await ExecuteTranslatingUniqueViolationsAsync(() =>
+                connection.QueryAsync(new CommandDefinition(sql, parameters, transaction, cancellationToken: ct)))).Cast<object>().ToList();
+            affected = changedRows.Count;
+            oldRefsById = new Dictionary<long, IReadOnlyDictionary<int, long?>>(changedRows.Count);
+            foreach (object r in changedRows)
+                oldRefsById[Convert.ToInt64(((IDictionary<string, object?>)r)["Id"])] = ReadOldRefs(r, refFids);
+        }
+
+        if (uniqueFormulas.Count > 0 && affected > 0)
+            await ApplyUniqueFormulasAsync(table, fields, uniqueFormulas, "Id IN (SELECT k FROM OPENJSON(@ids) WITH (k BIGINT '$'))",
+                new { ids = JsonSerializer.Serialize(recordIds) }, transaction!, ct);
 
         // GAP #5: Re-index in Azure AI Search after Mass Update
         if (affected > 0 && fields.Any(f => f.IsSearchable || f.IsFilterable))
@@ -2047,6 +2359,16 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             }
 
             await RecordSearchChangesAsync(outboxChanges, transaction, ct);
+        }
+
+        if (affected > 0 && await ComputeEnabledAsync(ct))
+        {
+            var changedFids = relevantFields.Select(f => f.Fid!.Value).ToList();
+            var touched = oldRefsById?.Keys.ToList() ?? recordIds.ToList();
+            await RecordComputeChangesAsync(
+                touched.Select(id => new ComputeChange(table.Id, ComputeChangeReason.MassUpdate, RecordId: id, ChangedFids: changedFids,
+                    OldRefs: oldRefsById != null && oldRefsById.TryGetValue(id, out var old) ? old : null)).ToList(),
+                transaction, ct);
         }
 
         return affected;
@@ -2093,6 +2415,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         {
             SendWhenCommitted(transaction, () => _messagePublisher.PublishAsync(msg, default));
         }
+
+        // The row stays (soft delete), so the worker reads its parents from it: no old value needs capturing here.
+        await RecordComputeChangesAsync([new ComputeChange(table.Id, ComputeChangeReason.Delete, RecordPublicId: publicId)], transaction, ct);
     }
 
     public async Task BulkDeleteAsync(AppTable table, IReadOnlyList<Guid> publicIds, IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
@@ -2136,6 +2461,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         {
             SendWhenCommitted(transaction, () => _messagePublisher.PublishBatchAsync(deleteMessages, default));
         }
+
+        if (publicIds.Count > 0 && await ComputeEnabledAsync(ct))
+            await RecordComputeChangesAsync(
+                publicIds.Select(id => new ComputeChange(table.Id, ComputeChangeReason.Delete, RecordPublicId: id)).ToList(), transaction, ct);
     }
 
     public async Task BulkDeleteByIdsAsync(AppTable table, IReadOnlyList<(long Id, Guid PublicId)> rows, IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
@@ -2183,6 +2512,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         {
             SendWhenCommitted(transaction, () => _messagePublisher.PublishBatchAsync(deleteMessages, default));
         }
+
+        if (await ComputeEnabledAsync(ct))
+            await RecordComputeChangesAsync(
+                rows.Select(r => new ComputeChange(table.Id, ComputeChangeReason.Delete, RecordId: r.Id, RecordPublicId: null)).ToList(), transaction, ct);
     }
 
     public async Task<int> BackfillDefaultAsync(AppTable table, AppField field, string defaultValue, CancellationToken ct = default)
@@ -2225,6 +2558,12 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             await RecordSearchChangesAsync(messages, null, ct);
             _ = _messagePublisher.PublishBatchAsync(messages, default);
         }
+
+        // A default written into every empty cell changes values that lookups, summaries and formulas read: recompute the table.
+        // Not one of the design's 12A paths; added on the user's approval (2026-11-19).
+        if (updatedPublicIds.Count > 0 && field.Fid.HasValue)
+            await RecordComputeChangesAsync(
+                [new ComputeChange(table.Id, ComputeChangeReason.TableWide, ChangedFids: [field.Fid.Value])], null, ct);
 
         return updatedPublicIds.Count;
     }
@@ -2365,7 +2704,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         // commandTimeout 0 = no timeout: grouping a large table (Median re-scans it per group) can outlast
         // SqlClient's 30 s default. The request's cancellation token still aborts it.
-        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct));
+        var summarizeCommand = new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct);
+        var rows = ReplicaIntentOfScope() is null
+            ? await connection.QueryAsync(summarizeCommand)
+            : await ReadDataAsync<IEnumerable<dynamic>>(c => c.QueryAsync(summarizeCommand), ct);
         var rawRows = rows.Select(ToDictionary).ToList();
         var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
         if (!enc.IsActive) return rawRows;
@@ -2628,6 +2970,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     internal static string BuildFieldColumnList(IReadOnlyList<AppField> fields)
     {
         var cols = new List<string>();
+        // A Ready stored Lookup / Summary / Formula handed in as a stand-in reads its c_ column (global search re-checks a match against
+        // it); the value shown is still projected from the original field.
+        foreach (var f in fields.Where(f => f.IsSystem && f.PhysicalColumnName is { } c && c.StartsWith("c_", StringComparison.Ordinal)))
+            cols.Add(f.PhysicalColumnName!);
         // Computed (Formula) fields have no physical column — they are projected in at read time.
         foreach (var f in fields.Where(f => !f.IsSystem && f.Fid.HasValue && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)))
         {
@@ -2647,7 +2993,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
     /// <summary>The alias the summary queries (AggregateByReferenceAsync / ListValuesByReferenceAsync)
     /// give the child table, which a "parentField" condition's correlated subquery refers back to.</summary>
-    private const string ChildAlias = "c";
+    internal const string ChildAlias = "c";
 
     /// <param name="parentScope">Only for a query whose FROM aliases the child table as
     /// <see cref="ChildAlias"/> — "parentField" conditions are no-ops without it.</param>

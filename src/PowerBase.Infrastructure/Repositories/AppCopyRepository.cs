@@ -8,6 +8,7 @@ using Microsoft.Data.SqlClient;
 using PowerBase.Application.Apps.Commands.CopyApp;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Common.Models;
+using PowerBase.Application.Compute;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Domain.ValueObjects;
 using PowerBase.Infrastructure.Persistence;
@@ -148,12 +149,37 @@ public class AppCopyRepository : TenantRepositoryBase, IAppCopyRepository
     private readonly IFileStorageService _fileStorage;
 
     public AppCopyRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IEncryptionService encryptionService,
-        IAppCopyProgressStore progressStore, IFileStorageService fileStorage)
+        IAppCopyProgressStore progressStore, IFileStorageService fileStorage,
+        IComputeOutbox? computeOutbox = null, IComputeQueuePublisher? computePublisher = null)
         : base(connectionFactory, queryContext)
     {
+        _computeOutbox = computeOutbox;
+        _computePublisher = computePublisher;
         _encryptionService = encryptionService;
         _progressStore = progressStore;
         _fileStorage = fileStorage;
+    }
+
+    private readonly IComputeOutbox? _computeOutbox;
+    private readonly IComputeQueuePublisher? _computePublisher;
+
+    /// <summary>
+    /// Copied rows arrive without stored (c_) values: queue one "recompute this table" row per copied table that has rows. Runs after
+    /// the copy is finished and never fails it (the copy is already in place; the nightly reconciliation covers a lost row).
+    /// </summary>
+    private async Task QueueCopiedTablesForComputeAsync(long newAppId, IReadOnlyList<long> tableIds)
+    {
+        if (_computeOutbox == null || tableIds.Count == 0) return;
+        try
+        {
+            if (!await _computeOutbox.AddAsync(tableIds.Select(ComputeChange.TableWide).ToList(), null, CancellationToken.None)) return;
+            if (_computePublisher != null)
+                await _computePublisher.PublishBatchAsync(tableIds.Select(t => new ComputeQueueMessage(QueryContext.TenantId, t)), CancellationToken.None);
+        }
+        catch (Exception)
+        {
+            // The rows (if written) are re-published by the relay; the copy itself succeeded.
+        }
     }
 
     public async Task<AppSchemaCopyResult> CopySchemaAsync(AppSchemaCopyRequest request, CancellationToken ct = default)
@@ -223,6 +249,8 @@ public class AppCopyRepository : TenantRepositoryBase, IAppCopyRepository
             await connection.ExecuteAsync(new CommandDefinition(
                 FinishAppCopyProcedure, new { RunId = started.RunId, WarningsJson = JsonSerializer.Serialize(started.Warnings) },
                 commandTimeout: COMMAND_TIMEOUT_SECONDS, commandType: CommandType.StoredProcedure));
+
+            await QueueCopiedTablesForComputeAsync(started.NewAppId, tables.Where(t => t.RowTotal > 0).Select(t => t.NewTableId).ToList());
 
             return new AppDataCopyResult(started.NewAppId, started.NewAppPublicId, started.Warnings,
                 tables.Sum(t => t.RowTotal), tables.Where(t => t.RowTotal > 0).Select(t => t.NewTableId).ToList());

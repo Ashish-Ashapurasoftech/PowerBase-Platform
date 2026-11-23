@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <!--
+    Background compute for stored columns (c_{fid}) of Lookup / Summary / Formula fields. Runs on its own host (Azure Container Apps,
+    scaled by KEDA on the compute-queue length), never inside the API. References Application + Infrastructure, never the API.
+    Phase 3: writes c_ columns for Lookup and Summary fields; nothing reads them yet (Phase 4).
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UserSecretsId>powerbase-computeworker</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PowerBase.Application\PowerBase.Application.csproj" />
+    <ProjectReference Include="..\PowerBase.Infrastructure\PowerBase.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="PowerBase.UnitTests" />
+  </ItemGroup>
+
+</Project>

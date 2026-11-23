@@ -38,6 +38,14 @@ public class AppField
     public bool IsSharedValues { get; set; }
     /// <summary>Helper field (e.g. a relationship's "(original)" copy) kept out of every user-facing field list.</summary>
     public bool IsHidden { get; set; }
+    /// <summary>Stored column c_{fid} for a Lookup/Summary/Formula field: see <see cref="Constants.MaterializeModes"/>. 0 until the field is switched on.</summary>
+    public byte MaterializeMode { get; set; }
+    /// <summary>See <see cref="Constants.MaterializeStates"/>. Reads use c_{fid} only when this is Ready.</summary>
+    public byte MaterializeState { get; set; }
+    /// <summary>Bumped when the formula, summary settings or relationship change; the worker writes only the current version.</summary>
+    public int MaterializeVersion { get; set; }
+    /// <summary>When the last full build of c_{fid} finished.</summary>
+    public DateTime? MaterializedOn { get; set; }
     /// <summary>The Azure AI Search column this field's value is stored in (e.g. "num_03"). Assigned once, never recomputed, so adding, removing or
     /// switching other fields never moves it. Null until the field is search-eligible and has been allocated one.</summary>
     public string? SearchSlot { get; set; }
