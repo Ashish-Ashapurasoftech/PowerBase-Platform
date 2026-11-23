@@ -87,11 +87,11 @@ public class PblPipelinesImporterTests
         return new PblPipelinesImporter(create, save, _pipelineRepo, _appRepo, _tableRepo, _fieldRepo, _tenantRepo, _queryContext, update);
     }
 
-    private async Task<ImportReport> ImportAsync(string pipelineYaml, bool activate = false)
+    private async Task<ImportReport> ImportAsync(string pipelineYaml, bool activate = false, bool strict = true)
     {
         var parsed = ImportDocumentParser.ParseAll(QblPipelineConverterTests.App + "\n" + pipelineYaml + "\n" + QblPipelineConverterTests.Account).Single();
         var report = new ImportReport { AppPublicId = _appId, AppName = "Docs" };
-        await Importer().ImportAsync([parsed], [(parsed, report)], CancellationToken.None, activate);
+        await Importer().ImportAsync([parsed], [(parsed, report)], CancellationToken.None, activate, strict);
         return report;
     }
 
@@ -390,13 +390,15 @@ public class PblPipelinesImporterTests
     {
         var report = await ImportAsync(QblPipelineConverterTests.Unsupported);
 
+        // Strict import (2026-11-19): a pipeline with a step PowerFlows cannot import is skipped as a whole, with the reason.
         var item = report.Pipelines.Single();
-        item.Status.Should().Be(PipelineImportStatuses.Created);
+        item.Status.Should().Be(PipelineImportStatuses.Skipped);
+        item.PipelinePublicId.Should().BeNull();
         item.StepsSkipped.Should().Be(2);
-        item.NeedsReview.Should().BeTrue();
         item.Issues.Should().Contain(i => i.StepId == "ab" && i.StepName == "Send Slack Message" && i.IsSkippedStep
                                           && i.Message.StartsWith(QblPipelineConverter.UNSUPPORTED_STEP_MESSAGE));
-        _saves.Last().Select(s => s.RefId).Should().Equal("ref_aa", "ref_ad");
+        item.Issues.Should().Contain(i => i.Code == "PIPELINE_SKIPPED_NOT_COMPLETE" && i.Message.Contains("Send Slack Message"));
+        _saves.Should().BeEmpty();
     }
 
     [Fact]
@@ -527,7 +529,7 @@ public class PblPipelinesImporterTests
     [Fact]
     public async Task TriggerOnTableNotInFile_IsLeftOutAndTheOtherStepsAreSavedAsDrafts()
     {
-        var report = await ImportAsync(TriggerOnForeignTable);
+        var report = await ImportAsync(TriggerOnForeignTable, strict: false);
 
         var item = report.Pipelines.Should().ContainSingle().Subject;
         item.Status.Should().Be(PipelineImportStatuses.Created);
@@ -549,7 +551,7 @@ public class PblPipelinesImporterTests
         var create = TriggerOnForeignTable.IndexOf("- Type: QB::PipelineStep::Quickbase", pause, StringComparison.Ordinal);
         var withoutPause = TriggerOnForeignTable[..pause] + TriggerOnForeignTable[create..];
 
-        var report = await ImportAsync(withoutPause);
+        var report = await ImportAsync(withoutPause, strict: false);
 
         var item = report.Pipelines.Single();
         item.Status.Should().Be(PipelineImportStatuses.Created);
@@ -626,6 +628,31 @@ public class PblPipelinesImporterTests
     }
 
     [Fact]
+    public async Task Strict_TriggerOnTableNotInFile_SkipsThePipelineAndRemovesThePartialPowerFlow()
+    {
+        var report = await ImportAsync(TriggerOnForeignTable);
+
+        var item = report.Pipelines.Should().ContainSingle().Subject;
+        item.Status.Should().Be(PipelineImportStatuses.Skipped);
+        item.PipelinePublicId.Should().BeNull();
+        item.StepsImported.Should().Be(0);
+        item.Issues.Should().Contain(i => i.Code == "PIPELINE_SKIPPED_NOT_COMPLETE");
+        // Known before saving (the trigger's table is not in the file): nothing is created, so nothing is left behind.
+        _saves.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Strict_CompletePipeline_IsCreatedAndKept()
+    {
+        var report = await ImportAsync(QblPipelineConverterTests.AllSteps);
+
+        var item = report.Pipelines.Single();
+        item.Status.Should().NotBe(PipelineImportStatuses.Skipped, string.Join(" | ", item.Issues.Select(i => i.Code + ": " + i.Message)));
+        item.PipelinePublicId.Should().NotBeNull();
+        await _pipelineRepo.DidNotReceive().DeleteAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task CreateFailure_IsReportedAndNeverThrown()
     {
         _pipelineRepo.CreateAsync(Arg.Any<Pipeline>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>())
@@ -634,9 +661,10 @@ public class PblPipelinesImporterTests
         var report = await ImportAsync(QblPipelineConverterTests.AllSteps);
 
         var item = report.Pipelines.Single();
-        item.Status.Should().Be(PipelineImportStatuses.NotCreated);
+        item.Status.Should().Be(PipelineImportStatuses.Skipped);
         item.NeedsReview.Should().BeTrue();
         item.Issues.Should().Contain(i => i.Code == "PIPELINE_IMPORT_FAILED");
+        item.Issues.Should().Contain(i => i.Code == "PIPELINE_SKIPPED_NOT_COMPLETE");
     }
 
     [Fact]

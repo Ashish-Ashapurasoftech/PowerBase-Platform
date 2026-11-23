@@ -64,7 +64,8 @@ public static class QblToPblConverter
             }];
         }
 
-        return apps.Select(a => ConvertApplication(a.Key, a.Value, qbl.ExternalResources)).ToList();
+        var allApps = apps.ToDictionary(a => a.Key, a => a.Value, StringComparer.Ordinal);
+        return apps.Select(a => ConvertApplication(a.Key, a.Value, qbl.ExternalResources, allApps)).ToList();
     }
 
     /// <summary>The applications in a document as (ref, name), in file order.</summary>
@@ -72,7 +73,8 @@ public static class QblToPblConverter
         qbl.Resources.Where(kv => kv.Value.Type == "QB::Application")
             .Select(kv => (kv.Key, ResolveScalar(kv.Value, "Name") ?? kv.Key)).ToList();
 
-    private static QblConversionResult ConvertApplication(string appRef, QblResourceNode appNode, IReadOnlyDictionary<string, QblResourceNode>? externalResources = null)
+    private static QblConversionResult ConvertApplication(string appRef, QblResourceNode appNode, IReadOnlyDictionary<string, QblResourceNode>? externalResources = null,
+        IReadOnlyDictionary<string, QblResourceNode>? allApps = null)
     {
         var issues = new List<PblIssue>();
 
@@ -212,6 +214,12 @@ public static class QblToPblConverter
             tableNodeByRef[tableRef] = tableNode;
             fieldNameByRefPerTable[tableRef] = fieldNameByRef;
             relFieldsPerTable[tableRef] = relFields;
+            // PblValidator reserves PowerBase's five system field names ("Record ID#", "Date Created", …) on every table for
+            // references / lookups / summaries. A Summary or Lookup that a Quickbase app labelled exactly like a built-in field
+            // (M Kohn and Co: a Summary named "Record ID#" next to the built-in one) must therefore be numbered here like any other
+            // duplicate — otherwise DUPLICATE_FIELD_NAME blocks the whole application.
+            foreach (var systemName in QblFieldTypeMap.SystemFieldNames.Values)
+                seenFieldNames.Add(systemName);
             seenFieldNamesByTableRef[tableRef] = seenFieldNames;
         }
 
@@ -256,7 +264,7 @@ public static class QblToPblConverter
         var tableNameByRef = tables.ToDictionary(t => t.LogicalRef, t => t.Name, StringComparer.Ordinal);
         ResolveRelationshipLookupsAndSummaries(relationships, relFieldsPerTable, fieldNameByRefPerTable, seenFieldNamesByTableRef, tableNameByRef, addressSubComponentOwnerByTableRef, issues);
 
-        AttachReportLinks(tables, relationships, tableNodeByRef, relFieldsPerTable, fieldNameByRefPerTable, seenFieldNamesByTableRef, issues);
+        AttachReportLinks(tables, relationships, tableNodeByRef, relFieldsPerTable, fieldNameByRefPerTable, seenFieldNamesByTableRef, issues, appRef, allApps);
         // Whatever Reference/Lookup/Summary field never became part of a relationship keeps its place as a plain field.
         EmitRelationshipPlaceholders(tables, relationships, relFieldsPerTable, fieldNameByRefPerTable, seenFieldNamesByTableRef, issues);
         ApplyTableDefaultReportSettings(tables, relationships, tableNodeByRef, fieldNameByRefPerTable, issues);
@@ -1504,7 +1512,9 @@ public static class QblToPblConverter
         Dictionary<string, RelationshipFieldCollector> relFieldsPerTable,
         Dictionary<string, Dictionary<string, string>> fieldNameByRefPerTable,
         Dictionary<string, HashSet<string>> seenFieldNamesByTableRef,
-        List<PblIssue> issues)
+        List<PblIssue> issues,
+        string appRef,
+        IReadOnlyDictionary<string, QblResourceNode>? allApps)
     {
         foreach (var rel in relationships)
             rel.ExplicitLinks = true;
@@ -1523,9 +1533,63 @@ public static class QblToPblConverter
                 if (target?["Table"] is not { } targetTableRef || target["Field"] is not { } targetFieldRef
                     || !fieldNameByRefPerTable.TryGetValue(targetTableRef, out var targetNames) || !targetNames.TryGetValue(targetFieldRef, out var targetFieldName))
                 {
-                    var reason = target?["Field"] is null
-                        ? $"Report link '{name}' on '{table.Name}' has no target: the field it opened no longer exists in the source"
-                        : $"Report link '{name}' on '{table.Name}' opens a field that was not converted";
+                    // PowerBase links across apps of one tenant: a target in another app of this file is kept as such, resolved by app name
+                    // when the link is created (that app has to be in the tenant by then).
+                    if (target?["App"] is { } otherAppRef && otherAppRef != appRef && target["Table"] is { } otherTableRef && target["Field"] is { } otherFieldRef
+                        && allApps is not null && allApps.TryGetValue(otherAppRef, out var otherApp)
+                        && otherApp.ChildMap("Tables").TryGetValue(otherTableRef, out var otherTableNode)
+                        && otherTableNode.ChildMap("Fields").TryGetValue(otherFieldRef, out var otherFieldNode))
+                    {
+                        var otherSourceRef = NestedRef(linkNode, "FieldRelationship", "Source")?["Field"];
+                        var otherOnRecordId = otherSourceRef is null || (ownerFields.TryGetValue(otherSourceRef, out var otherSourceNode) && otherSourceNode.Type == "QB::Field::RecordID");
+                        string? otherSourceName = null;
+                        if (otherOnRecordId || (fieldNameByRefPerTable.TryGetValue(table.LogicalRef, out var ownFieldNames) && ownFieldNames.TryGetValue(otherSourceRef!, out otherSourceName)))
+                        {
+                            table.ReportLinks.Add(new PblStandaloneReportLink
+                            {
+                                LogicalRef = Qualify(table.LogicalRef, linkRef),
+                                Name = name,
+                                Label = label,
+                                LinkText = NullIfBlank(ResolveScalar(linkNode, "LinkText")),
+                                SourceId = linkNode.SourceId,
+                                Description = NullIfBlank(ResolveScalar(linkNode, "Comments")),
+                                Flags = FlagsOf(linkNode),
+                                TargetAppName = ResolveScalar(otherApp, "Name"),
+                                TargetTableName = ResolveScalar(otherTableNode, "Name"),
+                                TargetFieldName = InferFieldName(otherFieldRef, NullIfBlank(ResolveScalar(otherFieldNode, "Label"))),
+                                SourceFieldName = otherOnRecordId ? null : otherSourceName,
+                            });
+                            continue;
+                        }
+                    }
+
+                    // "Target: Default" names no table at all: the export does not say where the link opens.
+                    var targetIsDefault = linkNode.Properties.TryGetValue("FieldRelationship", out var relRaw) && relRaw is Dictionary<string, object?> relMap
+                        && relMap.TryGetValue("Target", out var targetRaw) && targetRaw is string targetText && targetText == "Default";
+                    if (targetIsDefault)
+                    {
+                        // PowerBase saves a Report link with no table chosen yet (it is picked in the field settings), so the field keeps its type and its
+                        // place on forms and reports instead of becoming a Text field.
+                        table.ReportLinks.Add(new PblStandaloneReportLink
+                        {
+                            LogicalRef = Qualify(table.LogicalRef, linkRef),
+                            Name = name,
+                            Label = label,
+                            LinkText = NullIfBlank(ResolveScalar(linkNode, "LinkText")),
+                            SourceId = linkNode.SourceId,
+                            Description = NullIfBlank(ResolveScalar(linkNode, "Comments")),
+                            Flags = FlagsOf(linkNode),
+                            NoTarget = true,
+                        });
+                        issues.Add(Warning("QBL_REPORT_LINK_TARGET_UNAVAILABLE", $"Report link '{name}' on '{table.Name}' has no stored target: the Quickbase export says only 'Default' and names no table; created as a Report link with no target - choose its table and field in the field settings.", Qualify(table.LogicalRef, linkRef)));
+                        continue;
+                    }
+
+                    var reason = targetIsDefault
+                        ? $"Report link '{name}' on '{table.Name}' has no stored target: the Quickbase export says only 'Default' and names no table"
+                        : target?["Field"] is null
+                            ? $"Report link '{name}' on '{table.Name}' has no target: the field it opened no longer exists in the source"
+                            : $"Report link '{name}' on '{table.Name}' opens a field that was not converted";
                     AddReportLinkPlaceholder(table, relationships, seenFieldNamesByTableRef, fieldNameByRefPerTable, linkRef, linkNode, name, label,
                         "QBL_REPORT_LINK_TARGET_UNAVAILABLE", reason, target, NestedRef(linkNode, "FieldRelationship", "Source"), issues);
                     continue;
@@ -2857,13 +2921,26 @@ public static class QblToPblConverter
             }
             case "QB::FormV2::Element::RichText":
             {
-                // Not observed in the real sample, but documented for FormV2 — direct match to
-                // PowerBase's StaticText element type.
+                // Direct match to PowerBase's StaticText element type. Inside a Quickbase group (a field next to a rich text block or an
+                // empty "Spacer") it must stay in the group like every other member: left out, the field it sat with was left alone in a
+                // group of one and the rich text became a separate element below it.
+                var (textShowOnAdd, textShowOnEdit, textShowOnView) = ParseModesToShowIn(elementNode);
+                var (textContentWidthMode, textContentWidthValue, textContentWidthUnit) = ParseContentWidth(elementNode);
                 result.Add(new PblFormElement
                 {
                     LogicalRef = qualifiedElementRef,
                     ElementType = "StaticText",
                     ElementContent = ResolveScalar(elementNode, "Content"),
+                    // Quickbase names a rich text block through its label override ("Spacer", "Instructions"...); without it the block would be
+                    // numbered "Text 5" in the designer.
+                    Name = NullIfBlank(ResolveScalar(elementNode, "LabelOverride")),
+                    ShowOnAdd = textShowOnAdd,
+                    ShowOnEdit = textShowOnEdit,
+                    ShowOnView = textShowOnView,
+                    ContentWidthMode = textContentWidthMode,
+                    ContentWidthValue = textContentWidthValue,
+                    ContentWidthUnit = textContentWidthUnit,
+                    GroupRef = groupRef,
                 });
                 return result;
             }
@@ -3750,10 +3827,16 @@ public static class QblToPblConverter
         if (target["Field"] is { } fieldRef)
         {
             // elementRefByFieldName is keyed by resolved field Name, not the raw QBL ref.
-            if (!fieldNameByRef.TryGetValue(fieldRef, out var fieldName) || !elementRefByFieldName.TryGetValue(fieldName, out targetElementRef))
+            if (!fieldNameByRef.TryGetValue(fieldRef, out var fieldName))
             {
-                issues.Add(Warning("QBL_FORM_RULE_ACTION_TARGET_UNAVAILABLE", $"Form rule '{ruleName}' action targets a field with no form element on this form; skipped.", ruleRef));
+                issues.Add(Warning("QBL_FORM_RULE_ACTION_TARGET_UNAVAILABLE", $"Form rule '{ruleName}' action targets a field that does not exist; skipped.", ruleRef));
                 return null;
+            }
+            if (!elementRefByFieldName.TryGetValue(fieldName, out targetElementRef))
+            {
+                // The field exists but is not on this form. Quickbase keeps the rule and flags "Missing field"; so do we, rather than
+                // dropping the action (and with it, often, the whole rule).
+                issues.Add(Warning("QBL_FORM_RULE_TARGET_FIELD_NOT_ON_FORM", $"Form rule '{ruleName}' action targets the field '{fieldName}', which is not on this form; kept, shown as a missing target.", ruleRef));
             }
             targetFieldName = fieldName;
             targetType = "Field";
@@ -3809,6 +3892,7 @@ public static class QblToPblConverter
             ActionType = actionType,
             TargetType = targetType,
             TargetElementRef = targetElementRef,
+            TargetFieldName = targetType == "Field" ? targetFieldName : null,
             TargetSectionRef = targetSectionRef,
             TargetBlockRef = targetBlockRef,
             ActionValue = sourceFieldName is null ? literalValue : null,

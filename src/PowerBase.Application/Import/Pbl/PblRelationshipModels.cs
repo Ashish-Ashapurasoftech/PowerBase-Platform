@@ -88,11 +88,19 @@ public sealed class PblStandaloneReportLink
     /// <summary>"Searchable" / "allowed in reports" when the source set them away from the defaults.</summary>
     public PblFieldFlags? Flags { get; set; }
 
-    /// <summary>A <see cref="PblTable.LogicalRef"/>.</summary>
+    /// <summary>A <see cref="PblTable.LogicalRef"/>. Empty when the link opens a table of ANOTHER app (see <see cref="TargetAppName"/>).</summary>
     public string TargetTableRef { get; set; } = string.Empty;
 
     /// <summary>A <see cref="PblField.Name"/> (or reference/lookup/summary name) on the target table.</summary>
     public string TargetFieldName { get; set; } = string.Empty;
+
+    /// <summary>Set when the link opens a table of another app (PowerBase links across apps of the same tenant): that app's name. The import
+    /// finds the app by name among the apps already created; <see cref="TargetTableName"/> is the table in it.</summary>
+    public string? TargetAppName { get; set; }
+
+    /// <summary>The source names no target at all (Quickbase "Target: Default"): the link is created with no table chosen, to be picked in the field settings.</summary>
+    public bool NoTarget { get; set; }
+    public string? TargetTableName { get; set; }
 
     /// <summary>A field name on this table; null = the record's own id.</summary>
     public string? SourceFieldName { get; set; }

@@ -84,21 +84,22 @@ public static class EmailAttachmentDownloader
         }
     }
 
-    public static async Task AddAsync(MailMessage message, IReadOnlyList<PipelineEmailAttachment> attachments, HttpClient client, CancellationToken ct)
+    public static async Task AddAsync(MailMessage message, IReadOnlyList<PipelineEmailAttachment> attachments, HttpClient client, CancellationToken ct, long maxBytes = MaxBytes)
     {
         if (attachments.Count > 50) throw new InvalidOperationException("An email may contain at most 50 URL attachments.");
         long total = message.Attachments.Cast<Attachment>().Sum(item => item.ContentStream.Length);
-        if (total > MaxBytes) throw new InvalidOperationException("Email attachments exceed the 25 MB total size limit.");
+        if (total > maxBytes) throw new InvalidOperationException(PipelineEmailLimits.TooLargeMessage(maxBytes));
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(TimeSpan.FromSeconds(60));
+        // 60 s per 25 MB of allowed content, so large Outlook attachments can finish downloading.
+        timeout.CancelAfter(TimeSpan.FromSeconds(Math.Max(60, 60 * maxBytes / MaxBytes)));
         foreach (var item in attachments)
         {
             var url = ValidateUrl(item.Url);
             using var response = await GetAsync(client, url, timeout.Token);
             if (!response.IsSuccessStatusCode)
                 throw new InvalidOperationException($"Attachment download failed (HTTP {(int)response.StatusCode}).");
-            if (response.Content.Headers.ContentLength is long length && length > MaxBytes - total)
-                throw new InvalidOperationException("Email attachments exceed the 25 MB total size limit.");
+            if (response.Content.Headers.ContentLength is long length && length > maxBytes - total)
+                throw new InvalidOperationException(PipelineEmailLimits.TooLargeMessage(maxBytes));
             var name = item.FileName;
             if (string.IsNullOrWhiteSpace(name)) name = response.Content.Headers.ContentDisposition?.FileNameStar ?? response.Content.Headers.ContentDisposition?.FileName;
             if (string.IsNullOrWhiteSpace(name)) name = Uri.UnescapeDataString(url.AbsolutePath.Split('/').LastOrDefault() ?? "");
@@ -116,7 +117,7 @@ public static class EmailAttachmentDownloader
                 while ((count = await stream.ReadAsync(buffer, timeout.Token)) > 0)
                 {
                     total += count;
-                    if (total > MaxBytes) throw new InvalidOperationException("Email attachments exceed the 25 MB total size limit.");
+                    if (total > maxBytes) throw new InvalidOperationException(PipelineEmailLimits.TooLargeMessage(maxBytes));
                     await data.WriteAsync(buffer.AsMemory(0, count), timeout.Token);
                 }
                 data.Position = 0;

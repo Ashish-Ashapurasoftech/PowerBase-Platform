@@ -137,6 +137,11 @@ public sealed class PblFormRuleAction
     /// <summary>A <see cref="PblFormElement.LogicalRef"/> within the same form — required when TargetType is "Field".</summary>
     public string? TargetElementRef { get; set; }
 
+    /// <summary>TargetType "Field": the name of the table field the action is aimed at. When <see cref="TargetElementRef"/> is null the field
+    /// has no element on this form: Quickbase keeps such a rule (it shows a "Missing field" warning), and so does the import — the action
+    /// stays aimed at the field, which the designer shows as missing from the form until it is added.</summary>
+    public string? TargetFieldName { get; set; }
+
     /// <summary>A <see cref="PblFormSection.LogicalRef"/> within the same form — required when TargetType is "Section".</summary>
     public string? TargetSectionRef { get; set; }
 
@@ -167,6 +172,9 @@ public sealed class PblFormElement
     /// <summary>A <see cref="PblField.Name"/> on the form's table — required when ElementType is "Field".</summary>
     public string? FieldName { get; set; }
     public string? ElementContent { get; set; }
+
+    /// <summary>The element's own name in the designer (a rich text block's name, e.g. Quickbase's "Spacer"); null = PowerBase numbers it ("Text 5").</summary>
+    public string? Name { get; set; }
 
     /// <summary>One of: Default, Custom, Hide.</summary>
     public string LabelMode { get; set; } = "Default";

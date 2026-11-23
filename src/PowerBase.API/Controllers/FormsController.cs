@@ -426,7 +426,7 @@ public class FormsController : ControllerBase
         var actions = request.Actions.Select(a =>
             new FormRuleActionSpec(a.ActionType, a.TargetType, a.TargetElementId, a.TargetSectionId, a.TargetBlockId, a.ActionValue, a.DisplayOrder, a.RunOnceOnActivation, a.IsExpressionValue,
                 a.TargetElementPublicId, a.TargetSectionPublicId, a.TargetBlockPublicId, a.TargetPagePublicId,
-                a.ValueSource, a.SourceFieldId, a.MessageType, a.MessageSeverity)).ToList();
+                a.ValueSource, a.SourceFieldId, a.MessageType, a.MessageSeverity, a.TargetFieldId)).ToList();
 
         await _saveRuleHandler.HandleAsync(new SaveFormRuleCommand(
             ruleId, request.Name, request.Description, request.Tags, request.IsActive,
@@ -660,6 +660,7 @@ public class FormsController : ControllerBase
             TargetSectionPublicId = a.TargetSectionPublicId,
             TargetBlockPublicId   = a.TargetBlockPublicId,
             TargetPagePublicId    = a.TargetPagePublicId,
+            TargetFieldId         = a.TargetFieldId,
             ActionValue         = a.ActionValue,
             RunOnceOnActivation = a.RunOnceOnActivation,
             ValueSource         = a.ValueSource,

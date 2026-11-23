@@ -135,6 +135,7 @@ public class SaveFormRuleCommandHandler
             TargetSectionPublicId = a.TargetSectionPublicId,
             TargetBlockPublicId   = a.TargetBlockPublicId,
             TargetPagePublicId    = a.TargetPagePublicId,
+            TargetFieldId         = a.TargetFieldId,
             ActionValue         = a.ActionValue,
             RunOnceOnActivation = a.RunOnceOnActivation,
             IsExpressionValue   = a.IsExpressionValue,

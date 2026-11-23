@@ -2109,8 +2109,50 @@ public class ImportAppFromPblCommandHandler
                     continue;
                 }
 
-                if (!tableByName.TryGetValue(table.Name, out var ownTable)
-                    || !tableNameByRef.TryGetValue(link.TargetTableRef, out var targetName) || !tableByName.TryGetValue(targetName, out var targetTable))
+                if (!tableByName.TryGetValue(table.Name, out var ownTable))
+                {
+                    skipped.Add(new ImportSkippedItem { LogicalRef = link.LogicalRef, Name = link.Name, Reason = "Report link not created: the table it sits on was not created." });
+                    continue;
+                }
+
+                if (link.NoTarget)
+                {
+                    try
+                    {
+                        await _reportLinkFactory.CreateAsync(ownTable, nameof(PowerBase.Domain.Enums.FieldTypeCode.ReportLink), (link.Label ?? link.Name).Trim(), false,
+                            new ReportLinkSettings { LinkText = string.IsNullOrWhiteSpace(link.LinkText) ? (link.Label ?? link.Name) : link.LinkText.Trim(), OpenInNewWindow = false },
+                            ct, explicitFid: link.SourceId);
+                        created++;
+                    }
+                    catch (DomainException ex)
+                    {
+                        skipped.Add(new ImportSkippedItem { LogicalRef = link.LogicalRef, Name = link.Name, Reason = $"Report link not created: {ex.Message}" });
+                    }
+                    continue;
+                }
+
+                var targetAppPublicId = appPublicId;
+                AppTable? targetTable;
+                string? targetName;
+                if (!string.IsNullOrWhiteSpace(link.TargetAppName))
+                {
+                    // The link opens a table of another app: find that app by name among the tenant's apps (it has to be imported already).
+                    var otherApp = (await _appRepo.ListAllAsync(ct)).FirstOrDefault(a => a.PublicId != appPublicId && string.Equals(a.Name, link.TargetAppName, StringComparison.OrdinalIgnoreCase));
+                    if (otherApp is null)
+                    {
+                        skipped.Add(new ImportSkippedItem { LogicalRef = link.LogicalRef, Name = link.Name, Reason = $"Report link not created: the app '{link.TargetAppName}' it opens is not in this tenant yet. Import that app, then add the link." });
+                        continue;
+                    }
+                    targetTable = (await _tableRepo.ListByAppAsync(otherApp.Id, ct)).FirstOrDefault(t => string.Equals(t.Name, link.TargetTableName, StringComparison.OrdinalIgnoreCase));
+                    if (targetTable is null)
+                    {
+                        skipped.Add(new ImportSkippedItem { LogicalRef = link.LogicalRef, Name = link.Name, Reason = $"Report link not created: the table '{link.TargetTableName}' it opens was not found in the app '{link.TargetAppName}'." });
+                        continue;
+                    }
+                    targetAppPublicId = otherApp.PublicId;
+                    targetName = $"{link.TargetAppName} / {targetTable.Name}";
+                }
+                else if (!tableNameByRef.TryGetValue(link.TargetTableRef, out targetName) || !tableByName.TryGetValue(targetName, out targetTable))
                 {
                     skipped.Add(new ImportSkippedItem { LogicalRef = link.LogicalRef, Name = link.Name, Reason = "Report link not created: the table it opens was not created." });
                     continue;
@@ -2142,7 +2184,7 @@ public class ImportAppFromPblCommandHandler
                     await _reportLinkFactory.CreateAsync(ownTable, nameof(PowerBase.Domain.Enums.FieldTypeCode.ReportLink), (link.Label ?? link.Name).Trim(), false,
                         new ReportLinkSettings
                         {
-                            TargetAppPublicId = appPublicId.ToString(),
+                            TargetAppPublicId = targetAppPublicId.ToString(),
                             TargetTablePublicId = targetTable.PublicId.ToString(),
                             TargetFid = (int)targetFid,
                             SourceFid = sourceFid,
@@ -2516,7 +2558,8 @@ public class ImportAppFromPblCommandHandler
                             element.LabelMode, Fit(element.CustomLabel, FormTextMaxLength), element.ShowOnAdd, element.ShowOnEdit, element.ShowOnView,
                             element.WidthMode, element.WidthValue, element.HelpTextOverride, element.IsReadOnly, element.IsRequired, element.DisplayAs,
                             GroupId: groupId,
-                            ContentWidthMode: element.ContentWidthMode, ContentWidthValue: element.ContentWidthValue, ContentWidthUnit: element.ContentWidthUnit));
+                            ContentWidthMode: element.ContentWidthMode, ContentWidthValue: element.ContentWidthValue, ContentWidthUnit: element.ContentWidthUnit,
+                            Name: string.Equals(element.ElementType, "StaticText", StringComparison.OrdinalIgnoreCase) ? Fit(element.Name, FormTextMaxLength) : null));
                     }
 
                     var blockGuid = Guid.NewGuid();
@@ -2715,10 +2758,19 @@ public class ImportAppFromPblCommandHandler
                         continue;
                     }
 
+                    Guid? missingTargetPublicId = null;
+                    long? targetFieldId = null;
                     if (action.TargetType == "Field" && action.TargetElementRef is not null &&
                         layout.ElementGuidByRef.TryGetValue(action.TargetElementRef, out var eg) && elementDbIdByPublicId.TryGetValue(eg, out var elementDbId))
                     {
                         targetElementId = elementDbId;
+                        ok = true;
+                    }
+                    else if (action.TargetType == "Field" && action.TargetElementRef is null && !string.IsNullOrWhiteSpace(action.TargetFieldName))
+                    {
+                        // A field of the table that is not on this form: the action stays aimed at the FIELD (TargetFieldId), with no element
+                        // (a GUID that matches none), so the designer shows it as missing from the form and a rule run ignores it.
+                        missingTargetPublicId = Guid.NewGuid();
                         ok = true;
                     }
                     else if (action.TargetType == "Section" && action.TargetSectionRef is not null &&
@@ -2747,6 +2799,16 @@ public class ImportAppFromPblCommandHandler
                         break;
                     }
 
+                    if (action.TargetType == "Field" && !string.IsNullOrWhiteSpace(action.TargetFieldName))
+                    {
+                        if (!fidByName.TryGetValue(action.TargetFieldName, out var targetFid))
+                        {
+                            unresolvedAction = true;
+                            break;
+                        }
+                        targetFieldId = targetFid;
+                    }
+
                     long? sourceFieldId = null;
                     if (action.ValueSource == "field")
                     {
@@ -2760,8 +2822,10 @@ public class ImportAppFromPblCommandHandler
 
                     actionSpecs.Add(new FormRuleActionSpec(
                         action.ActionType, action.TargetType, targetElementId, targetSectionId, targetBlockId, action.ActionValue, action.DisplayOrder,
+                        TargetElementPublicId: missingTargetPublicId,
                         TargetPagePublicId: targetPagePublicId,
-                        ValueSource: action.ValueSource, SourceFieldId: sourceFieldId, MessageType: action.MessageType, MessageSeverity: action.MessageSeverity));
+                        ValueSource: action.ValueSource, SourceFieldId: sourceFieldId, MessageType: action.MessageType, MessageSeverity: action.MessageSeverity,
+                        TargetFieldId: targetFieldId));
                 }
 
                 if (unresolvedAction || actionSpecs.Count == 0)
