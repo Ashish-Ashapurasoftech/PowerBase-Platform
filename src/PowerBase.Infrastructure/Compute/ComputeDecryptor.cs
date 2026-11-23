@@ -15,7 +15,7 @@ public sealed class ComputeDecryptor
 {
     private readonly IEncryptionService _encryption;
     private readonly IQueryContext _context;
-    private readonly Dictionary<long, FieldEncryptionContext> _byApp = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, FieldEncryptionContext> _byApp = new();   // fields are built side by side
 
     public ComputeDecryptor(IEncryptionService encryption, IQueryContext context)
     {
@@ -27,7 +27,7 @@ public sealed class ComputeDecryptor
     {
         if (_byApp.TryGetValue(appId, out var cached)) return cached;
         var resolved = await FieldEncryptionContext.ResolveAsync(connection, appId, _context.TenantId, _encryption, ct: ct);
-        _byApp[appId] = resolved;
+        _byApp.TryAdd(appId, resolved);
         return resolved;
     }
 

@@ -98,21 +98,49 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
         var order = model.Graph.TopologicalOrder.Select((k, i) => (k, i)).ToDictionary(x => x.k, x => x.i);
         var readyNow = model.Decisions.Where(d => d.Value.Field.MaterializeState == MaterializeStates.Ready && d.Value.Field.MaterializeMode == MaterializeModes.On)
             .Select(d => d.Key).ToHashSet();
+        // The tables people open most first (Compute:PriorityTables), then inputs before what reads them.
+        var priority = options.PriorityTablesFor(QueryContext.TenantId);
+        // Up to BackgroundSessionsPerDatabase fields side by side, each on its own guarded connection (the guard holds the database to that
+        // many background slots and slows or stops them when it is busy).
+        var concurrency = Math.Max(1, options.BackgroundSessionsPerDatabase);
+        using var gate = new SemaphoreSlim(concurrency);
+        var running = new List<Task>();
+        var sync = new object();
+        var busy = false;
         foreach (var (key, (field, decision)) in model.Decisions
                      .Where(d => d.Value.Field.MaterializeMode == MaterializeModes.On && d.Value.Field.MaterializeState is MaterializeStates.None or MaterializeStates.Building)
-                     .OrderBy(d => order.TryGetValue(d.Key, out var i) ? i : int.MaxValue).ThenBy(d => d.Value.Field.Id))
+                     .OrderBy(d => priority.TryGetValue(d.Key.TableId, out var rank) ? rank : int.MaxValue)
+                     .ThenBy(d => order.TryGetValue(d.Key, out var i) ? i : int.MaxValue).ThenBy(d => d.Value.Field.Id))
         {
             ct.ThrowIfCancellationRequested();
-            if (decision.Plan is { } p && StoredInputs(p).FirstOrDefault(k => !readyNow.Contains(k)) is { TableId: > 0 } waiting)
+            await gate.WaitAsync(ct);
+            FieldKey? waiting;
+            lock (sync)
             {
-                outcomes.Add(new(field.Id, field.Fid ?? 0, field.AppTableId, "waiting", 0, 0, TimeSpan.Zero,
-                    $"Waiting for the stored field it reads ({waiting}) to be ready."));
-                continue;
+                waiting = busy ? null : decision.Plan is { } p ? StoredInputs(p).FirstOrDefault(k => !readyNow.Contains(k)) : null;
+                if (waiting is { TableId: > 0 } w)
+                    outcomes.Add(new(field.Id, field.Fid ?? 0, field.AppTableId, "waiting", 0, 0, TimeSpan.Zero,
+                        $"Waiting for the stored field it reads ({w}) to be ready."));
             }
-            outcomes.Add(await BuildAsync(field, decision, model, options, ct));
-            if (outcomes[^1].Outcome == "ready") readyNow.Add(key);
-            if (outcomes[^1].Outcome == "busy") break;   // the database is busy: stop for now, the next poll continues
+            if (busy) { gate.Release(); break; }   // the database is busy: stop for now, the next poll continues
+            if (waiting is { TableId: > 0 }) { gate.Release(); continue; }
+
+            running.Add(Task.Run(async () =>
+            {
+                try
+                {
+                    var outcome = await BuildAsync(field, decision, model, options, ct);
+                    lock (sync)
+                    {
+                        outcomes.Add(outcome);
+                        if (outcome.Outcome == "ready") readyNow.Add(key);
+                        if (outcome.Outcome == "busy") busy = true;
+                    }
+                }
+                finally { gate.Release(); }
+            }, ct));
         }
+        await Task.WhenAll(running);
         var dropped = await DropUnusedColumnsAsync(ct);
         if (outcomes.Count > 0 || dropped > 0) _models.Invalidate(QueryContext.TenantId);
         return outcomes;

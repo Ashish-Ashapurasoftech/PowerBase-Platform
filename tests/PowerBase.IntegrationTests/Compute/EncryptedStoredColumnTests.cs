@@ -29,7 +29,11 @@ public class EncryptedStoredColumnTests : IClassFixture<ComputeSqlFixture>, IAsy
     private const long App = 2, Cust = 30, Ord = 31;
     private readonly ComputeSqlFixture _db;
     private readonly long _tenantId = Random.Shared.NextInt64(1_000_000, long.MaxValue);
-    private readonly ComputeOptions _options = new() { PauseBetweenBatchesMs = 0, SummaryBatchSize = 7, LookupBatchSize = 50, MaxSessionsPerDatabase = 2 };
+    // Two fields built side by side (two background slots of three), the lookup's table first.
+    private readonly ComputeOptions _options = new()
+    {
+        PauseBetweenBatchesMs = 0, SummaryBatchSize = 7, LookupBatchSize = 50, MaxSessionsPerDatabase = 3, BackgroundSessionsPerDatabase = 2,
+    };
     private readonly IEncryptionService _encryption;
     private string _dek = "";
     private long _nameLookupId, _openCountId, _openSumId;

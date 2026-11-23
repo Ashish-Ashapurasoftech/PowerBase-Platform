@@ -36,7 +36,7 @@ public static class DatabaseGuard
 
     /// <summary>
     /// Opens a connection and takes one of the database's worker slots on it. <paramref name="backgroundOnly"/> work (backfill,
-    /// reconciliation) may only take the last slot, so live changes always have one. Null when no slot frees up within
+    /// reconciliation) may only take the highest slots (ComputeOptions.BackgroundSessionsPerDatabase), so live changes always have slot 1. Null when no slot frees up within
     /// <paramref name="wait"/>.
     /// </summary>
     public static async Task<GuardedConnection?> AcquireAsync(Func<CancellationToken, Task<SqlConnection>> open, ComputeOptions options,
@@ -44,7 +44,10 @@ public static class DatabaseGuard
     {
         var connection = await open(ct);
         await connection.OpenAsync(ct);
-        var first = backgroundOnly ? options.MaxSessionsPerDatabase : 1;
+        // Background work takes only the highest slots (BackgroundSessionsPerDatabase of them): slot 1 always stays free for live changes.
+        var first = backgroundOnly
+            ? Math.Clamp(options.MaxSessionsPerDatabase - Math.Max(1, options.BackgroundSessionsPerDatabase) + 1, Math.Min(2, options.MaxSessionsPerDatabase), options.MaxSessionsPerDatabase)
+            : 1;
         var deadline = DateTime.UtcNow + wait;
         try
         {

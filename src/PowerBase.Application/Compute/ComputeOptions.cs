@@ -49,6 +49,33 @@ public sealed class ComputeOptions
     public int MaxSessionsPerDatabase { get; set; } = 2;
     /// <summary>Pause after every batch so API queries run in between.</summary>
     public int PauseBetweenBatchesMs { get; set; } = 150;
+
+    /// <summary>
+    /// How many of a database's <see cref="MaxSessionsPerDatabase"/> slots background work (first builds, the nightly check) may hold at
+    /// once — the highest-numbered ones, so live changes always keep slot 1. Also how many fields a build round builds side by side.
+    /// Default 1: one field at a time, as before.
+    /// </summary>
+    public int BackgroundSessionsPerDatabase { get; set; } = 1;
+
+    /// <summary>
+    /// Tables whose fields are built first, in this order: "tenantId:tableId" pairs separated by commas (e.g. "17:243,17:244"). The tables
+    /// people open most get their stored columns (and fast pages) first; every other field follows in the usual order.
+    /// </summary>
+    public string? PriorityTables { get; set; }
+
+    /// <summary>Rank of each priority table of <paramref name="tenantId"/> (0 = first); empty when none is set.</summary>
+    public IReadOnlyDictionary<long, int> PriorityTablesFor(long tenantId)
+    {
+        var result = new Dictionary<long, int>();
+        if (string.IsNullOrWhiteSpace(PriorityTables)) return result;
+        foreach (var part in PriorityTables.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var pair = part.Split(':');
+            if (pair.Length == 2 && long.TryParse(pair[0], out var t) && t == tenantId && long.TryParse(pair[1], out var table))
+                result.TryAdd(table, result.Count);
+        }
+        return result;
+    }
     /// <summary>Above this CPU / data IO / log write percent (sys.dm_db_resource_stats) the worker waits a little before the next batch.</summary>
     public int GuardSlowPercent { get; set; } = 60;
     /// <summary>Above this it stops and tries again later.</summary>

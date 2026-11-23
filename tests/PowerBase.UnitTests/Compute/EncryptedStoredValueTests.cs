@@ -38,6 +38,16 @@ public class EncryptedStoredValueTests
     public void A_value_that_does_not_convert_is_stored_as_null() => Stored("not a number", "DECIMAL(38,4)").Should().BeNull();
 
     [Fact]
+    public void Priority_tables_are_read_per_tenant_in_the_given_order()
+    {
+        var options = new ComputeOptions { PriorityTables = "17:243, 17:244,18:5, bad, 17:x" };
+        options.PriorityTablesFor(17).Should().Equal(new Dictionary<long, int> { [243] = 0, [244] = 1 });
+        options.PriorityTablesFor(18).Should().Equal(new Dictionary<long, int> { [5] = 0 });
+        options.PriorityTablesFor(99).Should().BeEmpty();
+        new ComputeOptions().PriorityTablesFor(17).Should().BeEmpty();
+    }
+
+    [Fact]
     public void Lookup_and_summary_of_encrypted_data_go_through_the_value_table()
     {
         MaterializedColumnWriter.UsesValueTable(new LookupPlan(11, 30, 1, 6, 10, 8, "f_8", DecryptAppId: 2)).Should().BeTrue();
