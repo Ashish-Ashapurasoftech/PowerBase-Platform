@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Configuration;
 using FluentAssertions;
 using PowerBase.Application.Compute;
 using PowerBase.Infrastructure.Compute;
@@ -45,6 +46,22 @@ public class EncryptedStoredValueTests
         options.PriorityTablesFor(18).Should().Equal(new Dictionary<long, int> { [5] = 0 });
         options.PriorityTablesFor(99).Should().BeEmpty();
         new ComputeOptions().PriorityTablesFor(17).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void The_worker_reads_parallel_build_and_priority_settings()
+    {
+        var config = new Microsoft.Extensions.Configuration.ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Compute:MaxSessionsPerDatabase"] = "6",
+            ["Compute:BackgroundSessionsPerDatabase"] = "4",
+            ["Compute:PriorityTables"] = "17:243,17:244",
+        }).Build();
+        var o = ComputeConfig.ReadCompute(config);
+        o.MaxSessionsPerDatabase.Should().Be(6);
+        o.BackgroundSessionsPerDatabase.Should().Be(4);
+        o.PriorityTablesFor(17).Should().Equal(new Dictionary<long, int> { [243] = 0, [244] = 1 });
+        ComputeConfig.ReadCompute(new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()).BackgroundSessionsPerDatabase.Should().Be(1);
     }
 
     [Fact]
