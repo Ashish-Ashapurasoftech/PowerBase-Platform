@@ -45,6 +45,8 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
         SELECT af.Id, ft.Code AS TypeCode
         FROM meta.AppField af
         JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        JOIN meta.AppTable t ON t.Id = af.AppTableId AND t.IsDeleted = 0
+        JOIN meta.App a ON a.Id = t.AppId AND a.IsDeleted = 0
         WHERE af.MaterializeMode = 0 AND af.IsDeleted = 0 AND af.Fid IS NOT NULL
         """;
 

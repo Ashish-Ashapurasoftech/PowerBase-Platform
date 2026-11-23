@@ -24,6 +24,7 @@ public sealed class ComputeSchemaRepository : TenantRepositoryBase
         FROM meta.AppField af
         JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
         JOIN meta.AppTable t ON t.Id = af.AppTableId AND t.IsDeleted = 0
+        JOIN meta.App a ON a.Id = t.AppId AND a.IsDeleted = 0   -- a deleted app keeps its tables "live": its fields are never built
         WHERE af.IsDeleted = 0;
 
         SELECT t.Id AS TableId, t.AppId, CAST(a.IsEncrypted AS BIT) AS IsEncrypted
