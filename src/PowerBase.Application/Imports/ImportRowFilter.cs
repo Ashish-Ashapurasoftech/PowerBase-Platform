@@ -81,6 +81,10 @@ public sealed class ImportRowFilter
         if (op == "isEmpty") return IsBlank(cell);
         if (op == "isNotEmpty") return !IsBlank(cell);
 
+        // A file's columns are text: "is before", "is greater than" or "is equal to checked" says what to read the cell as. A cell that cannot be read that
+        // way is nothing (it matches no comparison), the same as a blank in a column of that type.
+        if (c.ValueType is { Length: > 0 } valueType) cell = ReadAs(cell, valueType);
+
         object? other = null;
         string? literal = c.Value;
         var fieldToField = string.Equals(c.ValueMode, "field", StringComparison.OrdinalIgnoreCase) && c.ValueFieldId.HasValue;
@@ -119,6 +123,38 @@ public sealed class ImportRowFilter
             "notIn" => !ValueList(needle).Any(v => Compare(cell, null, v, field) == 0),
             _ => false // unknown operators fail closed: never import rows the filter could not evaluate
         };
+    }
+
+    public const string AsNumber = "number";
+    public const string AsDate = "date";
+    public const string AsCheckbox = "checkbox";
+
+    public static bool IsKnownValueType(string? valueType) => valueType is null or "" or AsNumber or AsDate or AsCheckbox;
+
+    /// <summary>The cell as the type the operator reads it as, or null when it cannot be read that way. A date is read in whatever form the file has it (see
+    /// <see cref="ImportDateParser"/>) and kept as a date, so "is on or before" compares days, not times. A checkbox reads yes / true / checked / 1 as checked
+    /// and no / false / unchecked / 0 as unchecked; a blank is unchecked, as everywhere else.</summary>
+    private static object? ReadAs(object? cell, string valueType)
+    {
+        switch (valueType)
+        {
+            case AsNumber:
+                return TryDecimal(cell, out var number) ? number : null;
+            case AsDate:
+                if (cell is DateTime) return cell;
+                return cell is string text && ImportDateParser.TryParse(text, null, withTime: false, out var date) ? date : null;
+            case AsCheckbox:
+                if (cell is bool) return cell;
+                var word = (cell is null or DBNull ? "" : AsText(cell)).Trim();
+                if (word.Length == 0) return false;
+                if (word.Equals("yes", StringComparison.OrdinalIgnoreCase) || word.Equals("true", StringComparison.OrdinalIgnoreCase) || word.Equals("checked", StringComparison.OrdinalIgnoreCase)
+                    || word.Equals("y", StringComparison.OrdinalIgnoreCase) || word.Equals("on", StringComparison.OrdinalIgnoreCase) || word == "1") return true;
+                if (word.Equals("no", StringComparison.OrdinalIgnoreCase) || word.Equals("false", StringComparison.OrdinalIgnoreCase) || word.Equals("unchecked", StringComparison.OrdinalIgnoreCase)
+                    || word.Equals("n", StringComparison.OrdinalIgnoreCase) || word.Equals("off", StringComparison.OrdinalIgnoreCase) || word == "0") return false;
+                return null;
+            default:
+                return cell;
+        }
     }
 
     private object? CellValue(long fieldId, IReadOnlyDictionary<string, object?> row)

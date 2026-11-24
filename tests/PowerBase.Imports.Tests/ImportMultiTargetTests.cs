@@ -148,21 +148,50 @@ public class ImportMultiTargetTests
     }
 
     [Fact]
-    public async Task Abort_if_any_issue_writes_nothing_in_any_table_when_one_table_has_a_problem()
+    public async Task All_or_nothing_imports_nothing_into_a_table_that_has_a_problem_and_leaves_the_others_alone()
     {
-        var h = Harness(Config(c => c.ConstraintPolicy = ImportConstraintPolicy.AbortIfAnyIssue), row: id => id == 9 ? Row(id, qty: "many") : Row(id));
+        // The problem (row 9's Qty) is in the first table only; each table has its own setting, here the same one for both.
+        var h = Harness(Config(c => c.ErrorPolicy = ImportErrorPolicy.AllOrNothing), row: id => id == 9 ? Row(id, qty: "many") : Row(id));
 
         await h.RunAsync();
 
-        h.Completion!.Value.Status.Should().Be(ImportRunStatus.Failed);
-        h.Store.InsertedByTable.Should().BeEmpty("nothing is written anywhere, not even the clean rows or the table that had no problem");
+        h.Completion!.Value.Status.Should().Be(ImportRunStatus.Partial);
+        h.Store.InsertedByTable.Should().NotContainKey(11, "the table with a problem gets none of its rows, not even the clean ones");
+        h.Store.InsertedByTable[ContactsId].Should().HaveCount(40, "the other table had no problem");
         h.TargetCounters[0].Errored.Should().Be(1);
+        h.TargetCounters[0].Inserted.Should().Be(0);
+        h.Completion!.Value.Detail.Should().Contain("Nothing was imported into");
+    }
+
+    [Fact]
+    public async Task All_or_nothing_set_on_one_extra_table_does_not_hold_back_the_home_table()
+    {
+        // Row 9's Qty breaks the first (home) table; only the second table is all or nothing, and it has no problem.
+        var h = Harness(Config(c => c.AdditionalTargets[0].ErrorPolicy = ImportErrorPolicy.AllOrNothing), row: id => id == 9 ? Row(id, qty: "many") : Row(id));
+
+        await h.RunAsync();
+
+        h.Store.InsertedByTable[11].Should().HaveCount(39, "the home table imports its valid rows");
+        h.Store.InsertedByTable[ContactsId].Should().HaveCount(40);
+    }
+
+    [Fact]
+    public async Task A_table_follows_the_import_unless_it_has_its_own_setting()
+    {
+        // The import says exclude every duplicate; Contacts says keep the first. Rows 3 and 4 share a Name (Contacts' unique Code is taken from it).
+        var h = Harness(Config(c => { c.DuplicatePolicy = ImportDuplicatePolicy.ExcludeAll; c.AdditionalTargets[0].DuplicatePolicy = ImportDuplicatePolicy.KeepFirst; }),
+            row: id => id is 3 or 4 ? Row(id, name: "same") : Row(id));
+
+        await h.RunAsync();
+
+        h.Store.InsertedByTable[11].Should().HaveCount(38, "the home table leaves both rows out");
+        h.Store.InsertedByTable[ContactsId].Should().HaveCount(39, "Contacts keeps the first of the two");
     }
 
     [Fact]
     public async Task A_clean_source_passes_the_abort_check_and_fills_every_table()
     {
-        var h = Harness(Config(c => c.ConstraintPolicy = ImportConstraintPolicy.AbortIfAnyIssue));
+        var h = Harness(Config(c => c.ErrorPolicy = ImportErrorPolicy.AllOrNothing));
 
         await h.RunAsync();
 
@@ -175,7 +204,7 @@ public class ImportMultiTargetTests
     public async Task Excluding_duplicate_groups_is_decided_for_each_table_separately()
     {
         // Rows 3 and 4 share a Name: a duplicate group in the home table (Name is unique there) and in Contacts (Code comes from Name).
-        var h = Harness(Config(c => c.ConstraintPolicy = ImportConstraintPolicy.ExcludeDuplicateGroups),
+        var h = Harness(Config(c => c.DuplicatePolicy = ImportDuplicatePolicy.ExcludeAll),
             row: id => id is 3 or 4 ? Row(id, name: "same") : Row(id));
 
         await h.RunAsync();
@@ -454,7 +483,8 @@ public class ImportMultiTargetTests
         var cfg = ImportConfigMapper.ToConfig(old, Guid.NewGuid());
 
         cfg.AdditionalTargets.Should().BeEmpty();
-        cfg.ConstraintPolicy.Should().Be(ImportConstraintPolicy.AbortIfAnyIssue);
+        cfg.DuplicatePolicy.Should().Be(ImportDuplicatePolicy.KeepFirst);
+        cfg.ErrorPolicy.Should().Be(ImportErrorPolicy.AllOrNothing);
     }
 
     [Fact]
