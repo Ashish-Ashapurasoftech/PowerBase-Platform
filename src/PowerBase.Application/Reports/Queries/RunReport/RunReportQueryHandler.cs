@@ -643,7 +643,7 @@ public class RunReportQueryHandler
 
                 var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, pagedRows,
                     await _relationalProjector.ProjectAsync(table, FieldsToProject(allFields, fastUsed), pagedRows, ct));
-                var computed = _formulaProjector.Project(allFields, pagedRows, relational, table);
+                var computed = _formulaProjector.Project(FieldsForFormulas(allFields, fastUsed), pagedRows, relational, table);
                 var userNames = await ResolveUserNamesAsync(pagedRows, allFields, _userRepo, ct, computed);
                 var itemsFast = pagedRows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
                 var totalFast = (int)Math.Min(totalMatches, int.MaxValue);
@@ -958,7 +958,7 @@ public class RunReportQueryHandler
             {
                 var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, rows,
                     await _relationalProjector.ProjectAsync(table, projectedFields, rows, ct));
-                computed = _formulaProjector.Project(allFields, rows, relational, table);
+                computed = _formulaProjector.Project(FieldsForFormulas(allFields, usedFields), rows, relational, table);
             }
             using (_timing.Measure("names"))
                 userNames = await ResolveUserNamesAsync(rows, allFields, _userRepo, ct, computed);
@@ -1226,8 +1226,11 @@ public class RunReportQueryHandler
             .Select(f => (long)f.Fid!.Value)
             .ToHashSet();
 
+        // A Ready formula whose stored value is exact is shown from c_ (RelationalProjector seeds it, FormulaProjector keeps it): what it
+        // reads is not worked out for it. Any other formula still needs its inputs.
         var formulaFids = allFields
-            .Where(f => f.Fid is int fid && used.Contains(fid) && FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings))
+            .Where(f => f.Fid is int fid && used.Contains(fid) && FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings)
+                        && !(_readyFieldIds.Contains(f.Id) && MaterializedReadFields.StoresExactValue(f)))
             .Select(f => (long)f.Fid!.Value)
             .ToList();
         if (formulaFids.Count > 0)
@@ -1241,6 +1244,13 @@ public class RunReportQueryHandler
     /// <summary>The fields the relational projector is given — it works out each Reference, Lookup and Summary among them for
     /// the rows read, a query each: only those the report uses (<see cref="FieldsUsed"/>). A Summary the report doesn't
     /// show, filter, sort or compute with is then a query it doesn't run for every page.</summary>
+    /// <summary>The fields the formula projector is given for a page: every non-formula field (what a formula reads) and only the formulas
+    /// the report uses (<see cref="FieldsUsed"/>) — not every formula of the table, some of which read other tables per record.</summary>
+    private static IReadOnlyList<AppField> FieldsForFormulas(IReadOnlyList<AppField> allFields, IReadOnlySet<long>? used) =>
+        used is null
+            ? allFields
+            : allFields.Where(f => !FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings) || (f.Fid.HasValue && used.Contains(f.Fid.Value))).ToList();
+
     private static IReadOnlyList<AppField> FieldsToProject(IReadOnlyList<AppField> allFields, IReadOnlySet<long>? used) =>
         used is null
             ? allFields

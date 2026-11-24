@@ -117,6 +117,7 @@ public sealed class FieldTypeChangePlanner
         AppTable table, IReadOnlyList<AppField> tableFields, AppField field, CancellationToken ct)
     {
         var rows = await _recordRepo.ListAllRowsDecryptedAsync(table, tableFields, ct);
+        using var _ = PowerBase.Application.Compute.StoredReadExclusion.Everything();   // converted values are the values now, not a stored copy
         var relational = await _relationalProjector.ProjectAsync(table, tableFields, rows, ct);
         var computed = _formulaProjector.Project(tableFields, rows, relational, table);
 

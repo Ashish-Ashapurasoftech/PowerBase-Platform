@@ -77,15 +77,18 @@ public sealed class RelationalProjector : IRelationalProjector
         var referenceFields = fields.Where(f => f.TypeCode == "Reference" && f.Fid.HasValue).ToList();
         var lookupFields = fields.Where(f => f.TypeCode == "Lookup" && f.Fid.HasValue).ToList();
         var summaryFields = fields.Where(f => f.TypeCode == "Summary" && f.Fid.HasValue).ToList();
-        if ((referenceFields.Count == 0 && lookupFields.Count == 0 && summaryFields.Count == 0) || rows.Count == 0)
+        // Ready formulas are seeded from c_ too (FormulaProjector keeps a value the seed already holds instead of working it out).
+        var formulaFields = _materialized is null ? []
+            : fields.Where(f => f.Fid.HasValue && FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings)).ToList();
+        if ((referenceFields.Count == 0 && lookupFields.Count == 0 && summaryFields.Count == 0 && formulaFields.Count == 0) || rows.Count == 0)
             return rows.Select(_ => EmptyMap).ToList();
 
         var maps = new Dictionary<long, object?>[rows.Count];
         for (var i = 0; i < rows.Count; i++) maps[i] = new Dictionary<long, object?>();
 
-        // A Ready stored Lookup / Summary is shown from its c_ column (one query for the whole page) instead of being worked out again:
-        // a summary otherwise reads its child rows on every read. Those fields are then left out of the dynamic work below.
-        var stored = await FillStoredValuesAsync(table, lookupFields.Concat(summaryFields).ToList(), rows, maps, ct);
+        // A Ready stored Lookup / Summary / Formula is shown from its c_ column (one query for the whole page) instead of being worked out
+        // again: a summary otherwise reads its child rows on every read. Those fields are then left out of the dynamic work below.
+        var stored = await FillStoredValuesAsync(table, lookupFields.Concat(summaryFields).Concat(formulaFields).ToList(), rows, maps, ct);
         if (stored.Count > 0)
         {
             lookupFields = lookupFields.Where(f => !stored.Contains(f.Fid!.Value)).ToList();
@@ -109,7 +112,7 @@ public sealed class RelationalProjector : IRelationalProjector
         IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, Dictionary<long, object?>[] maps, CancellationToken ct)
     {
         var none = new HashSet<int>();
-        if (_materialized is null || candidates.Count == 0) return none;
+        if (_materialized is null || candidates.Count == 0 || PowerBase.Application.Compute.StoredReadExclusion.IsEverything) return none;
         var ready = await _materialized.ReadyFieldIdsAsync(ct);
         // The field the compute worker is working out right now is never read from its own (old) column.
         var computing = PowerBase.Application.Compute.StoredReadExclusion.FieldId;

@@ -202,6 +202,8 @@ public sealed class FormulaProjector : IFormulaProjector
 
             foreach (var (fid, formula) in sorted)
             {
+                // A formula the seed already holds is its stored value (c_, seeded by RelationalProjector): kept, not worked out again.
+                if (seed != null && i < seed.Count && seed[i].ContainsKey(fid)) continue;
                 object? value = null;
                 if (formula is not null)
                 {

@@ -163,6 +163,13 @@ public static class MaterializedReadFields
 
     private static string? NonEmpty(string? s) => string.IsNullOrWhiteSpace(s) ? null : s;
 
+    /// <summary>
+    /// True when a Ready field's stored column holds exactly the value shown, never cut: everything but text kept as the 400-character sort
+    /// key. A report showing such a formula reads it from c_ and does not work out what the formula reads.
+    /// </summary>
+    public static bool StoresExactValue(AppField field) =>
+        MaterializeRules.ProjectedSqlType(field) is { } sqlType && sqlType != "NVARCHAR(400)";
+
     /// <summary>Fields whose stored text is kept whole (NVARCHAR(MAX), shown, never indexed): Combined Text summaries and rich-text formulas.
     /// Every other stored text is a 400-character sort key, which may be cut.</summary>
     public static bool IsFullTextStored(AppField field) =>
@@ -177,8 +184,28 @@ public static class MaterializedReadFields
 public static class StoredReadExclusion
 {
     private static readonly System.Threading.AsyncLocal<long?> Current = new();
+    private static readonly System.Threading.AsyncLocal<bool> AllFields = new();
 
     public static long? FieldId => Current.Value;
+
+    /// <summary>True inside <see cref="Everything"/>: no stored value is read, every field is worked out from the data as it is now.</summary>
+    public static bool IsEverything => AllFields.Value;
+
+    /// <summary>
+    /// For code that must see values exactly as they are at this moment, not a stored copy that may lag a few seconds behind a save:
+    /// snapshots taken in a save, a field type conversion copying values, an import reading a table, a modify-permission check.
+    /// </summary>
+    public static System.IDisposable Everything()
+    {
+        var previous = AllFields.Value;
+        AllFields.Value = true;
+        return new RestoreAll(previous);
+    }
+
+    private sealed class RestoreAll(bool previous) : System.IDisposable
+    {
+        public void Dispose() => AllFields.Value = previous;
+    }
 
     public static System.IDisposable Exclude(long fieldId)
     {

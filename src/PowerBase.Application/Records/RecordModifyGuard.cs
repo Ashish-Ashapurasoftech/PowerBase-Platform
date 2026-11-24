@@ -100,6 +100,7 @@ public class RecordModifyGuard
         if (split.Formula is null) return true;
 
         var row = await _recordRepo.GetByPublicIdAsync(table, fields, id, ct: ct);
+        using var _ = PowerBase.Application.Compute.StoredReadExclusion.Everything();   // a permission decision reads the values now, not a stored copy
         var relational = await _relationalProjector.ProjectAsync(table, fields, [row], ct);
         var computed = _formulaProjector.Project(fields, [row], relational, table);
         return FormulaFilterSorter.ApplyFormulaFilters([(row, computed[0])], split.Formula, fields).Count > 0;

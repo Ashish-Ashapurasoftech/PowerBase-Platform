@@ -238,6 +238,38 @@ public class RelationalProjectorTests
     }
 
     [Fact]
+    public async Task A_ready_formula_is_seeded_from_its_stored_column()
+    {
+        var state = Stored(new Dictionary<long, IReadOnlyDictionary<int, object?>> { [1L] = new Dictionary<int, object?> { [40] = 12.5m } }, readyFieldIds: 40);
+        var projector = new RelationalProjector(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _appRepo, _userRepo, _formulaProjector, _queryContext, state);
+
+        var result = await projector.ProjectAsync(new AppTable { Id = 5 },
+            new List<AppField> { Field(40, "Remaining", "Formula_Number", "{\"Expression\":\"1 + 1\"}") },
+            Rows(new Dictionary<string, object?> { ["Id"] = 1L }));
+
+        result[0][40].Should().Be(12.5m);
+    }
+
+    [Fact]
+    public async Task Code_that_needs_the_values_now_never_reads_a_stored_copy()
+    {
+        _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77 });
+        _fieldRepo.ListByTableAsync(77, Arg.Any<CancellationToken>()).Returns(PlainChildFields);
+        CountReturns(new Dictionary<object, object?> { [1L] = 3 });
+        var state = Stored(new Dictionary<long, IReadOnlyDictionary<int, object?>> { [1L] = new Dictionary<int, object?> { [20] = 99 } }, readyFieldIds: 20);
+        var projector = new RelationalProjector(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _appRepo, _userRepo, _formulaProjector, _queryContext, state);
+
+        using (PowerBase.Application.Compute.StoredReadExclusion.Everything())
+        {
+            var result = await projector.ProjectAsync(new AppTable { Id = 5 },
+                new List<AppField> { Field(20, "S", "Summary", "{\"childTableId\":77,\"referenceFid\":10,\"function\":\"Count\"}") },
+                Rows(new Dictionary<string, object?> { ["Id"] = 1L }));
+            result[0][20].Should().Be(3, "worked out from the data, not the stored 99");
+        }
+        PowerBase.Application.Compute.StoredReadExclusion.IsEverything.Should().BeFalse("the scope ends with its block");
+    }
+
+    [Fact]
     public async Task Stored_text_that_may_be_cut_is_worked_out_instead()
     {
         // Text is stored as a 400-character sort key: a 400-character value may be longer in truth, so the lookup is read as before.

@@ -51,6 +51,24 @@ public class FormulaProjectorTests
     }
 
     [Fact]
+    public void A_formula_the_seed_already_holds_keeps_that_stored_value_and_what_reads_it_uses_it()
+    {
+        var fields = new List<AppField>
+        {
+            Field(1, "Qty", "Number"),
+            Field(2, "Total", "Formula", "{\"resultType\":\"Number\",\"expression\":\"[Qty] * 2\"}"),
+            Field(3, "Plus one", "Formula", "{\"resultType\":\"Number\",\"expression\":\"[Total] + 1\"}"),
+        };
+        var rows = Rows(new Dictionary<string, object?> { [PhysicalNaming.ColumnName(1)] = 10m });
+        var seed = new List<IReadOnlyDictionary<long, object?>> { new Dictionary<long, object?> { [2] = 50m } };   // Total's stored value
+
+        var result = NewProjector().Project(fields, rows, seed);
+
+        result[0][2].Should().Be(50m, "the stored value is kept, not worked out again");
+        result[0][3].Should().Be(51m, "a formula reading it sees the stored value");
+    }
+
+    [Fact]
     public void Text_formula_concatenates_fields()
     {
         var fields = new List<AppField>

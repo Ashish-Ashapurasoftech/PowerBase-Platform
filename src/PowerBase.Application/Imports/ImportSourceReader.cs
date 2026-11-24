@@ -36,6 +36,7 @@ public sealed class ImportSourceReader(IRecordRepository records, IRelationalPro
 
         if (plan.NeedsProjection)
         {
+            using var _ = PowerBase.Application.Compute.StoredReadExclusion.Everything();   // imported values are the values now, not a stored copy
             var related = await relational.ProjectAsync(plan.Source, plan.SourceFields, rows, ct);
             var computed = formulas.Project(plan.SourceFields, rows, related, plan.Source);
             var merged = new List<IReadOnlyDictionary<string, object?>>(rows.Count);

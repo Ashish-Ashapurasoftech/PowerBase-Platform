@@ -104,6 +104,7 @@ public sealed class SnapshotCaptureService : ISnapshotCaptureService
         var readsComputed = snapshots.Any(s =>
             fields.FirstOrDefault(f => f.Fid == s.SnapshotSourceFid) is { } src && PhysicalNaming.IsComputedTypeCode(src.TypeCode));
         if (!readsComputed) return null;
+        using var _ = PowerBase.Application.Compute.StoredReadExclusion.Everything();   // a snapshot is the value at this save, not a stored copy that may lag
         var seed = await _relational.ProjectAsync(table, fields, rows, ct);
         return _formulas is null ? seed : _formulas.Project(fields, rows, seed, table);
     }
