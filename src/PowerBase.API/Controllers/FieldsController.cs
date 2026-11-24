@@ -184,7 +184,7 @@ public class FieldsController : ControllerBase
             request.IsFilterable, request.IsReportable, request.IsAuditable,
             request.IsUnique, request.IsEncrypted, request.IsAutoFill, request.Settings, request.CommitMessage,
             request.SnapshotSourceFid, request.SnapshotEditable, IsSharedValues: request.IsSharedValues,
-            InitializeSnapshotForExisting: request.InitializeSnapshotForExisting), ct);
+            InitializeSnapshotForExisting: request.InitializeSnapshotForExisting, HelpText: request.HelpText), ct);
         return NoContent();
     }
 

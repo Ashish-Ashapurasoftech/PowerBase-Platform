@@ -237,6 +237,17 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
     /// added or deleted, and nothing reads RecordCount from a table fetched by id (the table detail and lists read it from their own queries).</summary>
     private void TablesChanging() => _cache.Invalidate(QueryContext.TenantId, TablesCacheGroup);
 
+    public async Task<Guid?> FindPublicIdByQbTableIdAsync(string qbTableId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition(
+            """
+            SELECT TOP 1 t.PublicId FROM meta.AppTable t JOIN meta.App a ON a.Id = t.AppId
+            WHERE t.QBTableID = @qbTableId AND t.IsDeleted = 0 AND a.IsDeleted = 0
+            ORDER BY t.Id DESC
+            """, new { qbTableId }, cancellationToken: ct));
+    }
+
     public async Task<AppTable> GetByIdAsync(long id, CancellationToken ct = default)
     {
         // A table that does not exist throws and is never cached. Each caller gets its own copy.

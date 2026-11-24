@@ -6,6 +6,8 @@ namespace PowerBase.Application.Common.Interfaces;
 public interface IAppTableRepository
 {
     Task<AppTable> GetByIdAsync(long id, CancellationToken ct = default);
+    /// <summary>PublicId of the (not deleted, in a not deleted app) table whose meta.AppTable.QBTableID equals the given Quickbase table id; newest wins. Null when none.</summary>
+    Task<Guid?> FindPublicIdByQbTableIdAsync(string qbTableId, CancellationToken ct = default);
     Task<AppTable> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<long> GetAppIdByPublicIdAsync(Guid tablePublicId, CancellationToken ct = default);
     Task<IReadOnlyList<AppTable>> ListByAppAsync(long appId, CancellationToken ct = default);

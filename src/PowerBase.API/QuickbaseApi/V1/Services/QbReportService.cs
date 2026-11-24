@@ -97,7 +97,8 @@ public sealed class QbReportService
                 SortBy = type != "table" ? null : SortBy(report.ReportType, def),
                 GroupBy = type == "chart" ? null : GroupBy(report.ReportType, def),
             },
-            Properties = Properties(type, def),
+            Properties = Properties(type, def, type == "table" ? SortBy(report.ReportType, def) : null),
+            ReportCaching = new Dictionary<string, object?> { ["behavior"] = "table" },
             UsedLast = null,
             UsedCount = null,
         };
@@ -142,12 +143,28 @@ public sealed class QbReportService
         var m => Kebab(m),
     };
 
-    private static IDictionary<string, object?> Properties(string type, ReportDefinition def)
+    /// <summary>A report whose first sort is Date Modified newest first is Quickbase's "only new or changed records" report
+    /// (its List Changes); API_DoQuery treats it the same way (QbXmlQueryActions.Qyopts).</summary>
+    public static bool OnlyNewOrChanged(IReadOnlyList<QbSortBy>? sort) =>
+        sort is { Count: > 0 } && sort[0].FieldId == QbIds.DATE_MODIFIED_FID && sort[0].Order == "DESC";
+
+    /// <summary>The first sort of a stored report definition (getAppTables default sort), or null.</summary>
+    public static QbSortBy? FirstSort(Report report)
+    {
+        try
+        {
+            var def = System.Text.Json.JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
+            return SortBy(report.ReportType, def).FirstOrDefault();
+        }
+        catch (System.Text.Json.JsonException) { return null; }
+    }
+
+    private static IDictionary<string, object?> Properties(string type, ReportDefinition def, IReadOnlyList<QbSortBy>? sort = null)
     {
         if (type == "table")
             return new Dictionary<string, object?>
             {
-                ["displayOnlyNewOrChangedRecords"] = false,
+                ["displayOnlyNewOrChangedRecords"] = OnlyNewOrChanged(sort),
                 ["showRowNumbers"] = true,
             };
         if (type == "summary")
