@@ -276,16 +276,18 @@ public sealed class FormulaProjector : IFormulaProjector
             var fid = pending.Pop();
             if (!result.Add(fid) || !formulaByFid.TryGetValue(fid, out var field)) continue;
             var exprAndType = FormulaTypeMap.ExpressionAndType(field.TypeCode, field.Settings);
+            // Project() gives a formula with no expression, or that does not compile, the value null without reading anything:
+            // it needs no other field, so the report need not read or project anything for it.
             if (exprAndType is not { } et)
             {
-                _logger?.LogWarning("[FormulaDependencies] formula {Fid} has no readable expression: its reads cannot be listed", fid);
-                return null;
+                _logger?.LogWarning("[FormulaDependencies] formula {Fid} has no readable expression: it reads nothing", fid);
+                continue;
             }
             var compiled = _engine.Compile(et.Expression, schema, et.Type);
             if (compiled.HasErrors)
             {
-                _logger?.LogWarning("[FormulaDependencies] formula {Fid} does not compile: its reads cannot be listed", fid);
-                return null;
+                _logger?.LogWarning("[FormulaDependencies] formula {Fid} does not compile: it evaluates to null and reads nothing", fid);
+                continue;
             }
             // A field chosen per record can't be listed up front — the same "unknown, project everything" answer.
             if (compiled.UsesDynamicFieldReference)

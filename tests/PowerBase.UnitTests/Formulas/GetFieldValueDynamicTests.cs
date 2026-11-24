@@ -340,4 +340,22 @@ public class GetFieldValueDynamicTests
         projector.GetFormulaDependencies(fields, [30]).Should().BeNull();
         projector.GetFormulaDependencies(fields, [31]).Should().BeEquivalentTo(new long[] { 31, 14 });
     }
+
+    [Fact]
+    public void A_formula_that_does_not_compile_reads_nothing_so_the_others_can_still_be_listed()
+    {
+        // Project() gives such a formula the value null without reading a field, so it must not make the whole report
+        // "unknown, read and project everything": a migrated table can hold a few formulas the engine does not support.
+        var fields = new List<AppField>
+        {
+            Field(14, "Quantity", "Number"),
+            Formula(40, "Broken", "NoSuchFunction([Quantity]) +"),
+            Formula(41, "Uses broken", "[Broken] + [Quantity]"),
+        };
+
+        var projector = NewProjector();
+
+        projector.GetFormulaDependencies(fields, [40]).Should().BeEquivalentTo(new long[] { 40 });
+        projector.GetFormulaDependencies(fields, [41]).Should().NotBeNull().And.Contain(40L).And.Contain(14L);
+    }
 }
