@@ -41,7 +41,8 @@ public static class ComputeConfig
         o.BackfillPollSeconds = Int(s["BackfillPollSeconds"], o.BackfillPollSeconds);
         o.ReconcileHourUtc = Int(s["ReconcileHourUtc"], o.ReconcileHourUtc);
         o.StoreAllCalculatedFields = Bool(s["StoreAllCalculatedFields"], o.StoreAllCalculatedFields);
-        o.IndexesEnabled = Bool(s["IndexesEnabled"], o.IndexesEnabled);
+        o.MinRecordsForStoredColumns = Math.Max(0, SignedInt(s["MinRecordsForStoredColumns"], o.MinRecordsForStoredColumns));
+        o.IndexesEnabled =Bool(s["IndexesEnabled"], o.IndexesEnabled);
         o.IndexSyncMinutes = Math.Max(1, Int(s["IndexSyncMinutes"], o.IndexSyncMinutes));
         return o;
     }

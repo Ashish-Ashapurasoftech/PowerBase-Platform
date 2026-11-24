@@ -44,7 +44,7 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
     private ComputeSchemaRepository Repo => new(ConnectionFactory, QueryContext);
 
     private const string UndecidedSql = """
-        SELECT af.Id, ft.Code AS TypeCode
+        SELECT af.Id, af.AppTableId AS TableId, ft.Code AS TypeCode
         FROM meta.AppField af
         JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
         JOIN meta.AppTable t ON t.Id = af.AppTableId AND t.IsDeleted = 0
@@ -56,12 +56,18 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
     /// Decision Q3: every Lookup / Summary / Formula field is stored. Switches on each one not decided yet (MaterializeMode 0, which new
     /// fields start with); the build then applies the rules and marks the ones that cannot be stored Not allowed. Excluded fields (an
     /// admin's choice) and Not allowed ones are left alone here. Returns how many were switched on.
+    /// <paramref name="minRecords"/> (Compute:MinRecordsForStoredColumns): only fields of a table holding at least that many records are
+    /// switched on — a small table is cheap to calculate on the fly, so it gets no stored column until it grows. 0 = every table.
+    /// A field already switched on stays on when its table later shrinks.
     /// </summary>
-    public async Task<int> SwitchOnUndecidedAsync(CancellationToken ct)
+    public async Task<int> SwitchOnUndecidedAsync(CancellationToken ct, long minRecords = 0)
     {
         await using var conn = await OpenConnectionAsync(ct);
-        var ids = (await conn.QueryAsync<(long Id, string TypeCode)>(new CommandDefinition(UndecidedSql, cancellationToken: ct)))
-            .Where(f => PhysicalNaming.IsMaterializableTypeCode(f.TypeCode)).Select(f => f.Id).ToList();
+        var fields = (await conn.QueryAsync<(long Id, long TableId, string TypeCode)>(new CommandDefinition(UndecidedSql, cancellationToken: ct)))
+            .Where(f => PhysicalNaming.IsMaterializableTypeCode(f.TypeCode)).ToList();
+        if (fields.Count == 0) return 0;
+        var big = await TablesWithAtLeastAsync(conn, fields.Select(f => f.TableId), minRecords, ct);
+        var ids = fields.Where(f => big.Contains(f.TableId)).Select(f => f.Id).ToList();
         if (ids.Count == 0) return 0;
         var changed = 0;
         foreach (var chunk in ids.Chunk(1000))
@@ -73,17 +79,43 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
     }
 
     /// <summary>
+    /// The tables (of <paramref name="tableIds"/>) that hold at least <paramref name="minRecords"/> records. The count is the clustered
+    /// index / heap row_count from sys.dm_db_partition_stats: instant, no scan, and approximate (soft-deleted rows are still counted),
+    /// which is enough for a threshold. 0 or less = every table.
+    /// </summary>
+    private static async Task<HashSet<long>> TablesWithAtLeastAsync(Microsoft.Data.SqlClient.SqlConnection conn, IEnumerable<long> tableIds,
+        long minRecords, CancellationToken ct)
+    {
+        var all = tableIds.Distinct().ToList();
+        if (minRecords <= 0 || all.Count == 0) return all.ToHashSet();
+        var names = all.Select(PhysicalNaming.TableName).ToList();
+        var counts = await conn.QueryAsync<(string Name, long Rows)>(new CommandDefinition("""
+            SELECT o.name AS Name, SUM(st.row_count) AS Rows
+            FROM sys.dm_db_partition_stats st
+            JOIN sys.objects o ON o.object_id = st.object_id
+            JOIN sys.schemas s ON s.schema_id = o.schema_id AND s.name = 'data'
+            WHERE st.index_id IN (0, 1) AND o.name IN @names
+            GROUP BY o.name
+            """, new { names }, cancellationToken: ct));
+        var big = counts.Where(c => c.Rows >= minRecords).Select(c => c.Name).ToHashSet();
+        return all.Where(id => big.Contains(PhysicalNaming.TableName(id))).ToHashSet();
+    }
+
+    /// <summary>
     /// Nightly (decision Q3): a field the rules refused earlier gets another look — its inputs may have changed (encryption removed, a
     /// Today() taken out of a formula it reads). The ones the rules allow now are switched on and built.
     /// </summary>
-    public async Task<int> RecheckNotAllowedAsync(CancellationToken ct)
+    public async Task<int> RecheckNotAllowedAsync(CancellationToken ct, long minRecords = 0)
     {
         var model = await _models.GetAsync(QueryContext.TenantId, Repo, fresh: true, ct);
-        var ids = model.Decisions.Values
+        var allowed = model.Decisions.Values
             .Where(d => d.Field.MaterializeMode == MaterializeModes.NotAllowed && d.Decision.Outcome == MaterializeOutcome.Allowed)
-            .Select(d => d.Field.Id).ToList();
-        if (ids.Count == 0) return 0;
+            .Select(d => d.Field).ToList();
+        if (allowed.Count == 0) return 0;
         await using var conn = await OpenConnectionAsync(ct);
+        var big = await TablesWithAtLeastAsync(conn, allowed.Select(f => f.AppTableId), minRecords, ct);
+        var ids = allowed.Where(f => big.Contains(f.AppTableId)).Select(f => f.Id).ToList();
+        if (ids.Count == 0) return 0;
         var changed = await conn.ExecuteAsync(new CommandDefinition(
             "UPDATE meta.AppField SET MaterializeMode = 1, MaterializeState = 0 WHERE Id IN @ids AND MaterializeMode = 2 AND IsDeleted = 0",
             new { ids }, cancellationToken: ct));

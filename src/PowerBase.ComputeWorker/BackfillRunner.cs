@@ -48,7 +48,7 @@ public sealed class BackfillRunner : BackgroundService
                             scope.ServiceProvider.GetRequiredService<IQueryContext>().SetTenantId(tenantId);
                             var builder = scope.ServiceProvider.GetRequiredService<MaterializeBuilder>();
                             // Decision Q3: every calculated field not decided yet (new fields too) is switched on, then built below.
-                            if (options.StoreAllCalculatedFields && await builder.SwitchOnUndecidedAsync(stoppingToken) is > 0 and var switchedOn)
+                            if (options.StoreAllCalculatedFields && await builder.SwitchOnUndecidedAsync(stoppingToken, options.MinRecordsForStoredColumns) is > 0 and var switchedOn)
                                 _logger.LogInformation("Compute: tenant {TenantId}: {Count} calculated field(s) switched on (store every Lookup/Summary/Formula).", tenantId, switchedOn);
                             var outcomes = await builder.BuildPendingAsync(options, stoppingToken);
                             foreach (var o in outcomes.Where(o => o.Outcome is not ("later" or "elsewhere")))

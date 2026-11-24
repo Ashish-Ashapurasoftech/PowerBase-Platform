@@ -38,6 +38,16 @@ public class StoredColumnStatusTests
     }
 
     [Fact]
+    public void Min_records_threshold_defaults_to_the_in_memory_limit_and_is_read_from_config()
+    {
+        ComputeConfig.ReadCompute(new ConfigurationBuilder().Build()).MinRecordsForStoredColumns.Should().Be(50_000);
+        ComputeConfig.ReadCompute(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            { ["Compute:MinRecordsForStoredColumns"] = "0" }).Build()).MinRecordsForStoredColumns.Should().Be(0);
+        ComputeConfig.ReadCompute(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            { ["Compute:MinRecordsForStoredColumns"] = "-5" }).Build()).MinRecordsForStoredColumns.Should().Be(0, "negative means every table");
+    }
+
+    [Fact]
     public void Excluded_is_a_new_value_that_no_read_treats_as_switched_on()
     {
         MaterializeModes.Excluded.Should().NotBe(MaterializeModes.On);

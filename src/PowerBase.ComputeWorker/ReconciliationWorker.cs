@@ -48,7 +48,7 @@ public sealed class ReconciliationWorker : BackgroundService
                             var builder = scope.ServiceProvider.GetRequiredService<MaterializeBuilder>();
                             var outcomes = await builder.ReconcileAsync(options, stoppingToken);
                             // Decision Q3: fields refused earlier get another look once a day (their inputs may allow them now).
-                            if (options.StoreAllCalculatedFields && await builder.RecheckNotAllowedAsync(stoppingToken) is > 0 and var rechecked)
+                            if (options.StoreAllCalculatedFields && await builder.RecheckNotAllowedAsync(stoppingToken, options.MinRecordsForStoredColumns) is > 0 and var rechecked)
                                 _logger.LogInformation("Compute: tenant {TenantId}: {Count} field(s) the rules refused before can be stored now; switched on.", tenantId, rechecked);
                             fields += outcomes.Count(o => o.Outcome == "checked");
                             differences += outcomes.Sum(o => o.Differences);
