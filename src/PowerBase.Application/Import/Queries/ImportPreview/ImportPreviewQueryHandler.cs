@@ -3,6 +3,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Import.Commands.ImportAppFromPbl;
 using PowerBase.Application.Import.Pbl;
 using PowerBase.Application.Import.Qbl;
+using PowerBase.Application.Import.Quickbase;
 using PowerBase.Application.Import.Reporting;
 using YamlDotNet.Core;
 
@@ -14,11 +15,14 @@ public class ImportPreviewQueryHandler
     private readonly IAppRepository _appRepo;
 
     private readonly PowerBase.Application.Import.Services.PipelineOnlyImportService? _pipelineOnly;
+    private readonly QuickbaseIdResolver? _qbResolver;
 
     public ImportPreviewQueryHandler(PblValidator validator, IAppRepository appRepo,
-        PowerBase.Application.Import.Services.PipelineOnlyImportService? pipelineOnly = null)
+        PowerBase.Application.Import.Services.PipelineOnlyImportService? pipelineOnly = null,
+        QuickbaseIdResolver? qbResolver = null)
     {
         _pipelineOnly = pipelineOnly;
+        _qbResolver = qbResolver;
         _validator = validator;
         _appRepo = appRepo;
     }
@@ -63,6 +67,12 @@ public class ImportPreviewQueryHandler
         foreach (var group in apps.Where(a => a.IsValid).GroupBy(a => a.AppName.Trim(), StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
             foreach (var dup in group.Skip(1))
                 dup.Warnings.Add(new PblIssueDto { Code = "APP_NAME_DUPLICATED_IN_FILE", Message = $"Another application in this file is also named '{dup.AppName}'. Rename one of them to import both.", ElementRef = dup.AppRef });
+
+        // Quickbase ids (app id from the catalog, table ids from Quickbase's API) — one app after another: the apps of one file
+        // usually share a user token, and parallel calls on one token can hit Quickbase's rate limit.
+        if (_qbResolver is not null)
+            for (var i = 0; i < apps.Count; i++)
+                await ResolveQuickbaseIdsAsync(apps[i], parsed[i], ct);
 
         // Built last, once every per-app warning (including the cross-app duplicate-name one above) is final.
         for (var i = 0; i < apps.Count; i++)
@@ -153,6 +163,16 @@ public class ImportPreviewQueryHandler
             Pipelines = mode == ImportMode.CreateNewApp ? (parsed.Pipelines ?? []).Select(ToPipelineItem).ToList() : [],
         };
     }
+
+    private async Task ResolveQuickbaseIdsAsync(ImportPreviewAppItem item, ParsedApp parsed, CancellationToken ct)
+    {
+        var logicalId = string.IsNullOrWhiteSpace(parsed.Document.App?.LogicalRef) ? parsed.AppRef : parsed.Document.App!.LogicalRef;
+        item.Quickbase = await _qbResolver!.ResolveAsync(logicalId, QuickbaseFileTables(parsed.Document), ct: ct);
+    }
+
+    /// <summary>The file's tables as the Quickbase id resolver needs them.</summary>
+    public static List<QuickbaseFileTable> QuickbaseFileTables(PblDocument document) =>
+        (document.Tables ?? []).Select(t => new QuickbaseFileTable(t.LogicalRef, t.Name, t.AliasHint)).ToList();
 
     private static ImportPreviewPipelineItem ToPipelineItem(PblPipeline pipeline) => new()
     {
