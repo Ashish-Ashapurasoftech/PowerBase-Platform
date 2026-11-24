@@ -712,7 +712,11 @@ public sealed class RelationalProjector : IRelationalProjector
         Func<string, FilterGroup?>? filterFor = null;
         if (HasParentFieldCondition(filter) && parentFields is not null)
         {
-            var parentRows = await _recordRepo.GetRowsByIdsAsync(parentTable, parentFields, RowIds(parentKeyValues), ct);
+            // Only the parent fields the criteria compare to: every parent of the page is read and decrypted for this summary, and the
+            // table can hold hundreds of fields (Clients: 378, for each of 15,000 parents, once per summary).
+            var comparedParentFids = SummaryEncryptionGuard.ParentConditionFieldIds(filter).ToHashSet();
+            var comparedParentFields = parentFields.Where(f => f.Fid is int pf && comparedParentFids.Contains(pf)).ToList();
+            var parentRows = await _recordRepo.GetRowsByIdsAsync(parentTable, comparedParentFields, RowIds(parentKeyValues), ct);
             var parentById = new Dictionary<string, IReadOnlyDictionary<string, object?>>();
             foreach (var r in parentRows.Values)
                 if (r.TryGetValue("Id", out var pid) && EncryptedSummaryAggregator.NormalizeKey(pid) is { } pk) parentById[pk] = r;
