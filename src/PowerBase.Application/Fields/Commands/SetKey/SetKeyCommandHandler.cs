@@ -140,6 +140,6 @@ public class SetKeyCommandHandler
             auditMessage += $" ({updatedRelationshipCount} relationship{(updatedRelationshipCount == 1 ? "" : "s")} updated)";
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, table.PublicId.ToString(),
-            auditMessage, appId: table.AppId, ct: ct);
+            auditMessage, appId: table.AppId, ct: ct, tableId: table.Id);
     }
 }

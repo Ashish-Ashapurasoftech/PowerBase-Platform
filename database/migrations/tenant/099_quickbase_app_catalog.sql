@@ -103,7 +103,7 @@ FROM (VALUES
     (N'buz8jtfpw', N'$App_Strive_HR_Onboarding_Process', N'Solution 11 - Other', N'Fourth 20'),
     (N'bunsvz4sn', N'$App_Staffing_Test_Management', N'Solution 11 - Other', N'Third 20'),
     (N'buixjcgtc', N'$App_Copy_of_TrinityCalendar_App', N'Solution 11 - Other', N'Third 20'),
-    (N'buxeczfs2', N'$App_Calendar_Demo', N'Solution 11 - Other', N'Third 20'),
+    (N'buxeczfs2', N'$App_Calendar_Demo', N'Solution 11 - Other', N'Fourth 20'),
     (N'btnjnvb5j', N'$App_Clinical_Appointments', N'Solution 11 - Other', N'Second 20'),
     (N'btjs54sfz', N'$App_Location_Asset_Delivery', N'Solution 11 - Other', N'Second 20'),
     (N'bv9wjhcgq', N'$App_Construction_Process', N'Solution 11 - Other', N'Fifth 19'),

@@ -113,11 +113,11 @@ public class DeleteFieldCommandHandler
                 foreach (var pipeline in pipelinesToDeactivate)
                 {
                     await _auditRepo.LogActivityAsync(
-                        AuditActions.SchemaChanged, AuditEntityTypes.AppField, pipeline.PublicId.ToString(), $"PowerFlow '{pipeline.Name}' automatically deactivated due to deletion of referenced field: {field.Name}", appId: table.AppId, ct: ct);
+                        AuditActions.SchemaChanged, AuditEntityTypes.AppField, pipeline.PublicId.ToString(), $"PowerFlow '{pipeline.Name}' automatically deactivated due to deletion of referenced field: {field.Name}", appId: table.AppId, ct: ct, tableId: table.Id);
                 }
 
                 await _auditRepo.LogActivityAsync(
-                    AuditActions.SchemaChanged, AuditEntityTypes.AppField, field.PublicId.ToString(), $"Field deleted: {field.Name} From TableName : {table.Name}", appId: table.AppId, ct: ct);
+                    AuditActions.SchemaChanged, AuditEntityTypes.AppField, field.PublicId.ToString(), $"Field deleted: {field.Name} From TableName : {table.Name}", appId: table.AppId, ct: ct, tableId: table.Id);
                 await _refIndexer.RemoveSourceAsync(FieldReferenceSourceTypes.Field, field.PublicId, ct);
                 await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct, _fieldJobs);
 
@@ -145,7 +145,7 @@ public class DeleteFieldCommandHandler
         await ReferenceProxyRules.ReassignIfRemovedAsync(table.Id, [field.Id], _relRepo, _fieldRepo, ct);
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.SchemaChanged, AuditEntityTypes.AppField, field.PublicId.ToString(), $"Field deleted: {field.Name} From TableName : {table.Name}", appId: table.AppId, ct: ct);
+            AuditActions.SchemaChanged, AuditEntityTypes.AppField, field.PublicId.ToString(), $"Field deleted: {field.Name} From TableName : {table.Name}", appId: table.AppId, ct: ct, tableId: table.Id);
         await _refIndexer.RemoveSourceAsync(FieldReferenceSourceTypes.Field, field.PublicId, ct);
         await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct, _fieldJobs);
     }

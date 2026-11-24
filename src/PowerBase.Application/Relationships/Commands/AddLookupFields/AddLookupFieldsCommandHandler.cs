@@ -76,7 +76,7 @@ public class AddLookupFieldsCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, rel.Id.ToString(),
-            $"Lookup field(s) added to relationship {child.Name} → {parent.Name}", appId: child.AppId, ct: ct);
+            $"Lookup field(s) added to relationship {child.Name} → {parent.Name}", appId: child.AppId, ct: ct, tableId: child.Id);
 
         return await _queries.GetAsync(rel.PublicId, ct);
     }

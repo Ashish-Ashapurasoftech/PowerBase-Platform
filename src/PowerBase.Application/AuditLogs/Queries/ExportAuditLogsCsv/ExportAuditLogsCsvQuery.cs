@@ -7,4 +7,6 @@ public record ExportAuditLogsCsvQuery(
     string? Email,
     string? EntityType,
     string? EntityId,
-    string? Action);
+    string? Action,
+    Guid? TablePublicId = null,
+    long? RecordNumber = null);

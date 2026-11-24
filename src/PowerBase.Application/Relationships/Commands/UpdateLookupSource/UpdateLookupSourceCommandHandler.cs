@@ -147,7 +147,7 @@ public class UpdateLookupSourceCommandHandler
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, lookup.PublicId.ToString(),
             $"Lookup field '{Display(lookup)}' on {table.Name} now pulls {parent.Name}: {Display(source)}",
-            appId: table.AppId, ct: ct);
+            appId: table.AppId, ct: ct, tableId: table.Id);
     }
 
     private static ValidationException Invalid(string key, string message) =>

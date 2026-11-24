@@ -326,7 +326,7 @@ public class CreateRelationshipCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, relId.ToString(),
-            $"Relationship created: {child.Name} → {parent.Name}", appId: child.AppId, ct: ct);
+            $"Relationship created: {child.Name} → {parent.Name}", appId: child.AppId, ct: ct, tableId: child.Id);
 
         return new RelationshipDto
         {

@@ -36,7 +36,7 @@ public class DuplicateFormCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Created, AuditEntityTypes.Form, created.Id.ToString(),
-            ct: ct);
+            ct: ct, tableId: source.AppTableId);
         await _refIndexer.ReindexFormAsync(newPublicId, ct);
 
         return CreateFormCommandHandler.MapToDetail(created);

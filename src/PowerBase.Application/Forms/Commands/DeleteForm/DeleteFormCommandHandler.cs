@@ -39,7 +39,7 @@ public class DeleteFormCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Deleted, AuditEntityTypes.Form, form.Id.ToString(), $"Form deleted: {form.Name}",
-            ct: ct);
+            ct: ct, tableId: form.AppTableId);
         await _refIndexer.RemoveFormAsync(command.FormPublicId, ct);
     }
 }
