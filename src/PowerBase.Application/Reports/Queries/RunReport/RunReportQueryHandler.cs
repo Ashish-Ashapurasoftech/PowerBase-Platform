@@ -892,6 +892,14 @@ public class RunReportQueryHandler
                 ? MaterializedReadFields.Substitute(FieldsToRead(allFields, everyRowUsed), _readyFieldIds)
                 : readFields;
 
+            // Step timings of this path, in the log: where a slow report spends its time and memory (one line per step).
+            var stepClock = System.Diagnostics.Stopwatch.StartNew();
+            void Step(string step, int? rows = null) =>
+                _logger.LogWarning("[ReportMemoryPath] table {TableId} {Step}: rows={Rows} {Ms} ms, managed {Mb} MB, narrow={Narrow}, usedKnown={UsedKnown}, everyRowUsedKnown={EveryRowKnown}, shown={Shown}, readFields={ReadFields}",
+                    table.Id, step, rows, stepClock.ElapsedMilliseconds, GC.GetTotalMemory(false) / (1024 * 1024), narrowEveryRow,
+                    usedFields is not null, everyRowUsed is not null, selectedFields.Count, everyRowReadFields.Count);
+            Step("start");
+
             IReadOnlyList<IReadOnlyDictionary<string, object?>> allRows;
             // The in-memory report path reads up to 50,000 rows: a heavy read that may come from the read replica (when it is on).
             using (Common.ReadReplicaScope.Begin(Common.ReadReplicaLane.Interactive))
@@ -901,19 +909,24 @@ public class RunReportQueryHandler
             // The read stops at InMemoryReadLimit.Rows: past that the in-memory order and filter below only cover the
             // first that-many records, which the result says (InMemoryRowLimit) instead of passing them off as all.
             var readEveryMatch = allRows.Count < InMemoryReadLimit.Rows;
+            Step("read", allRows.Count);
 
             // Over every record read, only the References / Lookups / Summaries the filter, the sort and (when every match
             // was read) the totals use: one the page only shows is worked out below, for the page's rows alone.
             var everyRowFields = FieldsToProject(allFields, FieldsUsed(allFields, readEveryMatch ? totalCols : [], sortFields, filterTree));
             var allRelationalRaw = await _relationalProjector.ProjectAsync(table, everyRowFields, allRows, ct);
             var allRelational = Relationships.ReferenceOriginalFallback.Apply(allFields, allRows, allRelationalRaw);
+            Step("relational", allRows.Count);
             // Never every formula of the table: only those the report uses (a table can hold hundreds, some reading other tables per record).
-            var allComputed = _formulaProjector.Project(FieldsForFormulas(allFields, narrowEveryRow ? everyRowUsed : usedFields), allRows, allRelational, table);
+            var formulaFieldsEveryRow = FieldsForFormulas(allFields, narrowEveryRow ? everyRowUsed : usedFields);
+            var allComputed = _formulaProjector.Project(formulaFieldsEveryRow, allRows, allRelational, table);
+            Step($"formulas({formulaFieldsEveryRow.Count(f => FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings))} of {allFields.Count(f => FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings))})", allRows.Count);
             var pairs = allRows.Zip(allComputed, (r, c) => (Row: r, Computed: c)).ToList();
 
             // Apply formula-field conditions in memory.
             if (formulaConditions != null)
                 pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, formulaConditions, allFields);
+            Step("filtered", pairs.Count);
 
             // If any sort key is a formula field, re-sort all rows in memory (covers all sort keys).
             if (hasFormulaSorts)
@@ -950,6 +963,7 @@ public class RunReportQueryHandler
                 : await ProjectPageOnlyFieldsAsync(table, allFields, projectedFields, everyRowFields, allRows, allRelationalRaw, pagePairs, ct);
             var userNames = await ResolveUserNamesAsync(pagePairs.Select(p => p.Row), allFields, _userRepo, ct, pagePairs.Select(p => p.Computed));
             items = pagePairs.Select(p => RecordResult.FromRow(p.Row, selectedFields, userNames, p.Computed)).ToList();
+            Step("page", pagePairs.Count);
         }
         else
         {

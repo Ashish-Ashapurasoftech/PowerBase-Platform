@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using System.Globalization;
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
@@ -31,13 +32,16 @@ public sealed class FormulaProjector : IFormulaProjector
     private readonly FormulaUserDirectory? _users;
     private readonly IAppUserRepository? _appUserRepo;
     private readonly IAppRoleRepository? _appRoleRepo;
+    private readonly ILogger<FormulaProjector>? _logger;
 
     public FormulaProjector(
         FormulaEngine engine, IQueryContext queryContext, IFormulaRuntimeContext runtime,
         IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo,
         IAppRepository appRepo, IAppVariableRepository? variableRepo = null, IUserRepository? userRepo = null,
-        IAppUserRepository? appUserRepo = null, IAppRoleRepository? appRoleRepo = null)
+        IAppUserRepository? appUserRepo = null, IAppRoleRepository? appRoleRepo = null,
+        ILogger<FormulaProjector>? logger = null)
     {
+        _logger = logger;
         _appUserRepo = appUserRepo;
         _appRoleRepo = appRoleRepo;
         _variableRepo = variableRepo;
@@ -272,11 +276,23 @@ public sealed class FormulaProjector : IFormulaProjector
             var fid = pending.Pop();
             if (!result.Add(fid) || !formulaByFid.TryGetValue(fid, out var field)) continue;
             var exprAndType = FormulaTypeMap.ExpressionAndType(field.TypeCode, field.Settings);
-            if (exprAndType is not { } et) return null;
+            if (exprAndType is not { } et)
+            {
+                _logger?.LogWarning("[FormulaDependencies] formula {Fid} has no readable expression: its reads cannot be listed", fid);
+                return null;
+            }
             var compiled = _engine.Compile(et.Expression, schema, et.Type);
-            if (compiled.HasErrors) return null;
+            if (compiled.HasErrors)
+            {
+                _logger?.LogWarning("[FormulaDependencies] formula {Fid} does not compile: its reads cannot be listed", fid);
+                return null;
+            }
             // A field chosen per record can't be listed up front — the same "unknown, project everything" answer.
-            if (compiled.UsesDynamicFieldReference) return null;
+            if (compiled.UsesDynamicFieldReference)
+            {
+                _logger?.LogWarning("[FormulaDependencies] formula {Fid} picks a field per record: its reads cannot be listed", fid);
+                return null;
+            }
             foreach (var dep in compiled.ReferencedFieldIds) pending.Push(dep);
         }
         return result;
