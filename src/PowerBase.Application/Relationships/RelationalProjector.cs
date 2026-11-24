@@ -101,6 +101,9 @@ public sealed class RelationalProjector : IRelationalProjector
         var clock = System.Diagnostics.Stopwatch.StartNew();
         await ProjectReferencesAndLookupsAsync(table, referenceFields, lookupFields, rows, maps, ct);
         var referencesMs = clock.ElapsedMilliseconds;
+        if (rows.Count > 2000)
+            _logger?.LogWarning("[RelationalProjector] table {TableId}: {References} references + {Lookups} lookups of {Rows} rows done in {Ms} ms; now {Summaries} summaries",
+                table.Id, referenceFields.Count, lookupFields.Count, rows.Count, referencesMs, summaryFields.Count);
         await ProjectSummariesAsync(table, summaryFields, rows, maps, ct);
         if (clock.ElapsedMilliseconds > 2000)
             _logger?.LogWarning("[RelationalProjector] table {TableId}: rows={Rows}, {References} references + {Lookups} lookups took {ReferencesMs} ms, {Summaries} summaries took {SummariesMs} ms",
@@ -439,6 +442,9 @@ public sealed class RelationalProjector : IRelationalProjector
             }
             var inMemory = SummaryEncryptionGuard.ReadsEncrypted(app, childFields, refFid, s.TargetFid, sortFid, filter, tableFields)
                 || SummaryEncryptionGuard.ReadsComputed(childFields, sortFid, filter, lookupSources);
+            if (rows.Count > 2000)
+                _logger?.LogWarning("[RelationalProjector] summary {Fid} ({Function}, child table {ChildTable}) starts: inMemory={InMemory}, readsComputed={ReadsComputed}",
+                    field.Fid, function, childId, inMemory, SummaryEncryptionGuard.ReadsComputed(childFields, sortFid, filter, lookupSources));
 
             // Criteria comparing to a parent field that has since been deleted or turned into one
             // with no comparable value would silently drop that condition in SQL and match too many
