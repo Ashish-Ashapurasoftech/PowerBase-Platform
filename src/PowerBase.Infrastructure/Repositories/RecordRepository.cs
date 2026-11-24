@@ -329,6 +329,14 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return await ReadReplicaFallback.RunAsync(ConnectionFactory, intent, read, ct);
     }
 
+    /// <summary>First row offset from which <see cref="ListAsync"/> reads a page's Ids first (a page that deep walks tens of thousands of rows).</summary>
+    internal const int IdsFirstMinOffset = 10_000;
+    /// <summary>The second read lists the Ids as parameters; keep well under SQL Server's 2,100.</summary>
+    internal const int IdsFirstMaxPageSize = 1_000;
+
+    internal static bool UseIdsFirstPaging(int offset, int pageSize) =>
+        offset >= IdsFirstMinOffset && pageSize is > 0 and <= IdsFirstMaxPageSize;
+
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
         AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,
         FilterGroup? filterTree = null,
@@ -346,21 +354,54 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var filterWhere = BuildReportFilterWhere(filterTree, parameters, fieldLookup, sqlLookupFids) + BuildOwnerWhere(restrictToCreatedBy, parameters);
         var orderBy = BuildReportOrderBy(sortFields, fieldLookup, sqlLookupFids);
 
+        var fromAlias = ReportFromAlias(sqlLookupFids);
+        var tableName = PhysicalNaming.FullTableName(table.Id);
         var sql = $"""
             SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
-            FROM {PhysicalNaming.FullTableName(table.Id)}{ReportFromAlias(sqlLookupFids)}
+            FROM {tableName}{fromAlias}
             WHERE IsDeleted = 0{filterWhere}
             ORDER BY {orderBy}
             OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
             """;
 
+        // Deep pages (offset in the tens of thousands): SQL still walks every skipped row, and with the wide select list each one is a
+        // lookup into the table. Pick the page's Ids from the narrow sort / filter index first, then read the wide rows for just those Ids.
+        var idsFirst = UseIdsFirstPaging((page - 1) * pageSize, pageSize);
+        var idsSql = idsFirst
+            ? $"""
+                SELECT Id
+                FROM {tableName}{fromAlias}
+                WHERE IsDeleted = 0{filterWhere}
+                ORDER BY {orderBy}
+                OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
+                """
+            : null;
+        var rowsByIdsSql = idsFirst
+            ? $"""
+                SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
+                FROM {tableName}
+                WHERE IsDeleted = 0 AND Id IN @ids
+                """
+            : null;
+
+        async Task<IEnumerable<dynamic>> ReadPageAsync(SqlConnection c)
+        {
+            if (idsSql is null) return await c.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
+            var ids = (await c.QueryAsync<long>(new CommandDefinition(idsSql, parameters, cancellationToken: ct))).ToList();
+            if (ids.Count == 0) return [];
+            var wide = await c.QueryAsync(new CommandDefinition(rowsByIdsSql!, new { ids }, cancellationToken: ct));
+            var position = new Dictionary<long, int>(ids.Count);
+            for (var i = 0; i < ids.Count; i++) position[ids[i]] = i;
+            // The second read has no ORDER BY: put the rows back in the order the first one chose.
+            return wide.OrderBy(r => position[(long)((IDictionary<string, object?>)r)["Id"]!]).ToList();
+        }
+
         // The primary connection also serves the app's encryption metadata below; the rows themselves may come from the replica
         // when a ReadReplicaScope is open (exports, report totals).
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var listCommand = new CommandDefinition(sql, parameters, cancellationToken: ct);
         var rows = ReplicaIntentOfScope() is null
-            ? await connection.QueryAsync(listCommand)
-            : await ReadDataAsync<IEnumerable<dynamic>>(c => c.QueryAsync(listCommand), ct);
+            ? await ReadPageAsync(connection)
+            : await ReadDataAsync<IEnumerable<dynamic>>(ReadPageAsync, ct);
 
         // Use mutable Dictionary so DecryptRowsAsync can mutate values in-place
         var mutableRows = rows.Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
