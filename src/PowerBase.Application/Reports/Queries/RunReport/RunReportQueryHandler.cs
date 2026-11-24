@@ -1447,7 +1447,7 @@ public class RunReportQueryHandler
         return new FilterCondition
         {
             FieldId = cond.FieldId, Operator = cond.Operator, SubField = cond.SubField,
-            Value = resolved, ValueMode = "literal", ValueFieldId = null,
+            Value = resolved, ValueMode = "literal", ValueFieldId = null, ValueType = cond.ValueType,
         };
     }
 
@@ -1471,7 +1471,7 @@ public class RunReportQueryHandler
         FilterCondition Cond(string op, DateTime value) => new()
         {
             FieldId = cond.FieldId, SubField = cond.SubField,
-            Operator = op, Value = value.ToString(isoFormat), ValueMode = "literal",
+            Operator = op, Value = value.ToString(isoFormat), ValueMode = "literal", ValueType = cond.ValueType,
         };
 
         return isDuring

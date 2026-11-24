@@ -62,7 +62,10 @@ public sealed class ImportPlan
     public AppField? MergeKey { get; init; }
     /// <summary>Per-column rules by destination Fid. Only columns with at least one rule switched on are present.</summary>
     public IReadOnlyDictionary<int, ImportColumnRule> Rules { get; init; } = new Dictionary<int, ImportColumnRule>();
-    public string ConstraintPolicy { get; init; } = ImportConstraintPolicy.ImportValid;
+    /// <summary>What happens to rows that repeat a unique value (<see cref="ImportDuplicatePolicy"/>); this table's own setting.</summary>
+    public string DuplicatePolicy { get; init; } = ImportDuplicatePolicy.KeepFirst;
+    /// <summary>What happens to rows with any other problem (<see cref="ImportErrorPolicy"/>); this table's own setting.</summary>
+    public string ErrorPolicy { get; init; } = ImportErrorPolicy.ImportValid;
     public long? SourceOwnerRestriction { get; init; }
     /// <summary>Fields to select from the source: mapped + condition fields + Record ID#.</summary>
     public required IReadOnlyList<AppField> ReadFields { get; init; }
@@ -134,6 +137,8 @@ public sealed class ImportPlanBuilder(
         var (variableValues, variableError) = ImportVariables.Evaluate(variables, formulaEngine, FormulaOptionsForVariables(runClock.Value));
         if (variableError is not null) throw Invalid(variableError);
         cfg = ImportVariables.Apply(cfg, variableValues);
+        // A variable or a formula on either side of a condition is the same for every row: worked out once here, so the rest of the plan sees ordinary conditions.
+        cfg = ImportFilterOperands.Apply(cfg, formulaEngine, FormulaOptionsForVariables(runClock.Value));
         if (file is not null) cfg = ImportFileRemap.Apply(cfg, file);
         if (string.IsNullOrWhiteSpace(cfg.Name)) throw Invalid("Give the import a name.");
         if (cfg.Name.Length > 200) throw Invalid("The import name is too long.");
@@ -268,7 +273,7 @@ public sealed class ImportPlanBuilder(
         return new ImportPlan
         {
             Source = source, SourceFields = sourceFields, Destination = destination, DestinationFields = destFields,
-            Mappings = mappings, ReferenceTargets = referenceTargets, ImportType = cfg.ImportType, MergeKey = mergeKey, Rules = rules, ConstraintPolicy = cfg.ConstraintPolicy,
+            Mappings = mappings, ReferenceTargets = referenceTargets, ImportType = cfg.ImportType, MergeKey = mergeKey, Rules = rules, DuplicatePolicy = cfg.DuplicatePolicy, ErrorPolicy = cfg.ErrorPolicy,
             SourceFilter = sqlFilter, RowFilter = rowFilterTree is null ? null : new ImportRowFilter(rowFilterTree, sourceFields),
             SourceOwnerRestriction = sourceAccess?.RestrictToCreatedBy, File = file, ReadFields = readFields, NeedsProjection = needsProjection,
             FormulaOptions = FormulaOptionsForRun(source, runClock), Virtuals = virtuals, TableFilter = tableFilter,
@@ -313,6 +318,8 @@ public sealed class ImportPlanBuilder(
             view.MergeKeyFid = target.MergeKeyFid;
             view.Mappings = target.Mappings;
             view.ColumnRules = target.ColumnRules;
+            view.DuplicatePolicy = target.DuplicatePolicy ?? cfg.DuplicatePolicy;
+            view.ErrorPolicy = target.ErrorPolicy ?? cfg.ErrorPolicy;
             try { plans.AddRange(await BuildTableAsync(view, target.DestinationTableId, target.SheetMappings, file, clock, index, ct)); }
             catch (ValidationException ex)
             {
@@ -466,7 +473,7 @@ public sealed class ImportPlanBuilder(
             Source = first.Source, File = first.File, SourceFields = first.SourceFields, Destination = first.Destination,
             DestinationFields = first.DestinationFields, Mappings = first.Mappings, ImportType = first.ImportType,
             SourceFilter = first.SourceFilter, RowFilter = first.RowFilter, MergeKey = first.MergeKey, Rules = first.Rules,
-            ConstraintPolicy = first.ConstraintPolicy, SourceOwnerRestriction = first.SourceOwnerRestriction,
+            DuplicatePolicy = first.DuplicatePolicy, ErrorPolicy = first.ErrorPolicy, SourceOwnerRestriction = first.SourceOwnerRestriction,
             ReadFields = plans.SelectMany(p => p.ReadFields).GroupBy(f => f.Id).Select(g => g.First()).ToList(),
             NeedsProjection = plans.Any(p => p.NeedsProjection), FormulaOptions = first.FormulaOptions, DateFormat = first.DateFormat, ColumnFormats = plans.SelectMany(p => p.ColumnFormats).GroupBy(kv => kv.Key).ToDictionary(g => g.Key, g => g.First().Value), Virtuals = virtualsPerPlan ? [] : first.Virtuals,
             TableIndex = first.TableIndex, SheetName = first.SheetName
@@ -573,8 +580,10 @@ public sealed class ImportPlanBuilder(
     private static Dictionary<int, ImportColumnRule> ValidateRules(
         ImportDefinitionConfig cfg, IReadOnlyList<ResolvedMapping> mappings, AppField? mergeKey, bool isMerge)
     {
-        if (!ImportConstraintPolicy.IsValid(cfg.ConstraintPolicy))
-            throw Invalid("Choose how to handle rows that break a unique rule.");
+        if (!ImportDuplicatePolicy.IsValid(cfg.DuplicatePolicy))
+            throw Invalid("Choose what to do with rows that repeat a unique value.");
+        if (!ImportErrorPolicy.IsValid(cfg.ErrorPolicy))
+            throw Invalid("Choose what to do when rows have a problem.");
 
         var mapped = mappings.ToDictionary(m => m.Destination.Fid!.Value, m => m.Destination);
         var rules = new Dictionary<int, ImportColumnRule>();
@@ -696,6 +705,8 @@ public sealed class ImportPlanBuilder(
                 if (n.Condition is { } c)
                 {
                     if (c.Operator == ImportRowFilter.NoDuplicateOperator) CheckNoDuplicate(c, visibleFields, errors);
+                    if (!ImportRowFilter.IsKnownValueType(c.ValueType))
+                        CommonReportValidationHelpers.AddError(errors, "conditions", $"A condition reads its column as '{c.ValueType}', which is not a type an import knows (number, date or checkbox).");
                     if (string.Equals(c.ValueMode, "ask", StringComparison.OrdinalIgnoreCase))
                         CommonReportValidationHelpers.AddError(errors, "conditions", "\"Ask the user\" values are not available in an import, which runs without anyone to ask.");
                     if (string.Equals(c.ValueMode, "field", StringComparison.OrdinalIgnoreCase) && c.ValueFieldId.HasValue && computed.Contains(c.ValueFieldId.Value))

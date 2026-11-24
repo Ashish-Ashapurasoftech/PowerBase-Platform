@@ -265,13 +265,13 @@ public class ImportSheetMappingTests
             Sheet("People", ["Name", "Qty", "Note"], ["p1", "1", "x"]),
             Sheet("Courses", ["Title", "Code"], ["Course", "c1"]),
             Sheet("Both", ["Name", "Qty", "Title", "Code"], ["b1", "oops", "T", "cb1"]));
-        var cfg = Config(c => c.ConstraintPolicy = ImportConstraintPolicy.AbortIfAnyIssue);
+        var cfg = Config(c => c.ErrorPolicy = ImportErrorPolicy.AllOrNothing);
 
         var h = Run(cfg, book);
         await h.RunAsync();
 
-        h.Completion!.Value.Status.Should().Be(ImportRunStatus.Failed);
-        h.Store.Inserted.Should().BeEmpty("nothing is written when any row, on any sheet, has a problem");
+        h.Completion!.Value.Status.Should().NotBe(ImportRunStatus.Success);
+        h.Store.InsertedByTable.Should().NotContainKey(11, "the table gets nothing when any row, on any of its sheets, has a problem");
     }
 
     [Fact]
@@ -281,7 +281,7 @@ public class ImportSheetMappingTests
             Sheet("People", ["Name", "Qty", "Note"], ["dup", "1", "x"], ["p2", "2", "x"]),
             Sheet("Courses", ["Title", "Code"], ["Course", "c1"]),
             Sheet("Both", ["Name", "Qty", "Title", "Code"], ["dup", "9", "T", "cb1"]));
-        var cfg = Config(c => c.ConstraintPolicy = ImportConstraintPolicy.ExcludeDuplicateGroups);
+        var cfg = Config(c => c.DuplicatePolicy = ImportDuplicatePolicy.ExcludeAll);
 
         var h = Run(cfg, book);
         await h.RunAsync();
