@@ -63,6 +63,12 @@ public sealed class ComputeOptions
     /// </summary>
     public int BuildsPerReplica { get; set; }
 
+    /// <summary>
+    /// A build round stops starting new builds after this many minutes (the running ones finish): the next round reads the waiting fields
+    /// again, so priority tables and fields re-queued meanwhile are not stuck behind a list made hours ago.
+    /// </summary>
+    public int BuildRoundMinutes { get; set; } = 15;
+
     /// <summary>How many fields this replica builds at once.</summary>
     public int BuildConcurrency => Math.Max(1, BuildsPerReplica > 0 ? Math.Min(BuildsPerReplica, BackgroundSessionsPerDatabase) : BackgroundSessionsPerDatabase);
 

@@ -109,13 +109,17 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
         var running = new List<Task>();
         var sync = new object();
         var busy = false;
+        // A round stops starting builds after BuildRoundMinutes: the next one reads the waiting fields (and priorities) again.
+        var roundEnds = DateTime.UtcNow.AddMinutes(options.BuildRoundMinutes);
         foreach (var (key, (field, decision)) in model.Decisions
                      .Where(d => d.Value.Field.MaterializeMode == MaterializeModes.On && d.Value.Field.MaterializeState is MaterializeStates.None or MaterializeStates.Building)
                      .OrderBy(d => priority.TryGetValue(d.Key.TableId, out var rank) ? rank : int.MaxValue)
                      .ThenBy(d => order.TryGetValue(d.Key, out var i) ? i : int.MaxValue).ThenBy(d => d.Value.Field.Id))
         {
             ct.ThrowIfCancellationRequested();
+            if (DateTime.UtcNow > roundEnds) break;
             await gate.WaitAsync(ct);
+            if (DateTime.UtcNow > roundEnds) { gate.Release(); break; }   // waited for a free build past the end of the round
             FieldKey? waiting;
             lock (sync)
             {
