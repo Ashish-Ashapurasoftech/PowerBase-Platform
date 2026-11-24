@@ -58,6 +58,15 @@ public sealed class ComputeOptions
     public int BackgroundSessionsPerDatabase { get; set; } = 1;
 
     /// <summary>
+    /// Fields one worker replica builds side by side; 0 = <see cref="BackgroundSessionsPerDatabase"/>. With several replicas set it to about
+    /// the slots divided by the replicas, so they do not all wait for the same few slots (the slots stay the database-wide limit).
+    /// </summary>
+    public int BuildsPerReplica { get; set; }
+
+    /// <summary>How many fields this replica builds at once.</summary>
+    public int BuildConcurrency => Math.Max(1, BuildsPerReplica > 0 ? Math.Min(BuildsPerReplica, BackgroundSessionsPerDatabase) : BackgroundSessionsPerDatabase);
+
+    /// <summary>
     /// Tables whose fields are built first, in this order: "tenantId:tableId" pairs separated by commas (e.g. "17:243,17:244"). The tables
     /// people open most get their stored columns (and fast pages) first; every other field follows in the usual order.
     /// </summary>

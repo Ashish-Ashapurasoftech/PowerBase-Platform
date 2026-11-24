@@ -64,6 +64,14 @@ public class EncryptedStoredValueTests
         ComputeConfig.ReadCompute(new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()).BackgroundSessionsPerDatabase.Should().Be(1);
     }
 
+    [Theory]
+    [InlineData(7, 0, 7)]   // unset: as many as the background slots
+    [InlineData(7, 4, 4)]   // two replicas sharing seven slots
+    [InlineData(2, 5, 2)]   // never more than the slots
+    [InlineData(1, 0, 1)]
+    public void Builds_per_replica_are_capped_by_the_slots(int slots, int perReplica, int expected) =>
+        new ComputeOptions { BackgroundSessionsPerDatabase = slots, BuildsPerReplica = perReplica }.BuildConcurrency.Should().Be(expected);
+
     [Fact]
     public void Lookup_and_summary_of_encrypted_data_go_through_the_value_table()
     {

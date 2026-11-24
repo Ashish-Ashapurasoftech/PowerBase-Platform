@@ -51,7 +51,7 @@ public sealed class BackfillRunner : BackgroundService
                             if (options.StoreAllCalculatedFields && await builder.SwitchOnUndecidedAsync(stoppingToken) is > 0 and var switchedOn)
                                 _logger.LogInformation("Compute: tenant {TenantId}: {Count} calculated field(s) switched on (store every Lookup/Summary/Formula).", tenantId, switchedOn);
                             var outcomes = await builder.BuildPendingAsync(options, stoppingToken);
-                            foreach (var o in outcomes.Where(o => o.Outcome != "later"))
+                            foreach (var o in outcomes.Where(o => o.Outcome is not ("later" or "elsewhere")))
                                 _logger.LogInformation("Compute backfill: tenant {TenantId} field {FieldId} (t{TableId}.c_{Fid}): {Outcome}, {Rows} row(s), {Seconds:0.0}s. {Reason}",
                                     tenantId, o.FieldId, o.TableId, o.Fid, o.Outcome, o.Rows, o.Took.TotalSeconds, o.Reason);
 

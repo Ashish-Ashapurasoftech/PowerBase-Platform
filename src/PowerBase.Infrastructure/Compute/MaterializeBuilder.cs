@@ -104,7 +104,7 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
         var priority = options.PriorityTablesFor(QueryContext.TenantId);
         // Up to BackgroundSessionsPerDatabase fields side by side, each on its own guarded connection (the guard holds the database to that
         // many background slots and slows or stops them when it is busy).
-        var concurrency = Math.Max(1, options.BackgroundSessionsPerDatabase);
+        var concurrency = options.BuildConcurrency;
         using var gate = new SemaphoreSlim(concurrency);
         var running = new List<Task>();
         var sync = new object();
@@ -183,6 +183,10 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
         }
         if (decision.Outcome == MaterializeOutcome.NotYetSupported || decision.Plan is not { } plan)
             return Done("later", reason: decision.Reason);
+
+        // One replica per field: another one already on it means this one moves to the next field instead of doing it twice.
+        await using var fieldLock = await FieldWorkLock.TryAcquireAsync(ConnectionFactory.CreateAsync, field.Id, ct);
+        if (fieldLock is null) return Done("elsewhere", reason: "Another worker is building this field.");
 
         string? sqlType;
         await using (var probe = await OpenConnectionAsync(ct))
@@ -273,6 +277,8 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
         foreach (var (field, plan) in model.Live().Where(l => l.Field.MaterializeState == MaterializeStates.Ready).OrderBy(l => l.Field.Id))
         {
             var sw = Stopwatch.StartNew();
+            await using var fieldLock = await FieldWorkLock.TryAcquireAsync(ConnectionFactory.CreateAsync, field.Id, ct);
+            if (fieldLock is null) continue;   // another replica is checking (or rebuilding) it
             await using var guard = await DatabaseGuard.AcquireAsync(ConnectionFactory.CreateAsync, options, backgroundOnly: true, TimeSpan.FromMinutes(2), _logger, ct);
             if (guard is null) { outcomes.Add(new(field.Id, plan.Fid, plan.TableId, "busy", 0, 0, sw.Elapsed)); break; }
 
@@ -310,6 +316,8 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
                      .OrderBy(l => order.TryGetValue(l.Plan.Key, out var i) ? i : int.MaxValue))
         {
             var sw = Stopwatch.StartNew();
+            await using var fieldLock = await FieldWorkLock.TryAcquireAsync(ConnectionFactory.CreateAsync, field.Id, ct);
+            if (fieldLock is null) continue;   // another replica is refreshing it
             await using var guard = await DatabaseGuard.AcquireAsync(ConnectionFactory.CreateAsync, options, backgroundOnly: true, TimeSpan.FromMinutes(2), _logger, ct);
             if (guard is null) { outcomes.Add(new(field.Id, plan.Fid, plan.TableId, "busy", 0, 0, sw.Elapsed)); break; }
             var sqlType = await SqlColumnType.ReadAsync(guard.Connection, PhysicalNaming.FullTableName(plan.TableId), PhysicalNaming.MaterializedColumnName(plan.Fid), ct: ct);

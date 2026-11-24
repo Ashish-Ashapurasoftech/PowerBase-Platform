@@ -31,6 +31,7 @@ public static class ComputeConfig
         o.MaxSessionsPerDatabase = Math.Clamp(Int(s["MaxSessionsPerDatabase"], o.MaxSessionsPerDatabase), 1, 8);
         o.BackgroundSessionsPerDatabase = Math.Clamp(Int(s["BackgroundSessionsPerDatabase"], o.BackgroundSessionsPerDatabase), 1, 7);
         o.PriorityTables = string.IsNullOrWhiteSpace(s["PriorityTables"]) ? o.PriorityTables : s["PriorityTables"];
+        o.BuildsPerReplica = Math.Clamp(Int(s["BuildsPerReplica"], o.BuildsPerReplica), 0, 7);
         o.PauseBetweenBatchesMs = Int(s["PauseBetweenBatchesMs"], o.PauseBetweenBatchesMs);
         o.GuardSlowPercent = Int(s["GuardSlowPercent"], o.GuardSlowPercent);
         o.GuardStopPercent = Int(s["GuardStopPercent"], o.GuardStopPercent);
