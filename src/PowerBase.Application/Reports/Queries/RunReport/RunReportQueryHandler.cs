@@ -876,10 +876,26 @@ public class RunReportQueryHandler
             // When sorts include formula fields, skip SQL ORDER BY (we'll re-sort everything in-memory).
             IReadOnlyList<SortSpec> sqlSorts = hasFormulaSorts ? [] : sortFields;
 
+            // Every record read needs only what the filter, the sort and the totals use (plus what those formulas read in turn). The
+            // columns the page shows are read, and its formulas worked out, for the page's rows alone (WidenPageAsync): a report with
+            // no columns set shows every field of the table, and doing that for each of up to 50,000 records took minutes and gigabytes.
+            // Null when a formula's reads can't be listed up front: every record then gets everything, as before.
+            // Only worth the second, page-sized read when the page shows something costly the filter does not use: a calculated field,
+            // or a long list of columns (a report with none set shows every field). A short list of plain columns is read as before.
+            var everyRowUsed = FieldsUsed(allFields, totalCols, sortFields, filterTree);
+            var pageOnlyFids = usedFields is null || everyRowUsed is null ? null : usedFields.Where(fid => !everyRowUsed.Contains(fid)).ToHashSet();
+            var narrowEveryRow = everyRowUsed is not null
+                && (pageOnlyFids is null
+                    || pageOnlyFids.Count > WideReportFieldCount
+                    || allFields.Any(f => f.Fid is int fid && pageOnlyFids.Contains(fid) && FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings)));
+            var everyRowReadFields = narrowEveryRow
+                ? MaterializedReadFields.Substitute(FieldsToRead(allFields, everyRowUsed), _readyFieldIds)
+                : readFields;
+
             IReadOnlyList<IReadOnlyDictionary<string, object?>> allRows;
             // The in-memory report path reads up to 50,000 rows: a heavy read that may come from the read replica (when it is on).
             using (Common.ReadReplicaScope.Begin(Common.ReadReplicaLane.Interactive))
-                allRows = await _recordRepo.ListAllMatchingAsync(table, readFields,
+                allRows = await _recordRepo.ListAllMatchingAsync(table, everyRowReadFields,
                     physicalFilterTree, sqlSorts,
                     restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids);
             // The read stops at InMemoryReadLimit.Rows: past that the in-memory order and filter below only cover the
@@ -891,7 +907,8 @@ public class RunReportQueryHandler
             var everyRowFields = FieldsToProject(allFields, FieldsUsed(allFields, readEveryMatch ? totalCols : [], sortFields, filterTree));
             var allRelationalRaw = await _relationalProjector.ProjectAsync(table, everyRowFields, allRows, ct);
             var allRelational = Relationships.ReferenceOriginalFallback.Apply(allFields, allRows, allRelationalRaw);
-            var allComputed = _formulaProjector.Project(allFields, allRows, allRelational, table);
+            // Never every formula of the table: only those the report uses (a table can hold hundreds, some reading other tables per record).
+            var allComputed = _formulaProjector.Project(FieldsForFormulas(allFields, narrowEveryRow ? everyRowUsed : usedFields), allRows, allRelational, table);
             var pairs = allRows.Zip(allComputed, (r, c) => (Row: r, Computed: c)).ToList();
 
             // Apply formula-field conditions in memory.
@@ -928,7 +945,9 @@ public class RunReportQueryHandler
 
             // Paginate in memory.
             var pagePairs = pairs.Skip((page - 1) * pageSize).Take(pageSize).ToList();
-            pagePairs = await ProjectPageOnlyFieldsAsync(table, allFields, projectedFields, everyRowFields, allRows, allRelationalRaw, pagePairs, ct);
+            pagePairs = narrowEveryRow
+                ? await WidenPageAsync(table, allFields, readFields, projectedFields, usedFields, pagePairs, ct)
+                : await ProjectPageOnlyFieldsAsync(table, allFields, projectedFields, everyRowFields, allRows, allRelationalRaw, pagePairs, ct);
             var userNames = await ResolveUserNamesAsync(pagePairs.Select(p => p.Row), allFields, _userRepo, ct, pagePairs.Select(p => p.Computed));
             items = pagePairs.Select(p => RecordResult.FromRow(p.Row, selectedFields, userNames, p.Computed)).ToList();
         }
@@ -1276,6 +1295,28 @@ public class RunReportQueryHandler
                 read.Add(originalFid);
         }
         return allFields.Where(f => f.IsSystem || (f.Fid.HasValue && read.Contains(f.Fid.Value))).ToList();
+    }
+
+    /// <summary>Columns the page shows beyond what the filter, sort and totals use, above which the in-memory report path reads the
+    /// page's rows apart from the rest (<see cref="WidenPageAsync"/>).</summary>
+    private const int WideReportFieldCount = 20;
+
+    /// <summary>The page of a report filtered or sorted in memory when every record was read with only the columns the filter, sort and
+    /// totals use: the page's rows are read again with every column the report shows, and their References / Lookups / Summaries and
+    /// formulas are worked out for these rows alone — in the page's order.</summary>
+    private async Task<List<(IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed)>> WidenPageAsync(
+        AppTable table, IReadOnlyList<AppField> allFields, IReadOnlyList<AppField> readFields, IReadOnlyList<AppField> projectedFields,
+        IReadOnlySet<long>? used,
+        List<(IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed)> pagePairs, CancellationToken ct)
+    {
+        if (pagePairs.Count == 0) return pagePairs;
+
+        var publicIds = pagePairs.Select(p => p.Row["PublicId"]).OfType<Guid>().ToList();
+        var wideRows = await _recordRepo.ListByPublicIdsAsync(table, readFields, publicIds, ct);
+        var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, wideRows,
+            await _relationalProjector.ProjectAsync(table, projectedFields, wideRows, ct));
+        var computed = _formulaProjector.Project(FieldsForFormulas(allFields, used), wideRows, relational, table);
+        return wideRows.Select((row, i) => (row, computed[i])).ToList();
     }
 
     /// <summary>The page of a report filtered or sorted in memory, with the References / Lookups / Summaries it shows but

@@ -629,6 +629,27 @@ public class ReportHandlerTests
     }
 
     [Fact]
+    public async Task RunReport_SortInMemoryOnAWideReport_ReadsEveryRecordNarrowAndThePageWide()
+    {
+        // A report with many columns (here 25 plain ones; one with none set shows every field of the table) sorted on a Summary:
+        // the records read for the in-memory sort carry only what the sort uses; the columns shown are read for the page alone.
+        FormulaProjectorReturnsRelational();
+        _recordRepo.ListByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(ci => ci.ArgAt<IReadOnlyList<Guid>>(2)
+                .Select(id => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?> { ["Id"] = 1L, ["PublicId"] = id, ["CreatedOn"] = DateTime.UtcNow }).ToList());
+        var fields = Enumerable.Range(1, 25).Select(fid => Typed(fid, "Text")).Append(Typed(30, "Summary")).ToList();
+        var shown = Enumerable.Range(1, 25).Select(fid => (long)fid).Append(30L).ToList();
+
+        await RunAndCaptureProjection(fields, shown, query: new RunReportQuery(Guid.NewGuid(), 1, 20, RuntimeSortFieldId: 30));
+
+        await _recordRepo.Received(1).ListAllMatchingAsync(Arg.Any<AppTable>(),
+            Arg.Is<IReadOnlyList<AppField>>(fs => !fs.Any(f => f.Fid >= 1 && f.Fid <= 25)), Arg.Any<FilterGroup?>(),
+            Arg.Any<IReadOnlyList<SortSpec>?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>());
+        await _recordRepo.Received(1).ListByPublicIdsAsync(Arg.Any<AppTable>(),
+            Arg.Is<IReadOnlyList<AppField>>(fs => fs.Count(f => f.Fid >= 1 && f.Fid <= 25) == 25), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task RunReport_SortByASummary_WithNothingElseToShow_ProjectsOnce()
     {
         FormulaProjectorReturnsRelational();
