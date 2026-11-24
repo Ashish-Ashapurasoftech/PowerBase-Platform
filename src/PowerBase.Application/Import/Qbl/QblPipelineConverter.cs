@@ -613,7 +613,7 @@ public static class QblPipelineConverter
         }
 
         private static bool NeedsTarget(string subtype) =>
-            subtype is "update-record" or "delete-record" or "add-bulk-upsert-row" or "commit-upsert" or "for-each" or "upload-file";
+            subtype is "update-record" or "delete-record" or "add-bulk-upsert-row" or "commit-upsert" or "for-each" or "upload-file" or "iterate-json-records";
 
         private (string Code, string Message)? TargetProblem(SourceStep step)
         {
@@ -630,6 +630,7 @@ public static class QblPipelineConverter
                                                       || (target.Subtype == "new-event" && target.Parent is null && target.Order == FirstRootOrder())
                                                       || (step.Subtype is "update-record" or "delete-record" && LoopItemTarget(step) is not null),
                 "add-bulk-upsert-row" or "commit-upsert" => target.Subtype == "prepare-bulk-upsert",
+                "iterate-json-records" => target.Subtype is "fetch-json" or "webhook",
                 "for-each" => target.Entry?.Type == "query" || target.Subtype is "new-bulk-event" or "search-records" or "make-request",
                 _ => false,
             };
@@ -753,6 +754,8 @@ public static class QblPipelineConverter
                 case "import-with-csv": context.ImportWithCsv(); break;
                 case "send-email-outlook": context.SendEmail(); break;
                 case "pipeline-called": context.PipelineCalled(); break;
+                case "fetch-json": context.FetchJson(); break;
+                case "iterate-json-records": context.IterateJson(); break;
                 case "call-another-pipeline": context.CallAnotherPipeline(); break;
             }
             context.NoteUnusedSettings();
@@ -1177,6 +1180,15 @@ public static class QblPipelineConverter
                     if (mapped is null)
                         return $"'{string.Join('.', keys)}' of Make Request '{target.Name}' ({target.Label}) has no PowerFlows equivalent";
                     parts = [$"{{{{steps.{target.RefId}.{mapped}}}}}"];
+                    return null;
+                }
+                if (target.Subtype is "fetch-json" or "iterate-json-records")
+                {
+                    // JSON Handler outputs keep Quickbase's names: Fetch JSON's headers / status, an Iterate item's normalized keys
+                    // and raw_record (read from the loop's current item, {{steps.x.key}}).
+                    if (target.Subtype == "fetch-json" && key is not ("headers" or "status"))
+                        return $"'{string.Join('.', keys)}' of Fetch JSON '{target.Name}' ({target.Label}) has no PowerFlows equivalent";
+                    parts = [$"{{{{steps.{target.RefId}.{string.Join('.', keys)}}}}}"];
                     return null;
                 }
                 if (target.Subtype == "copy-records")
@@ -1857,6 +1869,82 @@ public static class QblPipelineConverter
                 else if (!source.Node.Properties.ContainsKey("Filters"))
                     Incomplete("PIPELINE_FILTER_NOT_VERIFIED", "The condition has no filter in the file; set it before turning the PowerFlow on.");
                 Config["ruleGroups"] = groups;
+            }
+
+            /// <summary>JSON Handler › Fetch JSON: Quickbase's options as they are (the token / password stay in the step).</summary>
+            public void FetchJson()
+            {
+                var auth = Setting("Authentication_Schema")?.ToString()?.Trim();
+                Config["authenticationSchema"] = auth is "no-auth" or "http-basic" or "http-digest" or "http-qb-token" ? auth : "no-auth";
+                if (auth is not null && Config["authenticationSchema"]!.ToString() != auth)
+                    Incomplete("PIPELINE_INPUT_INVALID", $"Authentication schema '{auth}' cannot be used; choose it before turning the PowerFlow on.");
+                var method = Setting("Method_Type")?.ToString()?.Trim().ToUpperInvariant();
+                Config["methodType"] = method is "GET" or "POST" or "PUT" or "PATCH" or "DELETE" or "OPTIONS" ? method : "GET";
+                if (method is not null && Config["methodType"]!.ToString() != method)
+                    Incomplete("PIPELINE_INPUT_INVALID", $"Request method '{method}' cannot be used; choose it before turning the PowerFlow on.");
+                var url = Setting("Json_Url")?.ToString();
+                Config["jsonUrl"] = url is null ? string.Empty : Text(url, "JSON URL", requestUrl: true, method: Config["methodType"]!.ToString()!, body: Setting("Body")?.ToString());
+                if (url is null) Incomplete("PIPELINE_INPUT_MISSING", "The JSON URL is not in the file; set it before turning the PowerFlow on.");
+                foreach (var (meta, key) in new[] { ("Headers", "headers"), ("Body", "body"), ("Username", "username"), ("Password", "password"), ("Token", "token"), ("Force_Content_Encoding", "forceContentEncoding") })
+                    if (Setting(meta) is { } value) Config[key] = Text(value, meta.Replace('_', ' '));
+                foreach (var (meta, key) in new[] { ("Disable_Ssl_Verification", "disableSslVerification"), ("Proxy_Via_Agent", "proxyViaAgent") })
+                    if (Setting(meta) is { } flag) Config[key] = flag is bool b ? b : string.Equals(flag.ToString(), "true", StringComparison.OrdinalIgnoreCase);
+            }
+
+            /// <summary>JSON Handler › Iterate over JSON records: the source is the step's Target; filters keep Quickbase's
+            /// [[{field, condition, value}]] shape (OR-ed groups of AND-ed rules).</summary>
+            public void IterateJson()
+            {
+                Config["jsonSourceStepId"] = Target.RefId;
+                if (Setting("Json_Schema_Sample") is { } sample) Config["jsonSchemaSample"] = sample.ToString();
+                if (Setting("Json_Records_Path") is { } path) Config["jsonRecordsPath"] = Text(path, "JSON Records Path");
+                if (Setting("Limit") is { } limit && long.TryParse(limit.ToString(), out var n)) Config["limit"] = n;
+                if (source.Node.Properties.ContainsKey("Limit") && long.TryParse(source.Node.Properties["Limit"]?.ToString(), out var top)) Config["limit"] = top;
+                Config["filters"] = JsonFilters();
+            }
+
+            private List<object?> JsonFilters()
+            {
+                var result = new List<object?>();
+                if (!source.Node.Properties.TryGetValue("Filters", out var raw) || raw is not IReadOnlyDictionary<string, object?> filters)
+                    return result;
+                var expressions = filters.TryGetValue("Expression", out var list) && list is IList<object?> items ? items : null;
+                if (Scalar(filters, "Type") != "composite-expression" || expressions is not { Count: > 0 })
+                {
+                    FilterNotVerified("This filter shape has not been verified for import and was left empty.");
+                    return result;
+                }
+                var stack = new Stack<List<List<Dictionary<string, object?>>>>();
+                foreach (var item in expressions)
+                {
+                    if (item is not IReadOnlyDictionary<string, object?> node) { FilterNotVerified("This filter shape has not been verified for import and was left empty."); return result; }
+                    switch (Scalar(node, "Type"))
+                    {
+                        case "relational-expression":
+                            var rule = new Dictionary<string, object?>(StringComparer.Ordinal)
+                            {
+                                ["field"] = Scalar(node, "Field") ?? string.Empty,
+                                ["condition"] = Scalar(node, "Operator") ?? string.Empty,
+                            };
+                            if (node.TryGetValue("Value", out var value) && value is not null)
+                                rule["value"] = value is IList<object?> range ? range.Select(v => (object?)v?.ToString()).ToList() : Text(value, "Filter value");
+                            stack.Push([[rule]]);
+                            break;
+                        case "logical-operator" when stack.Count >= 2 && Scalar(node, "Operator")?.ToUpperInvariant() is "AND" or "OR":
+                            var right = stack.Pop();
+                            var left = stack.Pop();
+                            stack.Push(Scalar(node, "Operator")!.ToUpperInvariant() == "OR"
+                                ? left.Concat(right).ToList()
+                                : left.SelectMany(l => right.Select(r => l.Concat(r).ToList())).ToList());
+                            break;
+                        default:
+                            FilterNotVerified("This filter shape has not been verified for import and was left empty.");
+                            return result;
+                    }
+                }
+                if (stack.Count != 1) { FilterNotVerified("This filter shape has not been verified for import and was left empty."); return result; }
+                result.AddRange(stack.Pop().Select(g => (object?)g.Cast<object?>().ToList()));
+                return result;
             }
 
             public void Loop()

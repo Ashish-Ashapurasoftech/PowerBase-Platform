@@ -192,9 +192,18 @@ public class JsonHandlerTests
     }
 
     [Fact]
-    public async Task Fetch_ClientErrorIsNotRetried() =>
-        await Assert.ThrowsAsync<PipelineRequestRejectedException>(() =>
-            Executor(status: 404).ExecuteAsync(new FetchJsonDefinition { JsonUrl = "https://e.com" }, v => v ?? "", default));
+    public async Task Fetch_ClientErrorIsNotRetried()
+    {
+        var ex = await Assert.ThrowsAsync<PipelineNonRetryableException>(() =>
+            Executor(status: 404).ExecuteAsync(new FetchJsonDefinition { JsonUrl = "https://e.com/x?y=1" }, v => v ?? "", default));
+        // Quickbase's own wording (live run, 2026-11-23).
+        Assert.Equal("Remote service reported an error: HTTP status code 404 for URL https://e.com/x?y=1", ex.Message);
+    }
+
+    [Fact]
+    public void Iterate_BodyThatIsNotJson_FailsAsQuickbase() =>
+        Assert.Equal("Validation error: Invalid JSON received",
+            Assert.Throws<PipelineNonRetryableException>(() => JsonRecordsIterator.Iterate("<html></html>", new IterateJsonDefinition { JsonSourceStepId = "aa" })).Message);
 
     [Fact]
     public async Task Fetch_InvalidUrl() =>

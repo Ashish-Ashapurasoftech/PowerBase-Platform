@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using PowerBase.Domain.Entities;
@@ -53,7 +54,27 @@ public partial class PipelineEngine
 
         var document = DocumentOf(source);
         string Resolve(string? value) => EvaluateTokens(value, payloadJson, executionPath, allSteps);
-        var records = JsonRecordsIterator.Iterate(document, config, Resolve);
+        // "Expression (advanced)", as Quickbase runs it (live, 2026-11-23): a Jinja template over the earlier steps ({{aa.status == 200}});
+        // the record itself is not in scope. A name that is not an earlier step renders empty on its own ({{ab.x}} → false) but fails
+        // the step when used in an operation ("Validation error: Incorrect jinja template: 'x' is undefined"). The rendered text is
+        // false when it is "", False, no, 0, None (any case; "off", "n" stay true) and true otherwise ("0.0", "abc").
+        var knownRefs = allSteps.Where(s => s.Id != step.Id).Select(s => s.RefId).Where(r => !string.IsNullOrEmpty(r)).ToHashSet(StringComparer.Ordinal);
+        bool Expression(JsonObject record, string text)
+        {
+            foreach (Match block in Regex.Matches(text, @"\{\{(.*?)\}\}", RegexOptions.Singleline))
+            {
+                var inner = block.Groups[1].Value.Trim();
+                foreach (Match reference in Regex.Matches(inner, @"(?<![\w.'""])([A-Za-z_]\w*)\.([A-Za-z_]\w*)"))
+                {
+                    if (knownRefs.Contains(reference.Groups[1].Value) || reference.Groups[1].Value == "steps") continue;
+                    if (inner != reference.Value) throw new PipelineNonRetryableException($"Validation error: Incorrect jinja template: '{reference.Groups[2].Value}' is undefined");
+                    text = text.Replace(block.Value, "");
+                }
+            }
+            var rendered = EvaluateTokens(text, payloadJson, executionPath, allSteps).Trim();
+            return JsonExpressionTruth(rendered);
+        }
+        var records = JsonRecordsIterator.Iterate(document, config, Resolve, Expression);
         // Filters as plain text: a JsonNode's Parent points back up the tree, which the audit sanitizer would walk forever.
         var filters = config.Filters.Select(group => group.Select(rule => new
         {
@@ -68,16 +89,21 @@ public partial class PipelineEngine
         }.ToJsonString();
     }
 
+    /// <summary>Quickbase's reading of an expression's rendered text.</summary>
+    public static bool JsonExpressionTruth(string rendered) =>
+        !(rendered.Trim().ToLowerInvariant() is "" or "false" or "no" or "0" or "none");
+
     /// <summary>Condition type category of a JSON Handler field: number / boolean from the Schema Sample, text otherwise.</summary>
     private static string JsonFieldTypeCategory(PipelineStep step, string field)
     {
         if (step.Subtype == JsonHandler.FetchSubtype) return field == "status" ? "NUMBER" : "TEXT";
-        JsonRecordsIterator.TryParseSample(IterateJsonDefinition.Read(step.ConfigJson).JsonSchemaSample, out var schema);
-        if (schema == null || !schema.TryGetPropertyValue(field, out var sample) || sample is not JsonValue value) return "TEXT";
-        return value.GetValueKind() switch
+        List<JsonSchemaField>? fields;
+        try { fields = JsonRecordsIterator.Fields(IterateJsonDefinition.Read(step.ConfigJson).JsonSchemaSample); }
+        catch (PipelineNonRetryableException) { fields = null; }
+        return fields?.FirstOrDefault(f => f.Key == field)?.Type switch
         {
-            JsonValueKind.Number => "NUMBER",
-            JsonValueKind.True or JsonValueKind.False => "BOOLEAN",
+            "integer" or "number" => "NUMBER",
+            "boolean" => "BOOLEAN",
             _ => "TEXT"
         };
     }

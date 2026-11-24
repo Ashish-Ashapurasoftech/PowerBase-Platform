@@ -20,6 +20,7 @@ public static class QblPipelineStepCatalog
     public const string CALLABLE_STEP = "QB::PipelineStep::CloudpipesMeta";
     public const string HTTP_STEP = "QB::PipelineStep::Http";
     public const string WEBHOOKS_STEP = "QB::PipelineStep::Webhooks";
+    public const string JSON_HANDLER_STEP = "QB::PipelineStep::JsonHandler";
 
     private static readonly Dictionary<(string NodeType, string Channel, string Resource, string Selector), Entry> ChannelSteps = new()
     {
@@ -42,6 +43,8 @@ public static class QblPipelineStepCatalog
         [(QUICKBASE_STEP, "quickbase", "bulk_record_set", "copy_records")] = new("action", "copy-records"),
         [(QUICKBASE_STEP, "quickbase", "attachment", "upload")] = new("file", "upload-file"),
         [(QUICKBASE_STEP, "quickbase", "bulk_record_set", "csv_import")] = new("action", "import-with-csv"),
+        [(JSON_HANDLER_STEP, "json-handler", "json_source", "fetch_json_blob")] = new("action", "fetch-json"),
+        [(JSON_HANDLER_STEP, "json-handler", "json_object", "search")] = new("query", "iterate-json-records"),
         [(CLOCK_STEP, "clock", "timer", "pause")] = new("action", "pause"),
         [(OUTLOOK_STEP, "microsoft-outlook", "email", "send_email")] = new("email", "send-email-outlook"),
         [(CALLABLE_STEP, "cloudpipes-meta", "pipeline", "on_called")] = new("trigger", "pipeline-called"),
@@ -111,6 +114,15 @@ public static class QblPipelineStepCatalog
             ["terminateOnError"] = "Yes",
         },
         "pause" => new(StringComparer.Ordinal) { ["duration"] = 10, ["unit"] = "Seconds" },
+        "fetch-json" => new(StringComparer.Ordinal)
+        {
+            ["authenticationSchema"] = "no-auth", ["disableSslVerification"] = false, ["jsonUrl"] = "", ["methodType"] = "GET", ["headers"] = "",
+            ["body"] = "", ["username"] = "", ["password"] = "", ["token"] = "", ["proxyViaAgent"] = false, ["forceContentEncoding"] = "",
+        },
+        "iterate-json-records" => new(StringComparer.Ordinal)
+        {
+            ["jsonSourceStepId"] = "", ["jsonSchemaSample"] = "", ["jsonRecordsPath"] = "", ["limit"] = null, ["filters"] = new List<object?>(),
+        },
         "if-else" => new(StringComparer.Ordinal) { ["leftOperand"] = "", ["operator"] = "equals", ["rightOperand"] = "" },
         "for-each" => new(StringComparer.Ordinal) { ["loopOverStepId"] = "" },
         "stop" => new(StringComparer.Ordinal) { ["reason"] = "Stopped" },

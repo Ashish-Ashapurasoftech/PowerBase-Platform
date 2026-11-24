@@ -156,8 +156,10 @@ public sealed class FetchJsonExecutor
             }
             if (status >= 400)
             {
-                if (status < 500 && status != 429) throw new PipelineRequestRejectedException(status);
-                throw new HttpRequestException($"HTTP request failed with status {status}.", null, response.StatusCode);
+                // Quickbase: "Remote service reported an error: HTTP status code 404 for URL https://…" (a 5xx / 429 is retried).
+                var message = $"Remote service reported an error: HTTP status code {status} for URL {uri}";
+                if (status < 500 && status != 429) throw new PipelineNonRetryableException(message);
+                throw new HttpRequestException(message, null, response.StatusCode);
             }
             var encoding = ResolveEncoding(resolve(config.ForceContentEncoding), response.Content.Headers.ContentType?.CharSet);
             var body = encoding.GetString(output.ToArray());
@@ -273,6 +275,8 @@ public sealed class JsonRecordFilter
     public string? Condition { get; set; }
     public JsonNode? Value { get; set; }
     public JsonNode? Value2 { get; set; }
+    /// <summary>Quickbase's "Expression (advanced)" rule: {custom: true, condition: "true" | "false", value: "{{ab.x > 5}}"}.</summary>
+    public bool Custom { get; set; }
 }
 
 public sealed class IterateJsonDefinition
@@ -311,7 +315,11 @@ public sealed class IterateJsonDefinition
                 {
                     var rules = new List<JsonRecordFilter>();
                     foreach (var rule in group.OfType<JsonObject>())
-                        rules.Add(new JsonRecordFilter { Field = Str(rule["field"]), Condition = Str(rule["condition"]), Value = rule["value"]?.DeepClone(), Value2 = rule["value2"]?.DeepClone() });
+                        rules.Add(new JsonRecordFilter
+                        {
+                            Field = Str(rule["field"]), Condition = Str(rule["condition"]), Value = rule["value"]?.DeepClone(), Value2 = rule["value2"]?.DeepClone(),
+                            Custom = rule["custom"] is JsonValue cv && cv.TryGetValue<bool>(out var custom) && custom
+                        });
                     result.Filters.Add(rules);
                 }
             }
@@ -328,10 +336,17 @@ public sealed class IterateJsonDefinition
         if (string.IsNullOrWhiteSpace(JsonSourceStepId)) errors.Add("JSON Source: required field");
         if (!string.IsNullOrWhiteSpace(JsonSchemaSample) && !JsonRecordsIterator.TryParseSample(JsonSchemaSample, out _))
             errors.Add("JSON Schema Sample: invalid JSON");
+        else
+        {
+            // Quickbase refuses a sample it cannot type (a list of lists).
+            try { JsonRecordsIterator.Fields(JsonSchemaSample); }
+            catch (PipelineNonRetryableException ex) { errors.Add("JSON Schema Sample: " + ex.Message); }
+        }
         if (Limit < 0) errors.Add("Limit: must be 0 or greater");
         return errors;
     }
 }
+
 
 public static class JsonRecordsIterator
 {
@@ -349,26 +364,37 @@ public static class JsonRecordsIterator
         catch (JsonException) { return false; }
     }
 
+    /// <summary>The sample's fields as Quickbase builds them (null when there is no sample).</summary>
+    public static List<JsonSchemaField>? Fields(string? sample)
+    {
+        if (!TryParseSample(sample, out var schema) || schema == null) return null;
+        try { return JsonSampleSchema.Build(schema); }
+        catch (InvalidOperationException ex) { throw new PipelineNonRetryableException(ex.Message); }
+    }
+
     /// <summary>Records of the fetched document, as Quickbase's Iterate over JSON records returns them.</summary>
-    public static JsonArray Iterate(string document, IterateJsonDefinition config, Func<string?, string>? resolve = null)
+    public static JsonArray Iterate(string document, IterateJsonDefinition config, Func<string?, string>? resolve = null, Func<JsonObject, string, bool>? expression = null)
     {
         resolve ??= value => value ?? "";
         JsonNode? root;
         try { root = JsonNode.Parse(string.IsNullOrWhiteSpace(document) ? "null" : document); }
-        catch (JsonException ex) { throw new PipelineNonRetryableException("Validation error: Invalid JSON document: " + ex.Message); }
+        catch (JsonException) { throw new PipelineNonRetryableException("Validation error: Invalid JSON received"); }
 
         var path = resolve(config.JsonRecordsPath).Trim();
         if (path.Length > 0) root = Locate(root, path);
 
         IEnumerable<JsonNode?> items = root is JsonArray array ? array : root == null ? Array.Empty<JsonNode?>() : new[] { root };
-        TryParseSample(config.JsonSchemaSample, out var schema);
+        var fields = Fields(config.JsonSchemaSample);
 
         var output = new JsonArray();
         var limit = config.Limit.GetValueOrDefault();
         foreach (var item in items)
         {
-            if (!Matches(item, config.Filters, resolve)) continue;
-            output.Add(Project(item, schema));
+            // Quickbase cannot iterate a record that is not an object.
+            if (item is not JsonObject) throw new PipelineNonRetryableException("Something went wrong executing a step. Try modifying your pipeline.");
+            var record = JsonSampleSchema.Project(item, fields);
+            if (!Matches(record, config.Filters, resolve, expression)) continue;
+            output.Add(record);
             if (limit > 0 && output.Count >= limit) break;
         }
         return output;
@@ -387,111 +413,163 @@ public static class JsonRecordsIterator
         return current;
     }
 
-    private static JsonObject Project(JsonNode? item, JsonObject? schema)
+    /// <summary>Older PowerFlows condition names â†’ Quickbase's (what the step stores now).</summary>
+    public static string CanonicalCondition(string? condition)
     {
-        var result = new JsonObject { ["raw_record"] = item?.DeepClone() };
-        if (schema == null || item is not JsonObject record) return result;
-        foreach (var (key, sampleValue) in schema)
+        var c = (condition ?? "").Trim();
+        return c.ToLowerInvariant() switch
         {
-            if (key == "raw_record" || !record.TryGetPropertyValue(key, out var value)) continue;
-            result[key] = ProjectValue(value, sampleValue);
-        }
-        return result;
+            "not_starts" => "!starts", "not_ends" => "!ends", "not_contains" => "!contains", "not_equals" => "!equals",
+            "regex" => "matches", "not_regex" => "!matches", "has_value" or "is-not-empty" => "set", "has_no_value" or "is-empty" => "!set",
+            "gt" => "greater", "lt" => "less", "not_between" => "!between", "is_not" or "is-not" => "!is",
+            var other => other
+        };
     }
 
-    private static JsonNode? ProjectValue(JsonNode? value, JsonNode? sample)
-    {
-        if (sample is JsonObject sampleObject && value is JsonObject valueObject)
-        {
-            var projected = new JsonObject();
-            foreach (var (key, nestedSample) in sampleObject)
-                if (valueObject.TryGetPropertyValue(key, out var nested)) projected[key] = ProjectValue(nested, nestedSample);
-            return projected;
-        }
-        return value?.DeepClone();
-    }
+    /// <summary>The field Quickbase's "Expression (advanced)" filter stores.</summary>
+    public const string ExpressionField = "__custom_expression_filter";
 
-    public static bool Matches(JsonNode? item, List<List<JsonRecordFilter>> groups, Func<string?, string> resolve)
+    public static bool Matches(JsonObject record, List<List<JsonRecordFilter>> groups, Func<string?, string> resolve, Func<JsonObject, string, bool>? expression = null)
     {
-        var active = groups.Select(g => g.Where(r => !string.IsNullOrWhiteSpace(r.Field) && !string.IsNullOrWhiteSpace(r.Condition)).ToList())
+        var active = groups.Select(g => g.Where(r => (r.Custom || !string.IsNullOrWhiteSpace(r.Field)) && !string.IsNullOrWhiteSpace(r.Condition)).ToList())
             .Where(g => g.Count > 0).ToList();
         if (active.Count == 0) return true;
-        return active.Any(group => group.All(rule => MatchesRule(item, rule, resolve)));
+        return active.Any(group => group.All(rule => MatchesRule(record, rule, resolve, expression)));
     }
 
     private static string ResolveValue(JsonNode? node, Func<string?, string> resolve) => node switch
     {
         null => "",
-        JsonValue v when v.TryGetValue<string>(out var s) => resolve(s),
+        JsonValue v when v.GetValueKind() == JsonValueKind.String => resolve(v.GetValue<string>()),
+        JsonValue v when v.GetValueKind() == JsonValueKind.True => "true",
+        JsonValue v when v.GetValueKind() == JsonValueKind.False => "false",
         _ => node.ToJsonString()
     };
 
-    private static bool MatchesRule(JsonNode? item, JsonRecordFilter rule, Func<string?, string> resolve)
+    private static (string Low, string High) Range(JsonRecordFilter rule, Func<string?, string> resolve) => rule.Value is JsonArray range
+        ? (ResolveValue(range.Count > 0 ? range[0] : null, resolve), ResolveValue(range.Count > 1 ? range[1] : null, resolve))
+        : (ResolveValue(rule.Value, resolve), ResolveValue(rule.Value2, resolve));
+
+    private static bool MatchesRule(JsonObject record, JsonRecordFilter rule, Func<string?, string> resolve, Func<JsonObject, string, bool>? expression)
     {
-        var field = rule.Field!.Trim();
+        var condition = CanonicalCondition(rule.Condition);
+        var field = (rule.Field ?? "").Trim();
+        if (rule.Custom || field == ExpressionField)
+        {
+            var result = expression?.Invoke(record, ResolveValue(rule.Value, value => value ?? "")) ?? false;
+            return condition == "false" ? !result : result;
+        }
         if (field.StartsWith("{{") && field.EndsWith("}}"))
         {
             var inner = field[2..^2].Trim();
             var dot = inner.IndexOf('.');
             field = dot >= 0 ? inner[(dot + 1)..] : inner;
         }
-        JsonNode? value = field == "raw_record" ? item : item is JsonObject obj && obj.TryGetPropertyValue(field, out var found) ? found : null;
-        var present = field == "raw_record" ? item != null : item is JsonObject o && o.ContainsKey(field);
-        var text = value switch { null => "", JsonValue v when v.TryGetValue<string>(out var s) => s, _ => value.ToJsonString() };
-        var expected = ResolveValue(rule.Value, resolve);
-        var condition = rule.Condition!.Trim().ToLowerInvariant();
-        bool hasValue = present && value != null && text.Length > 0 && !(value is JsonArray a && a.Count == 0) && !(value is JsonObject jo && jo.Count == 0);
-        switch (condition)
+        record.TryGetPropertyValue(field, out var value);
+        var present = value != null;
+        var negated = condition.StartsWith('!');
+        var op = negated ? condition[1..] : condition;
+        bool positive;
+        switch (op)
         {
-            case "has_value": return hasValue;
-            case "has_no_value": return !hasValue;
+            case "set": positive = present; break;
+            case "empty": positive = !present || IsEmpty(value!); break;
+            case "is":
+            {
+                if (!present) { positive = false; break; }
+                var expected = ResolveValue(rule.Value, resolve).Trim();
+                positive = JsonSampleSchema.PyBool(value) == (expected.Equals("true", StringComparison.OrdinalIgnoreCase) || expected == "1");
+                break;
+            }
+            case "greater" or "less" or "between":
+            {
+                // Quickbase compares as Decimal: a bound that is not a number fails the step.
+                double lo = 0, hi = 0, expected = 0;
+                if (op == "between")
+                {
+                    var (low, high) = Range(rule, resolve);
+                    lo = Decimal(low); hi = Decimal(high);
+                }
+                else expected = Decimal(ResolveValue(rule.Value, resolve));
+                if (!present || !TryNumber(value!, out var number)) { positive = false; break; }
+                positive = op switch { "between" => number >= lo && number <= hi, "greater" => number > expected, _ => number < expected };
+                break;
+            }
+            case "equals":
+            {
+                if (!present) { positive = false; break; }
+                var expected = ResolveValue(rule.Value, resolve);
+                if (value is JsonValue jv && jv.GetValueKind() == JsonValueKind.Number && TryNumber(value, out var number))
+                    positive = TryParseNumber(expected, out var e) && number == e;
+                else
+                    positive = string.Equals(JsonSampleSchema.PyStr(value), expected, StringComparison.OrdinalIgnoreCase);
+                break;
+            }
+            case "contains" when value is JsonArray list:
+            {
+                // A list contains a value when one of its items is that value (case-insensitive).
+                var expected = ResolveValue(rule.Value, resolve).ToLowerInvariant();
+                positive = list.Any(item => item != null && JsonSampleSchema.PyStr(item).ToLowerInvariant() == expected);
+                break;
+            }
+            case "contains" when value is JsonObject:
+                throw new PipelineNonRetryableException("Validation error: argument of type 'Proxy' is not a container or iterable");
+            case "contains" when value is JsonValue cv && cv.GetValueKind() is JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False:
+                var pyType = cv.GetValueKind() == JsonValueKind.Number ? (cv.ToJsonString().IndexOfAny(new[] { '.', 'e', 'E' }) < 0 ? "int" : "float") : "bool";
+                throw new PipelineNonRetryableException($"Validation error: argument of type '{pyType}' is not a container or iterable");
+            case "starts" or "ends" or "contains":
+            {
+                if (!present) { positive = false; break; }
+                var text = JsonSampleSchema.PyStr(value).ToLowerInvariant();
+                var expected = ResolveValue(rule.Value, resolve).ToLowerInvariant();
+                positive = op switch
+                {
+                    "starts" => text.StartsWith(expected, StringComparison.Ordinal),
+                    "ends" => text.EndsWith(expected, StringComparison.Ordinal),
+                    _ => text.Contains(expected, StringComparison.Ordinal)
+                };
+                break;
+            }
+            case "matches":
+            {
+                if (!present) { positive = false; break; }
+                var pattern = ResolveValue(rule.Value, resolve);
+                try { positive = Regex.IsMatch(JsonSampleSchema.PyStr(value), pattern, RegexOptions.None, TimeSpan.FromSeconds(1)); }
+                catch (ArgumentException) { throw new PipelineNonRetryableException($"Validation error: invalid regular expression '{pattern}'"); }
+                break;
+            }
+            default:
+                throw new PipelineNonRetryableException($"Validation error: unsupported filter condition '{rule.Condition}'");
         }
-        if (!present || value == null) return condition.StartsWith("not_");
-        return condition switch
-        {
-            "starts" => text.StartsWith(expected, StringComparison.Ordinal),
-            "not_starts" => !text.StartsWith(expected, StringComparison.Ordinal),
-            "ends" => text.EndsWith(expected, StringComparison.Ordinal),
-            "not_ends" => !text.EndsWith(expected, StringComparison.Ordinal),
-            "contains" => text.Contains(expected, StringComparison.Ordinal),
-            "not_contains" => !text.Contains(expected, StringComparison.Ordinal),
-            "regex" => SafeRegex(text, expected),
-            "not_regex" => !SafeRegex(text, expected),
-            "equals" => AreEqual(value, text, expected),
-            "not_equals" => !AreEqual(value, text, expected),
-            "gt" => Compare(text, expected) is > 0,
-            "lt" => Compare(text, expected) is < 0,
-            "between" => Between(text, expected, ResolveValue(rule.Value2, resolve)),
-            "not_between" => !Between(text, expected, ResolveValue(rule.Value2, resolve)),
-            _ => throw new PipelineNonRetryableException($"Validation error: unsupported filter condition '{rule.Condition}'")
-        };
+        return negated ? !positive : positive;
     }
 
-    private static bool SafeRegex(string text, string pattern)
+    private static bool IsEmpty(JsonNode value) => value switch
     {
-        try { return Regex.IsMatch(text, pattern, RegexOptions.None, TimeSpan.FromSeconds(1)); }
-        catch (ArgumentException) { throw new PipelineNonRetryableException($"Validation error: invalid regular expression '{pattern}'"); }
-    }
+        JsonArray a => a.Count == 0,
+        JsonObject o => o.Count == 0,
+        JsonValue v when v.GetValueKind() == JsonValueKind.String => v.GetValue<string>().Length == 0,
+        _ => false
+    };
 
-    private static bool AreEqual(JsonNode value, string text, string expected)
+    private static bool TryNumber(JsonNode value, out double number)
     {
-        if (value is JsonValue v)
+        number = 0;
+        if (value is not JsonValue v) return false;
+        switch (v.GetValueKind())
         {
-            if (v.TryGetValue<bool>(out var b)) return bool.TryParse(expected.Trim(), out var eb) ? b == eb : string.Equals(text, expected, StringComparison.OrdinalIgnoreCase);
-            if (v.GetValueKind() == JsonValueKind.Number && decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var n)
-                && decimal.TryParse(expected.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var en)) return n == en;
+            case JsonValueKind.Number: return double.TryParse(v.ToJsonString(), NumberStyles.Float, CultureInfo.InvariantCulture, out number);
+            case JsonValueKind.True: number = 1; return true;
+            case JsonValueKind.False: number = 0; return true;
+            case JsonValueKind.String: return TryParseNumber(v.GetValue<string>(), out number);
+            default: return false;
         }
-        return string.Equals(text, expected, StringComparison.Ordinal);
     }
 
-    private static int? Compare(string text, string expected)
-    {
-        if (decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var a) &&
-            decimal.TryParse(expected.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var b)) return a.CompareTo(b);
-        if (DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var da) &&
-            DateTime.TryParse(expected, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var db)) return da.CompareTo(db);
-        return string.CompareOrdinal(text, expected);
-    }
+    private static double Decimal(string text) => TryParseNumber(text, out var number)
+        ? number
+        : throw new PipelineNonRetryableException($"Validation error: Invalid literal for Decimal: '{text}'");
 
-    private static bool Between(string text, string low, string high) => Compare(text, low) is >= 0 && Compare(text, high) is <= 0;
+    private static bool TryParseNumber(string text, out double number) =>
+        double.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out number);
 }
