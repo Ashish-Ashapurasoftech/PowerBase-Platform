@@ -376,6 +376,19 @@ public sealed class RelationalProjector : IRelationalProjector
         IReadOnlyDictionary<long, AppField> tableFieldsByFid = new Dictionary<long, AppField>();
         IReadOnlyDictionary<long, AppField>? tableReferenceKeys = null;
 
+        // What every summary of this read will ask of the same child table (target, sort, criteria): the first in-memory summary
+        // decrypts those columns for all the other summaries too, so a table of a million children is not read again and again with
+        // one more column each time (see DecryptedChildRowsAsync).
+        var otherReads = new Dictionary<(long ChildTableId, int RefFid), HashSet<long>>();
+        foreach (var other in summaryFields)
+        {
+            if (FormulaTypeMap.ParseSummarySettings(other.Settings) is not { ChildTableId: long otherChild, ReferenceFid: int otherRef } os) continue;
+            if (!otherReads.TryGetValue((otherChild, otherRef), out var wanted)) otherReads[(otherChild, otherRef)] = wanted = [];
+            if (os.TargetFid is int otherTarget) wanted.Add(otherTarget);
+            if (os.SortFid is int otherSort) wanted.Add(otherSort);
+            foreach (var id in SummaryEncryptionGuard.ConditionFieldIds(ParseFilter(os.FilterTree))) wanted.Add(id);
+        }
+
         // A summary that takes long is logged by name once the next one starts (or the loop ends).
         var summaryClock = System.Diagnostics.Stopwatch.StartNew();
         AppField? lapField = null;
@@ -505,7 +518,8 @@ public sealed class RelationalProjector : IRelationalProjector
             var formulaTarget = s.TargetFid is int formulaFid && childFieldsByFid.TryGetValue(formulaFid, out var tf)
                 && (SummaryComputedTargets.IsComputedTarget(tf) || SummaryLookupSources.ReadsComputedSource(tf, lookupSources)) ? tf : null;
             var agg = inMemory
-                ? await AggregateInMemoryAsync(app, table, tableFields, childTable, criteriaFields, criteriaLookupSources, function, refFid, s, sortFid, parentKeyValues, filter, computedParentValues, ct)
+                ? await AggregateInMemoryAsync(app, table, tableFields, childTable, criteriaFields, criteriaLookupSources, function, refFid, s, sortFid, parentKeyValues, filter, computedParentValues,
+                    otherReads.GetValueOrDefault((childId, refFid)), ct)
                 : formulaTarget is not null
                 ? await AggregateFormulaAsync(app, childTable, childFields, childFieldsByFid, lookupSources, formulaTarget,
                     SummaryLookupSources.ComputedValueKind(formulaTarget, lookupSources) ?? SummaryComputedTargets.ResultKind(formulaTarget),
@@ -669,15 +683,25 @@ public sealed class RelationalProjector : IRelationalProjector
         App app, AppTable parentTable, IReadOnlyList<AppField>? parentFields, AppTable childTable,
         IReadOnlyList<AppField> childFields, IReadOnlyDictionary<long, AppField> lookupSources,
         string function, int refFid, SummarySettings s, int? sortFid, IReadOnlyCollection<object> parentKeyValues,
-        FilterGroup? filter, IReadOnlyDictionary<long, IReadOnlyDictionary<long, object?>>? computedParentValues, CancellationToken ct)
+        FilterGroup? filter, IReadOnlyDictionary<long, IReadOnlyDictionary<long, object?>>? computedParentValues,
+        IReadOnlyCollection<long>? alsoReadForOtherSummaries, CancellationToken ct)
     {
         var parentKeys = parentKeyValues.Select(NormalizeParentKey).OfType<string>().ToHashSet();
         var readFids = new List<long>();
         if (s.TargetFid.HasValue) readFids.Add(s.TargetFid.Value);
         if (sortFid.HasValue) readFids.Add(sortFid.Value);
         readFids.AddRange(SummaryEncryptionGuard.ConditionFieldIds(filter));
-        var childRows = await DecryptedChildRowsAsync(app, childTable, childFields, ChildFieldsRead(childFields, lookupSources, refFid, readFids),
-            refFid, parentKeyValues, parentKeys, ct);
+
+        // The columns the other summaries of this read ask of the same children are decrypted now, in the same pass — unless that
+        // would widen the read a lot (a summary that reads a formula makes it every column), then each keeps its own narrow read.
+        var ownColumns = ChildFieldsRead(childFields, lookupSources, refFid, readFids);
+        var columnsToRead = ownColumns;
+        if (alsoReadForOtherSummaries is { Count: > 0 })
+        {
+            var union = ChildFieldsRead(childFields, lookupSources, refFid, readFids.Concat(alsoReadForOtherSummaries).Distinct().ToList());
+            if (union.Count <= ownColumns.Count + 8) columnsToRead = union;
+        }
+        var childRows = await DecryptedChildRowsAsync(app, childTable, childFields, columnsToRead, refFid, parentKeyValues, parentKeys, ct);
 
         var tableFields = childFields;
         (childRows, childFields) = await ResolveLookupValuesAsync(childRows, childFields, lookupSources, readFids, ct);

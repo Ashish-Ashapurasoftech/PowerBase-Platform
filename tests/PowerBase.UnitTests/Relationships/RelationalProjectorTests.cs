@@ -978,7 +978,7 @@ public class RelationalProjectorTests
     }
 
     [Fact]
-    public async Task A_later_summary_needing_another_column_reads_again_with_both_and_the_rest_share_it()
+    public async Task Summaries_over_the_same_children_read_the_columns_of_all_of_them_once()
     {
         _appRepo.GetByIdAsync(3, Arg.Any<CancellationToken>()).Returns(new App { Id = 3, IsEncrypted = true });
         _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77, AppId = 3 });
@@ -998,7 +998,7 @@ public class RelationalProjectorTests
             Rows(new Dictionary<string, object?> { ["Id"] = 1L }));
 
         result[0][20].Should().Be(1); result[0][21].Should().Be("Alpha, Beta"); result[0][22].Should().Be(1);
-        ChildColumnReads().Should().BeEquivalentTo(new[] { new[] { 10, 31 }, new[] { 10, 31, 32 } }, o => o.WithStrictOrdering());
+        ChildColumnReads().Should().BeEquivalentTo(new[] { new[] { 10, 31, 32 } }, o => o.WithStrictOrdering());
     }
 
     [Theory]
