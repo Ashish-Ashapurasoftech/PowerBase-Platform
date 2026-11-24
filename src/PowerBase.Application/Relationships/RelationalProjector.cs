@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using System.Text.Json;
 using PowerBase.Application.Common.Formatting;
 using PowerBase.Application.Common.Interfaces;
@@ -50,13 +51,15 @@ public sealed class RelationalProjector : IRelationalProjector
     private int _lookupDepth;
 
     private readonly PowerBase.Application.Compute.IMaterializedFieldState? _materialized;
+    private readonly ILogger<RelationalProjector>? _logger;
 
     public RelationalProjector(
         IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo,
         IRelationshipRepository relRepo, IAppRepository appRepo, IUserRepository userRepo,
         IFormulaProjector formulaProjector, IQueryContext queryContext,
-        PowerBase.Application.Compute.IMaterializedFieldState? materialized = null)
+        PowerBase.Application.Compute.IMaterializedFieldState? materialized = null, ILogger<RelationalProjector>? logger = null)
     {
+        _logger = logger;
         _materialized = materialized;
         _queryContext = queryContext;
         _formulaProjector = formulaProjector;
@@ -95,8 +98,13 @@ public sealed class RelationalProjector : IRelationalProjector
             summaryFields = summaryFields.Where(f => !stored.Contains(f.Fid!.Value)).ToList();
         }
 
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         await ProjectReferencesAndLookupsAsync(table, referenceFields, lookupFields, rows, maps, ct);
+        var referencesMs = clock.ElapsedMilliseconds;
         await ProjectSummariesAsync(table, summaryFields, rows, maps, ct);
+        if (clock.ElapsedMilliseconds > 2000)
+            _logger?.LogWarning("[RelationalProjector] table {TableId}: rows={Rows}, {References} references + {Lookups} lookups took {ReferencesMs} ms, {Summaries} summaries took {SummariesMs} ms",
+                table.Id, rows.Count, referenceFields.Count, lookupFields.Count, referencesMs, summaryFields.Count, clock.ElapsedMilliseconds - referencesMs);
 
         return maps;
     }
@@ -365,8 +373,19 @@ public sealed class RelationalProjector : IRelationalProjector
         IReadOnlyDictionary<long, AppField> tableFieldsByFid = new Dictionary<long, AppField>();
         IReadOnlyDictionary<long, AppField>? tableReferenceKeys = null;
 
+        // A summary that takes long is logged by name once the next one starts (or the loop ends).
+        var summaryClock = System.Diagnostics.Stopwatch.StartNew();
+        AppField? lapField = null;
+        void Lap()
+        {
+            if (lapField is not null && summaryClock.ElapsedMilliseconds > 1000)
+                _logger?.LogWarning("[RelationalProjector] summary {Fid} ({Type}) over {Rows} rows took {Ms} ms", lapField.Fid, lapField.Settings is { Length: > 0 } ? FormulaTypeMap.ParseSummarySettings(lapField.Settings)?.Function : null, rows.Count, summaryClock.ElapsedMilliseconds);
+            summaryClock.Restart();
+        }
         foreach (var field in summaryFields)
         {
+            Lap();
+            lapField = field;
             var s = FormulaTypeMap.ParseSummarySettings(field.Settings);
             // Canonical casing: rows imported before names were normalized may say "sum".
             var function = SummaryFunctions.Normalize(s?.Function);
@@ -506,6 +525,7 @@ public sealed class RelationalProjector : IRelationalProjector
                 else maps[i][field.Fid!.Value] = isCount ? 0 : isExists ? false : null;
             }
         }
+        Lap();
     }
 
     /// <summary>A parent key's canonical text — numbers by value (42L, 42.0000m → "42"), anything
