@@ -78,6 +78,23 @@ public sealed class ComputeSchemaRepository : TenantRepositoryBase
             """, new { fieldId, none = MaterializeStates.None, building = MaterializeStates.Building, on = MaterializeModes.On }, cancellationToken: ct));
     }
 
+    /// <summary>
+    /// Sends a switched-on field back to the build queue with a new version: whatever runs for the old version stops at the version fence,
+    /// reads use the dynamic path until the new build is Ready. Used when a whole big table must be recomputed: a build splits it across
+    /// sessions and resumes after a restart, a drain would do it in one session (hours on UAT, holding its slot).
+    /// </summary>
+    public async Task<bool> RequeueForRebuildAsync(long fieldId, CancellationToken ct = default)
+    {
+        await using var connection = await OpenConnectionAsync(ct);
+        var changed = await connection.ExecuteAsync(new CommandDefinition("""
+            UPDATE meta.AppField SET MaterializeState = @none, MaterializeVersion = MaterializeVersion + 1
+            WHERE Id = @fieldId AND IsDeleted = 0 AND MaterializeMode = @on AND MaterializeState IN (@building, @ready)
+            """, new { fieldId, none = MaterializeStates.None, on = MaterializeModes.On, building = MaterializeStates.Building, ready = MaterializeStates.Ready },
+            cancellationToken: ct)) == 1;
+        if (changed) await ClearCheckpointAsync(fieldId, ct);
+        return changed;
+    }
+
     /// <summary>Building -> Ready in one statement, only if nobody changed the version meanwhile (the version fence).</summary>
     public async Task<bool> MarkReadyAsync(long fieldId, int version, CancellationToken ct = default)
     {

@@ -72,6 +72,20 @@ public sealed class ComputeTableProcessor : TenantRepositoryBase
 
             foreach (var (field, plan, scope) in targets)
             {
+                // A whole big table is rebuilt by the builder (split across sessions, resumable), never inside this drain: on UAT a
+                // table-wide change on the 1.1 M-row Sessions table made every build's drain recompute it in one session for hours.
+                // A field still Building is skipped: its own build recomputes every row from current data (a table-wide change comes from an
+                // input being rebuilt or rewritten to the values the read code works out anyway); requeueing it would restart hours of work.
+                if (scope is WriteScope.All && await RowCountAsync(guard.Connection, MaterializedColumnWriter.ShapeOf(plan).TableId, ct) >= options.SliceMinRows)
+                {
+                    if (field.MaterializeState == MaterializeStates.Ready && await schemaRepo.RequeueForRebuildAsync(field.Id, ct))
+                    {
+                        _models.Invalidate(QueryContext.TenantId);
+                        _logger?.LogInformation("Compute: field {FieldId} (t{TableId}.c_{Fid}) has a table-wide change on a big table: queued for a rebuild.",
+                            field.Id, plan.TableId, plan.Fid);
+                    }
+                    continue;
+                }
                 var column = PhysicalNaming.MaterializedColumnName(plan.Fid);
                 var sqlType = await SqlColumnType.ReadAsync(guard.Connection, PhysicalNaming.FullTableName(plan.TableId), column, ct: ct);
                 if (sqlType is null) continue;   // column not created yet: the build that creates it computes everything anyway
@@ -108,6 +122,12 @@ public sealed class ComputeTableProcessor : TenantRepositoryBase
         notify.Remove(tableId);   // this table's own follow-up rows are drained above
         return new DrainResult(processed, fields, values, notify);
     }
+
+    /// <summary>Approximate rows of data.t_{id} (partition statistics, no scan).</summary>
+    private static async Task<long> RowCountAsync(SqlConnection connection, long tableId, CancellationToken ct) =>
+        await connection.ExecuteScalarAsync<long?>(new CommandDefinition(
+            "SELECT SUM(row_count) FROM sys.dm_db_partition_stats WHERE object_id = OBJECT_ID(@table) AND index_id IN (0, 1)",
+            new { table = PhysicalNaming.FullTableName(tableId) }, cancellationToken: ct)) ?? 0;
 
     /// <summary>
     /// A stored field that changed is an input of its stored dependents (a chain): queues "these rows of my table changed, field F" so the
