@@ -137,6 +137,11 @@ public sealed class PblFormRuleAction
     /// <summary>A <see cref="PblFormElement.LogicalRef"/> within the same form — required when TargetType is "Field".</summary>
     public string? TargetElementRef { get; set; }
 
+    /// <summary>TargetType "Field": the name of the table field the action is aimed at. When <see cref="TargetElementRef"/> is null the field
+    /// has no element on this form: Quickbase keeps such a rule (it shows a "Missing field" warning), and so does the import — the action
+    /// stays aimed at the field, which the designer shows as missing from the form until it is added.</summary>
+    public string? TargetFieldName { get; set; }
+
     /// <summary>A <see cref="PblFormSection.LogicalRef"/> within the same form — required when TargetType is "Section".</summary>
     public string? TargetSectionRef { get; set; }
 
@@ -168,6 +173,9 @@ public sealed class PblFormElement
     public string? FieldName { get; set; }
     public string? ElementContent { get; set; }
 
+    /// <summary>The element's own name in the designer (a rich text block's name, e.g. Quickbase's "Spacer"); null = PowerBase numbers it ("Text 5").</summary>
+    public string? Name { get; set; }
+
     /// <summary>One of: Default, Custom, Hide.</summary>
     public string LabelMode { get; set; } = "Default";
     public string? CustomLabel { get; set; }
@@ -178,6 +186,11 @@ public sealed class PblFormElement
     /// <summary>One of: Auto, Half, Full, Fixed.</summary>
     public string WidthMode { get; set; } = "Auto";
     public int? WidthValue { get; set; }
+
+    /// <summary>A width the form author chose in the designer: "custom" with a value and a unit ("px", or "%" of the row — a group's members share a row); null = automatic.</summary>
+    public string? ContentWidthMode { get; set; }
+    public int? ContentWidthValue { get; set; }
+    public string? ContentWidthUnit { get; set; }
     public string? HelpTextOverride { get; set; }
     public bool IsReadOnly { get; set; }
     public bool IsRequired { get; set; }

@@ -33,7 +33,7 @@ public class DeleteReportCommandHandler
             throw new NotFoundException("Report", command.ReportPublicId);
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.Deleted, AuditEntityTypes.Report, command.ReportPublicId.ToString(), $"Report deleted: {report.Name}", appId: appId, ct: ct);
+            AuditActions.Deleted, AuditEntityTypes.Report, command.ReportPublicId.ToString(), $"Report deleted: {report.Name}", appId: appId, ct: ct, tableId: report.AppTableId);
         await _refIndexer.RemoveSourceAsync(FieldReferenceSourceTypes.Report, command.ReportPublicId, ct);
     }
 }

@@ -26,6 +26,12 @@ public class App
     public long? DeletedBy { get; set; }
     public byte[] RowVersion { get; set; } = Array.Empty<byte>();
 
+    /// <summary>Quickbase app id (e.g. <c>bunx343v9</c>) this app was imported from. Set by the app import only (migration 098).</summary>
+    public string? QBAppID { get; set; }
+
+    /// <summary>The app's logical id in the imported QBL file (e.g. <c>$App_HIH_Archive</c>).</summary>
+    public string? QBAppLogicalID { get; set; }
+
     /// <summary>A copy the caller may change: the metadata cache hands the same stored app to every request.</summary>
     public App Clone() => (App)MemberwiseClone();
 }

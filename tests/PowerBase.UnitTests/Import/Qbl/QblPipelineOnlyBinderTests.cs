@@ -161,16 +161,23 @@ Resources:
     {
         var binding = QblPipelineOnlyBinder.Bind(File, Apps());
 
-        binding.UnmatchedTables.Should().BeEmpty();
         binding.Matches.Should().Contain(m => m.QbTableId == "bwcrtu9k5" && m.TableName == "Employee" && m.AppName == "YSL Dev Docs");
-        binding.Matches.Should().Contain(m => m.QbTableId == "bwepvdwy6" && m.TableName == "Employee1" && m.AppName == "YSL Dev Docs");
+        // bwepvdwy6 belongs to another Quickbase app (bxxxxxxx2): an app is the copy of ONE Quickbase app, so it is not put
+        // into YSL Dev Docs (the copy of bt2kqxkqk) even though a table there looks like it.
+        binding.UnmatchedTables.Should().Equal("bwepvdwy6");
+        binding.UnmatchedApps.Should().Equal("bxxxxxxx2");
         binding.Apps.Should().ContainSingle(a => a.App.Name == "YSL Dev Docs");
     }
 
     [Fact]
     public void Bind_RewrittenFileConvertsLikeAFullExport()
     {
-        var binding = QblPipelineOnlyBinder.Bind(File, Apps());
+        // The Create Record step's table is in another Quickbase app (bxxxxxxx2): its copy is a second app.
+        var binding = QblPipelineOnlyBinder.Bind(File,
+        [
+            new(Guid.Parse("00000000-0000-0000-0000-000000000001"), 1, "YSL Dev Docs", [Employee(10), new(12, "Orders", null, [.. Sys(), F(7, "Total", "Number")])]),
+            new(Guid.Parse("00000000-0000-0000-0000-000000000003"), 3, "YSL Staff", [Employee1(11)]),
+        ]);
         var qbl = QblSerializer.Deserialize(binding.Content);
         var pipelines = QblPipelineConverter.ConvertAll(qbl, binding.Content);
 
@@ -247,6 +254,144 @@ Resources:
         var payroll = binding.Apps.Single(a => a.App.Name == "Payroll").AppRef;
         pipeline.Steps[0].Config["tableId"].Should().BeOfType<PblPipelineTableValue>().Which.AppRef.Should().Be(hr);
         pipeline.Steps[1].Config["tablePublicId"].Should().BeOfType<PblPipelineTableValue>().Which.AppRef.Should().Be(payroll);
+    }
+
+    /// <summary>A pipeline of another Quickbase app: a Create Record on table bzzzzzzz1 writing fields 6, 7, 8 (ids nearly every
+    /// table has) and a key 'Ticket_Number' no existing table has.</summary>
+    private const string ForeignFile = """
+Version: 0.12
+ParameterDefinitions:
+  Pipeline_Name_1:
+    Type: String
+    Value: Foreign Flow
+Resources:
+  $Pipeline_F:
+    Type: QB::Pipeline
+    Properties:
+      Name: !Var
+        Name: Pipeline_Name_1
+    Steps:
+      - Type: QB::PipelineStep::Quickbase
+        Properties:
+          Id: a
+          Type: pipe
+          Name: Create Record
+          SubType: action
+          Channel:
+            Resource: record
+            Id: quickbase
+            Selector: create
+          Inputs:
+            Ticket_Number: '42'
+        InputsMeta:
+          $PipelineStep_InputsMeta_a:
+            Type: QB::PipelineStep::InputsMeta
+            PipelineStep_DataSources:
+              $PipelineStep_DataSource_1:
+                Type: QB::PipelineStep::DataSource::Fields
+                Properties:
+                  Fields:
+                    - 6
+                    - 7
+                    - 8
+                  Name: export_fields
+                  Source: !Ref
+                    PipelineStep_DataSource: $PipelineStep_DataSource_2
+              $PipelineStep_DataSource_2:
+                Type: QB::PipelineStep::DataSource::Table
+                Properties:
+                  Table: bzzzzzzz1
+                  Name: table
+""";
+
+    [Fact]
+    public void Bind_OnlySharedFieldIds_IsNoMatch()
+    {
+        // Every table here has fields 6-8, but none has 'Ticket Number': the Quickbase table is not one of them.
+        var apps = new List<PipelineOnlyApp>
+        {
+            new(Guid.NewGuid(), 1, "HR", [new(10, "People", null, [.. Sys(), F(6, "Name"), F(7, "Email"), F(8, "Phone")])]),
+        };
+        var binding = QblPipelineOnlyBinder.Bind(ForeignFile, apps);
+
+        binding.Matches.Should().BeEmpty();
+        binding.UnmatchedTables.Should().Contain("bzzzzzzz1");
+    }
+
+    [Fact]
+    public void Bind_FieldIdsWithoutAnyKey_IsNoMatch()
+    {
+        var file = ForeignFile.Replace("            Ticket_Number: '42'\n", "            {}\n").Replace("          Inputs:\n            {}\n", "");
+        var apps = new List<PipelineOnlyApp>
+        {
+            new(Guid.NewGuid(), 1, "HR", [new(10, "People", null, [.. Sys(), F(6, "Name"), F(7, "Email"), F(8, "Phone"), F(9, "City")])]),
+            new(Guid.NewGuid(), 2, "Sales", [new(20, "Leads", null, [.. Sys(), F(6, "Lead"), F(7, "Source"), F(8, "Owner")])]),
+        };
+        // Ids alone match only when exactly one table has them all; two do here.
+        QblPipelineOnlyBinder.Bind(file, apps).Matches.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Bind_KeyAndIdsFound_TableWithoutAppIsMatched()
+    {
+        var apps = new List<PipelineOnlyApp>
+        {
+            new(Guid.NewGuid(), 1, "Helpdesk", [new(10, "Tickets", null, [.. Sys(), F(6, "Ticket Number"), F(7, "Subject"), F(8, "Body")])]),
+            new(Guid.NewGuid(), 2, "HR", [new(20, "People", null, [.. Sys(), F(6, "Name"), F(7, "Email"), F(8, "Phone")])]),
+        };
+        var binding = QblPipelineOnlyBinder.Bind(ForeignFile, apps);
+
+        binding.Matches.Should().ContainSingle(m => m.QbTableId == "bzzzzzzz1" && m.AppName == "Helpdesk" && m.TableName == "Tickets");
+    }
+
+    [Fact]
+    public void Bind_QuickbaseAppNotImported_ItsTablesStayUnmatchedEvenIfOneFieldFits()
+    {
+        // bxxxxxxx2's only evidence (field 6 + key Employee_Name) is in "Other"? No: give "Other" a table with 'Employee Name'
+        // but none of bt2kqxkqk's fields; the File's bt2kqxkqk app must not be matched to it.
+        var apps = new List<PipelineOnlyApp>
+        {
+            new(Guid.NewGuid(), 2, "Other", [new(20, "Customers", null, [.. Sys(), F(7, "Email", "Email"), F(20, "Name")])]),
+        };
+        var binding = QblPipelineOnlyBinder.Bind(File, apps);
+
+        // Employee (7, 20, 27, 40 + t_rating) is not here: 27/40/t_rating are missing, so bt2kqxkqk is not this app.
+        binding.UnmatchedApps.Should().Contain("bt2kqxkqk");
+        binding.Matches.Should().NotContain(m => m.QbTableId == "bwcrtu9k5");
+    }
+
+    [Fact]
+    public void Bind_TwoQuickbaseClonesFitOneTableEqually_NeitherIsUsed()
+    {
+        // Same pipeline twice on two Quickbase tables (clones in two Quickbase apps); only one PowerBase copy exists.
+        var foreign = ForeignFile.Replace("\r\n", "\n");
+        var pipeline2 = foreign.Replace("$Pipeline_F:", "$Pipeline_G:").Replace("bzzzzzzz1", "byyyyyyy1").Split("Resources:\n")[1];
+        var file = foreign + "\n" + pipeline2;
+        var apps = new List<PipelineOnlyApp>
+        {
+            new(Guid.NewGuid(), 1, "Helpdesk", [new(10, "Tickets", null, [.. Sys(), F(6, "Ticket Number"), F(7, "Subject"), F(8, "Body")])]),
+        };
+        var binding = QblPipelineOnlyBinder.Bind(file, apps);
+
+        binding.Matches.Should().BeEmpty();
+        binding.UnmatchedTables.Should().Contain(["bzzzzzzz1", "byyyyyyy1"]);
+        binding.Notes.Should().Contain(n => n.Contains("none was used"));
+    }
+
+    [Fact]
+    public void SplitByApp_PipelineOfNoMatchedApp_IsNotImportedIntoTheFirstApp()
+    {
+        var pipelines = new List<PblPipeline>
+        {
+            new() { LogicalRef = "$P1", Name = "Ours", AppRef = "$App_PowerBase_1" },
+            new() { LogicalRef = "$P2", Name = "Foreign", AppRef = null },
+            new() { LogicalRef = "$P3", Name = "Raw", AppRef = "bu3wxsy83" },
+        };
+
+        var (kept, notImported) = PowerBase.Application.Import.Services.PipelineOnlyImportService.SplitByApp(pipelines, ["$App_PowerBase_1"]);
+
+        kept.Select(p => p.Name).Should().Equal("Ours");
+        notImported.Select(p => p.Name).Should().Equal("Foreign", "Raw");
     }
 
     [Fact]

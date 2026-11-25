@@ -115,6 +115,10 @@ public sealed class ImportPreviewAppItem
     /// warning (including the cross-app "duplicate name" one) is known — see
     /// <see cref="ImportPreviewQueryHandler"/>.</summary>
     public ImportIssueReport Issues { get; set; } = new();
+
+    /// <summary>Quickbase app id / logical id and each table's Quickbase id, stored on the imported app (meta.App / meta.AppTable).
+    /// The wizard asks for an app id or user token only when <see cref="QuickbaseAppIds.NeedsAppId"/> / <see cref="QuickbaseAppIds.NeedsUserToken"/>.</summary>
+    public PowerBase.Application.Import.Quickbase.QuickbaseAppIds? Quickbase { get; set; }
 }
 
 public sealed class ImportPreviewResult

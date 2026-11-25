@@ -26,8 +26,8 @@ public class ListReportsByTablePagedQueryHandler
         var pageSize = query.PageSize is < 1 or > 100 ? 20 : query.PageSize;
         var sortBy = AllowedSortFields.Contains(query.SortBy) ? query.SortBy : "name";
 
-        var items = await _reportRepo.ListByTablePagedAsync(query.TablePublicId, page, pageSize, query.Search, sortBy, query.SortDesc, ct);
-        var total = await _reportRepo.CountByTableAsync(query.TablePublicId, query.Search, ct);
+        var items = await _reportRepo.ListByTablePagedAsync(query.TablePublicId, page, pageSize, query.Search, sortBy, query.SortDesc, ct, query.IncludeHidden);
+        var total = await _reportRepo.CountByTableAsync(query.TablePublicId, query.Search, ct, query.IncludeHidden);
 
         return new ListReportsByTablePagedResult { Items = items, Total = total, Page = page, PageSize = pageSize };
     }

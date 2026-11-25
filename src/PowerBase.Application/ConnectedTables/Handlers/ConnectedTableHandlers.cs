@@ -10,6 +10,7 @@ using PowerBase.Application.ConnectedTables.Scheduling;
 using PowerBase.Application.ConnectedTables.Sync;
 using PowerBase.Application.Fields.Commands.CreateField;
 using PowerBase.Application.Fields.Commands.DeleteField;
+using PowerBase.Application.Fields.Commands.SetKey;
 using PowerBase.Application.Reports;
 using PowerBase.Application.Tables.Commands.CreateTable;
 using PowerBase.Application.Tables.Commands.DeleteTable;
@@ -84,6 +85,7 @@ public sealed class ConnectedTableHandlers(
     CreateFieldCommandHandler createField,
     DeleteTableCommandHandler deleteTable,
     DeleteFieldCommandHandler deleteField,
+    SetKeyCommandHandler setKey,
     IAppRepository apps,
     IAppTableRepository appTables,
     IAppFieldRepository appFields,
@@ -108,15 +110,20 @@ public sealed class ConnectedTableHandlers(
         await permissions.RequireCanCreateTablesAsync(app.Id, ct);
         var name = command.Name.Trim();
         if (await appTables.NameExistsInAppAsync(app.Id, name, ct)) throw new DuplicateException("Table", "name", name);
-        if (command.SourceFids.Count > options.Value.MaxConnectedFields)
-            throw Invalid("SourceFids", $"A connected table can have at most {options.Value.MaxConnectedFields} connected fields.");
-
         var connection = await connectionHandlers.GetOwnedAsync(command.ConnectionPublicId, ct);
         await using var access = await verifier.OpenAsync(connection, context.TenantId, ct);
         var source = await verifier.GetSourceTableAsync(access, command.SourceTablePublicId, ct);
-        var planned = PlanFields(source, access, command.SourceFids);
 
-        var keyFid = command.RefreshKeySourceFid ?? ConnectedSystemFids.RecordId;
+        // The source table's own key field is always connected, even when it wasn't ticked: it becomes the default refresh
+        // key and the new table's key, so relationships to the connected table match on the source's key, not the local Record ID#.
+        var sourceKey = SourceKeyField(source, access);
+        var sourceFids = command.SourceFids.ToList();
+        if (sourceKey is not null && !sourceFids.Contains(sourceKey.Fid!.Value)) sourceFids.Insert(0, sourceKey.Fid!.Value);
+        if (sourceFids.Count > options.Value.MaxConnectedFields)
+            throw Invalid("SourceFids", $"A connected table can have at most {options.Value.MaxConnectedFields} connected fields.");
+        var planned = PlanFields(source, access, sourceFids);
+
+        var keyFid = command.RefreshKeySourceFid ?? sourceKey?.Fid ?? ConnectedSystemFids.RecordId;
         if (keyFid != ConnectedSystemFids.RecordId) RequireKeyable(planned, keyFid);
         var filter = command.FilterEnabled ? ConnectedFilters.Validate(command.Filter, source) : null;
         var schedule = command.Schedule is null ? null : ConnectedScheduling.Validate(command.Schedule, null);
@@ -156,6 +163,7 @@ public sealed class ConnectedTableHandlers(
             (entity.Id, entity.PublicId) = await connectedTables.CreateAsync(entity, mappings, ct);
             ConnectedTableCache.Invalidate(context.TenantId);
             await control.UpsertLinkAsync(LinkOf(entity, destination.Name, source.Table.Name, connection.RunAsUserId), ct);
+            if (sourceKey is not null) await SetDestinationKeyAsync(destination, mappings, sourceKey, ct);
         }
         catch
         {
@@ -427,6 +435,39 @@ public sealed class ConnectedTableHandlers(
             planned.Add(new PlannedField(field, plan));
         }
         return planned;
+    }
+
+    /// <summary>Field types Set Key accepts as a table's key field.</summary>
+    private static readonly HashSet<string> TableKeyTypes = new(StringComparer.Ordinal) { "Text", "Number", "Currency", "Percent", "Rating", "Date" };
+
+    /// <summary>The source table's designated key field when it is a real field (not Record ID#) the connection can copy
+    /// and that works as a refresh key; otherwise null, and the connected table keeps the Record ID# default.</summary>
+    private static AppField? SourceKeyField(ConnectedSourceTable source, ConnectedSourceAccess access)
+    {
+        if (source.Table.KeyFieldId is not long keyFieldId) return null;
+        var field = source.VisibleFields.FirstOrDefault(f => f.Id == keyFieldId);
+        if (field?.Fid is not int fid || fid == ConnectedSystemFids.RecordId || field.IsSystem) return null;
+        if (!KeyTypes.Contains(field.TypeCode)) return null;
+        if (field.IsEncrypted && !access.AllowsEncryptedFields) return null;
+        return ConnectedTypeMapper.Plan(field, access.IsCrossTenant).Connectable ? field : null;
+    }
+
+    /// <summary>Makes the connected copy of the source key field the new table's key. The table is still empty, so Set Key's
+    /// unique / not-blank checks pass; a failure only leaves the Record ID# default and never undoes the create.</summary>
+    private async Task SetDestinationKeyAsync(AppTable destination, IReadOnlyList<ConnectedField> mappings, AppField sourceKey, CancellationToken ct)
+    {
+        try
+        {
+            var mapping = mappings.FirstOrDefault(m => m.SourceFid == sourceKey.Fid);
+            if (mapping is null) return;
+            var local = (await appFields.ListByTableAsync(destination.Id, ct)).FirstOrDefault(f => f.Id == mapping.AppFieldId);
+            if (local?.Fid is not int localFid || !TableKeyTypes.Contains(local.TypeCode)) return;
+            await setKey.HandleAsync(new SetKeyCommand(destination.PublicId, localFid), ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Could not make the source key field the key of connected table {Table}.", destination.PublicId);
+        }
     }
 
     private static void RequireKeyable(IReadOnlyList<PlannedField> planned, int keyFid)

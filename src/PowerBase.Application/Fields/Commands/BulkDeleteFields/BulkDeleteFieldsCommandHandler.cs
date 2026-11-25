@@ -140,7 +140,7 @@ public class BulkDeleteFieldsCommandHandler
             foreach (var p in pipelinesToDeactivate.Values)
             {
                 await _auditRepo.LogActivityAsync(
-                    AuditActions.SchemaChanged, AuditEntityTypes.AppField, p.PublicId.ToString(), $"PowerFlow '{p.Name}' automatically deactivated due to bulk deletion of referenced fields", appId: table.AppId, ct: ct);
+                    AuditActions.SchemaChanged, AuditEntityTypes.AppField, p.PublicId.ToString(), $"PowerFlow '{p.Name}' automatically deactivated due to bulk deletion of referenced fields", appId: table.AppId, ct: ct, tableId: table.Id);
             }
 
             var deletedFieldsCount = fieldsToDelete.Count;
@@ -150,7 +150,7 @@ public class BulkDeleteFieldsCommandHandler
                 table.PublicId.ToString(),
                 $"{deletedFieldsCount} field(s) bulk-deleted from table {table.Name}",
                 appId: table.AppId,
-                ct: ct);
+                ct: ct, tableId: table.Id);
             await RemoveDeletedFieldsAsync(command.FieldPublicIds, ct);
             await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct, _fieldJobs);
 
@@ -168,7 +168,7 @@ public class BulkDeleteFieldsCommandHandler
             table.PublicId.ToString(),
             $"{normalDeletedCount} field(s) bulk-deleted from table {table.Name}",
             appId: table.AppId,
-            ct: ct);
+            ct: ct, tableId: table.Id);
         await RemoveDeletedFieldsAsync(command.FieldPublicIds, ct);
         await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct, _fieldJobs);
     }

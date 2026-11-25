@@ -218,6 +218,10 @@ public class UpdateAppFromPblCommandHandler
             .ToList();
         await _sourceRefRepo.UpsertManyAsync(appId, matchedRefs, ct);
 
+        // Quickbase source ids: only fills columns that are still empty (an app imported before migration 098, or a table added now).
+        await _importer.StoreQuickbaseIdsAsync(document, parsedApp.AppRef, command.TargetAppPublicId,
+            mapping.ForApp(parsedApp.AppRef) ?? mapping.Apps.FirstOrDefault(), onlyWhereEmpty: true, skipped, ct);
+
         // ---- Stage 6: outcome for every approved addition ----
         var skippedByRef = skipped.Where(s => !string.IsNullOrEmpty(s.LogicalRef)).GroupBy(s => s.LogicalRef).ToDictionary(g => g.Key, g => g.First().Reason);
         foreach (var item in diff.Items.Where(i => i.Status == ImportDiffStatus.New))

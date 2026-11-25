@@ -217,6 +217,7 @@ public sealed class ConnectionHandlers(
                     : (plan.Connectable, plan.Reason);
                 return new SourceFieldResult(f.Fid!.Value, f.Label ?? f.Name, f.TypeCode, f.IsSystem, f.IsEncrypted, connectable, reason,
                     connectable ? plan.DestinationTypeCode : null, connectable ? plan.Conversion : null,
+                    IsKeyField: !f.IsSystem && source.Table.KeyFieldId == f.Id,                    
                     PowerBase.Application.Relationships.RelationshipTypeLabel.ValueType(f.TypeCode, f.Settings));
             })
             .ToList();

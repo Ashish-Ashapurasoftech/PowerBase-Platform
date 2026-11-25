@@ -40,6 +40,8 @@ public class AuditLogsController : ControllerBase
         [FromQuery] string? entityType,
         [FromQuery] string? entityId,
         [FromQuery] string? action,
+        [FromQuery] Guid? tableId,
+        [FromQuery] long? recordNumber,
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 50,
         CancellationToken ct = default)
@@ -58,7 +60,9 @@ public class AuditLogsController : ControllerBase
             EntityId: entityId,
             Action: action,
             Page: page,
-            PageSize: pageSize);
+            PageSize: pageSize,
+            TablePublicId: tableId,
+            RecordNumber: recordNumber);
 
         var result = await _listHandler.HandleAsync(query, ct);
         var items = result.Items.Select(Map).ToList();
@@ -82,6 +86,8 @@ public class AuditLogsController : ControllerBase
         [FromQuery] string? entityType,
         [FromQuery] string? entityId,
         [FromQuery] string? action,
+        [FromQuery] Guid? tableId,
+        [FromQuery] long? recordNumber,
         CancellationToken ct = default)
     {
         if (from.HasValue && to.HasValue && (to.Value.Date - from.Value.Date).TotalDays > 15)
@@ -96,7 +102,9 @@ public class AuditLogsController : ControllerBase
             Email: email,
             EntityType: entityType,
             EntityId: entityId,
-            Action: action);
+            Action: action,
+            TablePublicId: tableId,
+            RecordNumber: recordNumber);
 
         var bytes = await _exportHandler.HandleAsync(query, ct);
         var filename = $"audit-logs-{DateTime.UtcNow:yyyyMMdd-HHmm}.csv";

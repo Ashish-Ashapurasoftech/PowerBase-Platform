@@ -86,7 +86,7 @@ public class UpdateDisplayKeyCommandHandler
             auditMessage += $" (removed redundant '{carryOverResult.RemovedLabel}' lookup field on {child.Name})";
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, rel.Id.ToString(),
-            auditMessage, appId: child.AppId, ct: ct);
+            auditMessage, appId: child.AppId, ct: ct, tableId: child.Id);
 
         return await _queries.GetAsync(rel.PublicId, ct);
     }

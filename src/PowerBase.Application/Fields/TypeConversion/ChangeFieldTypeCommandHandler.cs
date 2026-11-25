@@ -190,7 +190,7 @@ public sealed class ChangeFieldTypeCommandHandler
                 typeCode = plan.TargetTypeCode, settings = metadata.Settings, metadata.DefaultValue, metadata.IsUnique,
                 recordsScanned = result.RowsScanned, valuesKept = result.ValuesKept, valuesBlanked, reason = command.CommitMessage,
             }),
-            ct: ct);
+            ct: ct, tableId: plan.Table.Id);
 
         await _refIndexer.ReindexFieldAsync(field.PublicId, ct);
 

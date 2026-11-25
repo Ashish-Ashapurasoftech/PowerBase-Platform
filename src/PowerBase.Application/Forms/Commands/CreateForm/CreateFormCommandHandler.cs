@@ -57,7 +57,7 @@ public class CreateFormCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Created, AuditEntityTypes.Form, created.Id.ToString(), $"Form added: {command.Name}",
-            appId: table.AppId, ct: ct);
+            appId: table.AppId, ct: ct, tableId: table.Id);
         await _refIndexer.ReindexFormAsync(publicId, ct);
 
         return MapToDetail(created);

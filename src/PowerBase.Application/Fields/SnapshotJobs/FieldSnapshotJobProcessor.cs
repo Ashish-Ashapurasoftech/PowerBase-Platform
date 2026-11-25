@@ -84,7 +84,7 @@ public class FieldSnapshotJobProcessor
                         $"Snapshot field '{label}' reinitialized in {table.Name}", appId: table.AppId,
                         oldValues: JsonSerializer.Serialize(new Dictionary<string, string?> { [label] = Text(stored) }),
                         newValues: JsonSerializer.Serialize(new Dictionary<string, string?> { [label] = Text(values[i]) }),
-                        ct: ct);
+                        ct: ct, tableId: table.Id, recordNumber: present[i].Id);
             }
             await _uow.CommitAsync(ct);
         }
@@ -107,7 +107,7 @@ public class FieldSnapshotJobProcessor
         await _auditRepo.LogActivityAsync(
             AuditActions.Updated, AuditEntityTypes.AppField, job.FieldPublicId.ToString(),
             $"Snapshot field '{job.FieldLabel}' reinitialized in {table.Name}: {processed:N0} record(s) read, {changed:N0} changed ({status})",
-            appId: table.AppId, ct: ct);
+            appId: table.AppId, ct: ct, tableId: table.Id);
     }
 
     private static string? Text(object? v) => v is null or DBNull ? null : Convert.ToString(v, CultureInfo.InvariantCulture);

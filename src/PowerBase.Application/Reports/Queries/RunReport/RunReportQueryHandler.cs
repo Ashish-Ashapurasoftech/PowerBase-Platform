@@ -64,6 +64,9 @@ public class RunReportQueryHandler
     private readonly IReportRepository _reportRepo;
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
+    /// <summary>For filtering a Reference by the key its grid shows (see <see cref="ReferenceDisplayFilter"/>). Optional only so
+    /// older test setups still build; the app always provides it.</summary>
+    private readonly IRelationshipRepository? _relRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly IUserRepository _userRepo;
@@ -137,8 +140,10 @@ public class RunReportQueryHandler
         IAppRepository? appRepo = null,
         ISearchOutbox? searchOutbox = null,
         ISearchFieldJobs? searchFieldJobs = null,
-        IServerTiming? serverTiming = null)
+        IServerTiming? serverTiming = null,
+        IRelationshipRepository? relRepo = null)
     {
+        _relRepo = relRepo;
         _timing = serverTiming ?? NoServerTiming.Instance;
         _searchOutbox = searchOutbox;
         _searchFieldJobs = searchFieldJobs;
@@ -421,6 +426,18 @@ public class RunReportQueryHandler
 
         // Merge runtime filters (dynamic/quick-search) into the user filter tree
         userFilterTree = MergeRuntimeFilters(userFilterTree, allFields, runtimeFilters);
+
+        // A Reference is filtered by what its grid shows — its parent's key (Program ID), or the original text an unlinked
+        // row kept — not by the Record ID# its column stores. The key is read through stand-in lookups the SQL layer compiles.
+        if (_relRepo is not null && ReferenceKeys.AnyReference(allFields, SummaryEncryptionGuard.ConditionFieldIds(userFilterTree)))
+        {
+            var referenceKeys = await Timed("referencekeys", ReferenceKeys.LoadAsync(table.Id, allFields, _relRepo, _tableRepo, _fieldRepo, ct));
+            if (ReferenceDisplayFilter.Rewrite(userFilterTree, allFields, referenceKeys) is { } display)
+            {
+                userFilterTree = display.Tree;
+                if (display.StandIns.Count > 0) allFields = [.. allFields, .. display.StandIns];
+            }
+        }
 
         var columns = selectedFields.Select(f => new ReportColumnInfo
         {
@@ -1434,7 +1451,7 @@ public class RunReportQueryHandler
         return new FilterCondition
         {
             FieldId = cond.FieldId, Operator = cond.Operator, SubField = cond.SubField,
-            Value = resolved, ValueMode = "literal", ValueFieldId = null,
+            Value = resolved, ValueMode = "literal", ValueFieldId = null, ValueType = cond.ValueType,
         };
     }
 
@@ -1458,7 +1475,7 @@ public class RunReportQueryHandler
         FilterCondition Cond(string op, DateTime value) => new()
         {
             FieldId = cond.FieldId, SubField = cond.SubField,
-            Operator = op, Value = value.ToString(isoFormat), ValueMode = "literal",
+            Operator = op, Value = value.ToString(isoFormat), ValueMode = "literal", ValueType = cond.ValueType,
         };
 
         return isDuring

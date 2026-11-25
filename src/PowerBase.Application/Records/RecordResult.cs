@@ -46,6 +46,12 @@ public class RecordResult
                     "Formula_ListUser" => ResolveUserIdList(computed, userNames),
                     _ => computed,
                 };
+                // A Lookup links to the record its Reference points at: the Record ID# its reference column holds (see
+                // the Reference case below), when that column was read with the row.
+                if (field.TypeCode == "Lookup" && SummaryLookupSources.Settings(field)?.ReferenceFid is int lookupRefFid
+                    && row.TryGetValue(PhysicalNaming.ColumnName(lookupRefFid), out var lookupRefVal) && lookupRefVal is not null
+                    && long.TryParse(lookupRefVal.ToString(), out var lookupParentRid))
+                    fieldData[$"{cfid}__rid"] = lookupParentRid;
                 continue;
             }
 
@@ -92,6 +98,12 @@ public class RecordResult
                         fieldData[fid] = val;
                     }
                 }
+
+                // A Reference's column always holds the parent's Record ID#, but the value shown can be its display key
+                // text ("ACME-01"). "{fid}__rid" keeps the Record ID#, so a field set to "Display as a link to the parent
+                // record" can be a real link (/rid/{id}/view) the browser can hover, copy and open in a new tab.
+                if (field.TypeCode == "Reference" && val is not null && long.TryParse(val.ToString(), out var parentRid))
+                    fieldData[$"{fid}__rid"] = parentRid;
             }
         }
 

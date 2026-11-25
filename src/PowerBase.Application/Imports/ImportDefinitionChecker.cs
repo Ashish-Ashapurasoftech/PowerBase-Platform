@@ -61,7 +61,8 @@ public sealed class ImportDefinitionChecker(
         if (ImportVariables.Check(stored.Variables) is { } variableProblem) return Cap(variableProblem);
         var (variableValues, variableError) = ImportVariables.Evaluate(stored.Variables, formulaEngine, new EvaluationOptions { UtcNow = DateTime.UtcNow });
         if (variableError is not null) return Cap(variableError);
-        if (ImportVariables.TryApply(stored, variableValues, out var config) is { } tokenProblem) return Cap(tokenProblem);
+        if (ImportVariables.TryApply(stored, variableValues, out var tokensApplied) is { } tokenProblem) return Cap(tokenProblem);
+        if (ImportFilterOperands.TryApply(tokensApplied, formulaEngine, new EvaluationOptions { UtcNow = DateTime.UtcNow }, out var config) is { } operandProblem) return Cap(operandProblem);
         var variableColumns = ImportVariables.AsColumns(config.Variables);
         IReadOnlyList<AppField> sourceFields;
         if (isFile)

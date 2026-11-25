@@ -6,4 +6,6 @@ public record ListReportsByTablePagedQuery(
     int PageSize = 20,
     string? Search = null,
     string SortBy = "name",
-    bool SortDesc = false);
+    bool SortDesc = false,
+    /// <summary>The Table Settings reports list also lists Hidden reports (they are unlisted everywhere else).</summary>
+    bool IncludeHidden = false);

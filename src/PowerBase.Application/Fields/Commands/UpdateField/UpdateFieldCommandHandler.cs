@@ -339,7 +339,7 @@ public class UpdateFieldCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, existing.PublicId.ToString(),
-            $"Field modified: {label} In TableName : {table.Name}", appId: table.AppId, ct: ct);
+            $"Field modified: {label} In TableName : {table.Name}", appId: table.AppId, ct: ct, tableId: table.Id);
 
         // "Initialize field for existing records": captures the snapshot for every record that already exists, as a background job.
         if (command.InitializeSnapshotForExisting && snapshotSourceFid.HasValue && _snapshotJobs is not null)

@@ -52,6 +52,45 @@ public class PipelineFormulaValueTests
         Run(value, new() { [Id] = "42" }).Should().Be("CST00042");
     }
 
+    // Date / Date & time / Time fields written as a <> formula: a DateTime reference reads as a DateTime (not text), so
+    // date arithmetic works, and a Time field reads as a formula Time.
+    [Fact]
+    public void Evaluate_DateTimeReference_PlusDays()
+    {
+        Run(Formula("[" + When + "] + Days(1)", (When, "datetime")), new() { [When] = "2026-11-19T08:07:05.124" })
+            .Should().StartWith("2026-11-20");
+    }
+
+    [Fact]
+    public void Evaluate_DateFromDateTimeReference_PlusDays()
+    {
+        Run(Formula("ToDate([" + When + "]) + Days(7)", (When, "datetime")), new() { [When] = "2026-11-19T08:07:05" })
+            .Should().StartWith("2026-11-26");
+    }
+
+    [Fact]
+    public void Evaluate_DateReference_AdjustMonth()
+    {
+        Run(Formula("AdjustMonth([" + When + "], 1)", (When, "date")), new() { [When] = "2026-11-25T00:00:00" })
+            .Should().StartWith("2026-12-25");
+    }
+
+    [Fact]
+    public void Evaluate_TimeOfDayFromDateTimeReference()
+    {
+        Run(Formula("ToTimeOfDay([" + When + "])", (When, "datetime")), new() { [When] = "2026-11-19T08:07:05" })
+            .Should().StartWith("08:07");
+    }
+
+    [Theory]
+    [InlineData("08:07:05")]
+    [InlineData("2026-11-19T08:07:05")]
+    public void Evaluate_TimeReference_ReadsAsTime(string raw)
+    {
+        PipelineFormulaValue.TypeCode("time").Should().Be("Time");
+        Run(Formula("Hour([" + When + "])", (When, "time")), new() { [When] = raw }).Should().Be("8");
+    }
+
     [Fact]
     public void Evaluate_NumberArithmetic()
     {

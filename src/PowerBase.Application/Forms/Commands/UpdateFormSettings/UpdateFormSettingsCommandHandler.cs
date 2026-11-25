@@ -44,6 +44,6 @@ public class UpdateFormSettingsCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Updated, AuditEntityTypes.Form, form.Id.ToString(), $"Form modified: {command.Name}",
-            ct: ct);
+            ct: ct, tableId: form.AppTableId);
     }
 }

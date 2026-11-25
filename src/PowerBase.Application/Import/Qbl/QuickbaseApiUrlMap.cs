@@ -44,7 +44,7 @@ public static class QuickbaseApiUrlMap
     {
         "API_AddRecord", "API_EditRecord", "API_DeleteRecord", "API_GetFieldProperties", "API_UploadFile", "API_GetUserInfo",
         "API_GetUserRole", "API_UserRoles", "API_AddUserToRole", "API_ProvisionUser", "API_SendInvitation", "API_ImportFromCSV",
-        "API_RunImport", "API_GenAddRecordForm",
+        "API_RunImport", "API_GenAddRecordForm", "API_DoQuery", "API_DoQueryCount",
     };
 
     /// <summary>Credentials Quickbase reads from the XML request; the PowerBase account authenticates instead.</summary>
@@ -172,9 +172,17 @@ public static class QuickbaseApiUrlMap
             first = false;
         }
         var hasCredentialsInBody = body is not null && Regex.IsMatch(body, "<(usertoken|ticket|apptoken)>", RegexOptions.IgnoreCase);
+        // API_DoQuery / API_DoQueryCount: qid is the Quickbase query number of the report. PowerBase numbers a table's reports the
+        // same way (List All 1, List Changes 2, then 5, 6… in the order they were made), but an imported table's other reports may
+        // get other numbers than in Quickbase — so a numeric qid is checked once; qname (the report name) needs no check.
+        var qid = query.FirstOrDefault(p => p.Key.Equals("qid", StringComparison.OrdinalIgnoreCase)).Value?.Trim();
+        var qidReview = action is not null && action.StartsWith("API_DoQuery", StringComparison.OrdinalIgnoreCase)
+                        && qid is { Length: > 0 } && qid is not ("1" or "2")
+            ? $"qid '{qid}' is the Quickbase query number of a report; check it is the same report in PowerBase (or use qname=<report name>)"
+            : null;
         // PowerBase answers GET and POST like Quickbase; the method is kept.
         return new Mapped(Merge(parts), method is "GET" ? "GET" : "POST", (method is "GET" ? "GET" : "POST") + " /db/{dbid}" + (action is null ? "" : "?a=" + action), Array.Empty<string>(), false,
-            hasCredentialsInBody ? "the XML body carries Quickbase credentials (usertoken / ticket / apptoken); remove them, the PowerBase account signs the call" : null);
+            hasCredentialsInBody ? "the XML body carries Quickbase credentials (usertoken / ticket / apptoken); remove them, the PowerBase account signs the call" : qidReview);
     }
 
     /// <summary>Quickbase report ids are numbers per table (1, 2, …); PowerBase report ids are its own, so the id must be chosen again.</summary>

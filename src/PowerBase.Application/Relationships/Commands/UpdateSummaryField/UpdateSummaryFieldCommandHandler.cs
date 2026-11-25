@@ -121,7 +121,7 @@ public class UpdateSummaryFieldCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, rel.Id.ToString(),
-            $"Summary field '{label}' updated on {parent.Name}", appId: parent.AppId, ct: ct);
+            $"Summary field '{label}' updated on {parent.Name}", appId: parent.AppId, ct: ct, tableId: parent.Id);
 
         return await _queries.GetAsync(rel.PublicId, ct);
     }

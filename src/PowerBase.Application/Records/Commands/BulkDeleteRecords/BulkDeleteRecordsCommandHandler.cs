@@ -228,7 +228,7 @@ public class BulkDeleteRecordsCommandHandler
                     command.TablePublicId.ToString(),
                     $"{uniqueRecordPublicIds.Count} record(s) bulk-deleted from {table.Name}",
                     appId: table.AppId,
-                    ct: ct);
+                    ct: ct, tableId: table.Id);
             }
 
             await _uow.CommitAsync(ct);
