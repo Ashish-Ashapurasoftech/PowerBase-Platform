@@ -28,7 +28,7 @@ public class StoredColumnRoundTripTests : IClassFixture<ComputeSqlFixture>, IAsy
     private const long Dept = 10, Emp = 11;
     private readonly ComputeSqlFixture _db;
     private readonly long _tenantId = Random.Shared.NextInt64(1_000_000, long.MaxValue);
-    private readonly ComputeOptions _options = new() { PauseBetweenBatchesMs = 0, SummaryBatchSize = 100, LookupBatchSize = 100, MaxSessionsPerDatabase = 2 };
+    private readonly ComputeOptions _options = new() { PauseBetweenBatchesMs = 0, SummaryBatchSize = 100, LookupBatchSize = 100, MaxSessionsPerDatabase = 2, ReconcileMinAgeHours = 0 };
     private long _nameLookupId, _totalId, _countId, _combinedId;
 
     public StoredColumnRoundTripTests(ComputeSqlFixture db) => _db = db;
@@ -345,6 +345,19 @@ public class StoredColumnRoundTripTests : IClassFixture<ComputeSqlFixture>, IAsy
         (await WrongValuesAsync()).Should().Be((0, 0, 0));
 
         (await builder.ReconcileAsync(_options, CancellationToken.None)).Sum(o => o.Differences).Should().Be(0, "a second check finds nothing");
+    }
+
+    [Fact]
+    public async Task The_nightly_check_leaves_a_field_alone_that_was_built_a_moment_ago()
+    {
+        var (builder, _) = Worker();
+        await builder.BuildPendingAsync(_options, CancellationToken.None);
+
+        // Default settings: a field built or checked within ReconcileMinAgeHours is not read again (a restart used to re-check everything).
+        var defaults = new ComputeOptions { PauseBetweenBatchesMs = 0, MaxSessionsPerDatabase = 2 };
+        (await builder.ReconcileAsync(defaults, CancellationToken.None)).Should().BeEmpty();
+        // Age 0 = always check: the same fields are checked.
+        (await builder.ReconcileAsync(_options, CancellationToken.None)).Should().NotBeEmpty();
     }
 
     [Fact]

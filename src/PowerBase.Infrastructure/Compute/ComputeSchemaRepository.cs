@@ -82,11 +82,23 @@ public sealed class ComputeSchemaRepository : TenantRepositoryBase
     public async Task<bool> MarkReadyAsync(long fieldId, int version, CancellationToken ct = default)
     {
         await using var connection = await OpenConnectionAsync(ct);
-        return await connection.ExecuteAsync(new CommandDefinition("""
+        var ready = await connection.ExecuteAsync(new CommandDefinition("""
             UPDATE meta.AppField SET MaterializeState = @ready, MaterializedOn = SYSUTCDATETIME()
             WHERE Id = @fieldId AND MaterializeVersion = @version AND MaterializeMode = @on AND MaterializeState = @building
             """, new { fieldId, version, ready = MaterializeStates.Ready, on = MaterializeModes.On, building = MaterializeStates.Building },
             cancellationToken: ct)) == 1;
+        if (ready) await ClearCheckpointAsync(fieldId, ct);
+        return ready;
+    }
+
+    /// <summary>The nightly check just made the field's values current (a Ready field is not checked again within ReconcileMinAgeHours).</summary>
+    public async Task TouchMaterializedAsync(long fieldId, int version, CancellationToken ct = default)
+    {
+        await using var connection = await OpenConnectionAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition("""
+            UPDATE meta.AppField SET MaterializedOn = SYSUTCDATETIME()
+            WHERE Id = @fieldId AND MaterializeVersion = @version AND MaterializeMode = @on AND MaterializeState = @ready
+            """, new { fieldId, version, on = MaterializeModes.On, ready = MaterializeStates.Ready }, cancellationToken: ct));
     }
 
     /// <summary>A build that cannot finish: reads keep today's path, nothing is retried until someone resets the field.</summary>
@@ -97,6 +109,7 @@ public sealed class ComputeSchemaRepository : TenantRepositoryBase
             UPDATE meta.AppField SET MaterializeState = @failed
             WHERE Id = @fieldId AND MaterializeVersion = @version AND MaterializeMode = @on
             """, new { fieldId, version, failed = MaterializeStates.Failed, on = MaterializeModes.On }, cancellationToken: ct));
+        await ClearCheckpointAsync(fieldId, ct);
     }
 
     /// <summary>
@@ -119,6 +132,68 @@ public sealed class ComputeSchemaRepository : TenantRepositoryBase
         await using var connection = await OpenConnectionAsync(ct);
         await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE meta.AppField SET MaterializedColumnName = NULL, MaterializedOn = NULL WHERE Id = @fieldId", new { fieldId }, cancellationToken: ct));
+    }
+
+    // ── build checkpoints (migration 100): a first build continues where it stopped ─────────────────────
+
+    /// <summary>One Id range of a field build and how far it got (see meta.ComputeBuildCheckpoint).</summary>
+    public sealed record BuildSlice(long After, long UpTo, long DoneThroughId, long RowsWritten, long Watermark, bool IsDone);
+
+    /// <summary>The slices a build of this field and version already recorded; empty for a build that never started (or an old database).</summary>
+    public async Task<IReadOnlyList<BuildSlice>> LoadCheckpointAsync(long fieldId, int version, CancellationToken ct = default)
+    {
+        await using var connection = await OpenConnectionAsync(ct);
+        try
+        {
+            return (await connection.QueryAsync<BuildSlice>(new CommandDefinition("""
+                SELECT SliceAfter AS After, SliceUpTo AS UpTo, DoneThroughId, RowsWritten, Watermark, IsDone
+                FROM meta.ComputeBuildCheckpoint WHERE FieldId = @fieldId AND Version = @version ORDER BY SliceAfter
+                """, new { fieldId, version }, cancellationToken: ct))).AsList();
+        }
+        catch (Microsoft.Data.SqlClient.SqlException ex) when (ex.Number == 208) { return []; }   // migration 100 not applied yet: no resume
+    }
+
+    /// <summary>Records the slices of a fresh build (each starting at its own After). Existing rows are kept (another replica got there first).</summary>
+    public async Task SaveCheckpointAsync(long fieldId, int version, IReadOnlyList<(long After, long UpTo)> slices, long watermark, CancellationToken ct = default)
+    {
+        await using var connection = await OpenConnectionAsync(ct);
+        try
+        {
+            // Older versions of the same field are dead (a new version restarts the build): clear them first.
+            await connection.ExecuteAsync(new CommandDefinition("DELETE FROM meta.ComputeBuildCheckpoint WHERE FieldId = @fieldId AND Version <> @version",
+                new { fieldId, version }, cancellationToken: ct));
+            foreach (var (after, upTo) in slices)
+                await connection.ExecuteAsync(new CommandDefinition("""
+                    IF NOT EXISTS (SELECT 1 FROM meta.ComputeBuildCheckpoint WHERE FieldId = @fieldId AND Version = @version AND SliceAfter = @after)
+                        INSERT INTO meta.ComputeBuildCheckpoint (FieldId, Version, SliceAfter, SliceUpTo, DoneThroughId, Watermark)
+                        VALUES (@fieldId, @version, @after, @upTo, @after, @watermark)
+                    """, new { fieldId, version, after, upTo, watermark }, cancellationToken: ct));
+        }
+        catch (Microsoft.Data.SqlClient.SqlException ex) when (ex.Number == 208) { /* migration 100 not applied: builds simply cannot resume */ }
+    }
+
+    /// <summary>Moves a slice forward: everything up to <paramref name="doneThroughId"/> is written. Never goes backwards.</summary>
+    public async Task AdvanceCheckpointAsync(long fieldId, int version, long sliceAfter, long doneThroughId, long rowsWrittenDelta, bool isDone, CancellationToken ct = default)
+    {
+        await using var connection = await OpenConnectionAsync(ct);
+        try
+        {
+            await connection.ExecuteAsync(new CommandDefinition("""
+                UPDATE meta.ComputeBuildCheckpoint
+                SET DoneThroughId = CASE WHEN @done > DoneThroughId THEN @done ELSE DoneThroughId END,
+                    RowsWritten = RowsWritten + @delta, IsDone = CASE WHEN @isDone = 1 THEN 1 ELSE IsDone END, UpdatedOn = SYSUTCDATETIME()
+                WHERE FieldId = @fieldId AND Version = @version AND SliceAfter = @sliceAfter
+                """, new { fieldId, version, sliceAfter, done = doneThroughId, delta = rowsWrittenDelta, isDone }, cancellationToken: ct));
+        }
+        catch (Microsoft.Data.SqlClient.SqlException ex) when (ex.Number == 208) { }
+    }
+
+    /// <summary>The build is over (Ready, Failed, superseded, switched off): its progress is not needed any more.</summary>
+    public async Task ClearCheckpointAsync(long fieldId, CancellationToken ct = default)
+    {
+        await using var connection = await OpenConnectionAsync(ct);
+        try { await connection.ExecuteAsync(new CommandDefinition("DELETE FROM meta.ComputeBuildCheckpoint WHERE FieldId = @fieldId", new { fieldId }, cancellationToken: ct)); }
+        catch (Microsoft.Data.SqlClient.SqlException ex) when (ex.Number == 208) { }
     }
 
     /// <summary>The field can never be stored (MaterializeMode = 2): it stays on today's dynamic path for good.</summary>

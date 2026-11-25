@@ -198,6 +198,34 @@ public class StoredFormulaAndChainTests : IClassFixture<ComputeSqlFixture>, IAsy
     }
 
     [Fact]
+    public async Task An_interrupted_build_continues_from_its_checkpoint_and_does_not_redo_finished_ranges()
+    {
+        await Worker().Builder.BuildPendingAsync(_options, CancellationToken.None);   // everything built once: the column exists and is correct
+        await using var conn = await OpenAsync();
+        var version = await conn.ExecuteScalarAsync<int>("SELECT MaterializeVersion FROM meta.AppField WHERE Id = @id", new { id = _annual });
+
+        // Simulate a build that was stopped half way: the field is Building again, three ranges were recorded (the first finished, the second
+        // got as far as Id 150, the third not started), and every stored value is a sentinel a recompute would overwrite.
+        await conn.ExecuteAsync("UPDATE meta.AppField SET MaterializeState = 1 WHERE Id = @id", new { id = _annual });
+        await conn.ExecuteAsync($"UPDATE data.t_{Emp} SET c_12 = -999");
+        await conn.ExecuteAsync("""
+            DELETE FROM meta.ComputeBuildCheckpoint WHERE FieldId = @id;
+            INSERT INTO meta.ComputeBuildCheckpoint (FieldId, Version, SliceAfter, SliceUpTo, DoneThroughId, Watermark, IsDone)
+            VALUES (@id, @version, 0, 100, 100, 0, 1), (@id, @version, 100, 200, 150, 0, 0), (@id, @version, 200, 9223372036854775807, 200, 0, 0)
+            """, new { id = _annual, version });
+
+        var outcomes = await Worker().Builder.BuildPendingAsync(_options, CancellationToken.None);
+
+        outcomes.Should().ContainSingle(o => o.FieldId == _annual && o.Outcome == "ready");
+        (await conn.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM data.t_{Emp} WHERE Id <= 150 AND c_12 = -999"))
+            .Should().Be(150, "the finished range and the part of the second range before the checkpoint were not recomputed");
+        (await conn.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM data.t_{Emp} WHERE Id > 150 AND ISNULL(c_12, -1) <> ISNULL(f_7 * 12, -1)"))
+            .Should().Be(0, "everything after the checkpoint was built, the open-ended last range included");
+        (await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM meta.ComputeBuildCheckpoint WHERE FieldId = @id", new { id = _annual }))
+            .Should().Be(0, "a finished build leaves no checkpoint behind");
+    }
+
+    [Fact]
     public async Task A_task_change_flows_through_the_chain_to_the_department_and_the_formula()
     {
         var (builder, processor) = Worker();

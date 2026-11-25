@@ -31,6 +31,38 @@ public sealed class ComputeModel
     public DependencyGraph Graph { get; }
     public IReadOnlyDictionary<FieldKey, (AppField Field, MaterializeDecision Decision)> Decisions { get; }
 
+    private readonly ConcurrentDictionary<FieldKey, IReadOnlySet<int>?> _rowReads = new();
+
+    /// <summary>
+    /// The fids of the plan's OWN table that its value is worked out from (null = unknown: read every column). A wide table (hundreds of
+    /// fields) read in full for every batch of every field is what made first builds crawl, so a build reads only these columns. Taken from
+    /// the dependency graph — the same inputs that decide which change makes the field stale — followed through the calculated fields of
+    /// the same table the field reads (a lookup it reads needs that lookup's reference column). Inputs on other tables are not our rows:
+    /// the read code fetches those itself. A field whose reads the graph cannot list falls back to all columns.
+    /// </summary>
+    public IReadOnlySet<int>? OwnTableReadsOf(MaterializePlan plan) =>
+        _rowReads.GetOrAdd(plan.Key, _ =>
+        {
+            var reads = new HashSet<int>();
+            var seen = new HashSet<FieldKey>();
+            var stack = new Stack<FieldKey>();
+            stack.Push(plan.Key);
+            while (stack.Count > 0)
+            {
+                var key = stack.Pop();
+                if (!seen.Add(key)) continue;
+                if (Graph.UnknownInputs.Contains(key)) return null;
+                foreach (var input in Graph.InputsOf(key))
+                {
+                    if (input.Fid == FieldKey.RowsFid || input.TableId != plan.TableId) continue;
+                    reads.Add(input.Fid);
+                    if (Decisions.ContainsKey(input)) stack.Push(input);   // a calculated field of this table: what IT reads is needed too
+                }
+            }
+            reads.Remove(plan.Fid);
+            return reads;
+        });
+
     /// <summary>Switched-on fields whose column exists and is kept up to date by live changes: Building or Ready, and allowed.</summary>
     public IEnumerable<(AppField Field, MaterializePlan Plan)> Live() =>
         Decisions.Values

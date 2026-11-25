@@ -28,15 +28,19 @@ public static class ComputeConfig
         o.SummaryBatchSize = Math.Clamp(Int(s["SummaryBatchSize"], o.SummaryBatchSize), 100, 5000);
         o.LookupBatchSize = Math.Clamp(Int(s["LookupBatchSize"], o.LookupBatchSize), 100, 5000);
         o.DrainBatchSize = Math.Clamp(Int(s["DrainBatchSize"], o.DrainBatchSize), 1, 5000);
-        // Up to 16 worker sessions per database (15 for background work, slot 1 always kept for live changes). The load guard still
+        // Up to 64 worker sessions per database (63 for background work, slot 1 always kept for live changes). The load guard still
         // backs off above GuardSlow/StopPercent, so a small database is protected by the guard, not by this ceiling.
-        o.MaxSessionsPerDatabase = Math.Clamp(Int(s["MaxSessionsPerDatabase"], o.MaxSessionsPerDatabase), 1, 16);
-        o.BackgroundSessionsPerDatabase = Math.Clamp(Int(s["BackgroundSessionsPerDatabase"], o.BackgroundSessionsPerDatabase), 1, 15);
+        o.MaxSessionsPerDatabase = Math.Clamp(Int(s["MaxSessionsPerDatabase"], o.MaxSessionsPerDatabase), 1, 64);
+        o.BackgroundSessionsPerDatabase = Math.Clamp(Int(s["BackgroundSessionsPerDatabase"], o.BackgroundSessionsPerDatabase), 1, 63);
         o.PriorityTables = string.IsNullOrWhiteSpace(s["PriorityTables"]) ? o.PriorityTables : s["PriorityTables"];
-        o.BuildsPerReplica = Math.Clamp(Int(s["BuildsPerReplica"], o.BuildsPerReplica), 0, 15);
+        o.BuildOnlyApps = string.IsNullOrWhiteSpace(s["BuildOnlyApps"]) ? o.BuildOnlyApps : s["BuildOnlyApps"];
+        o.BuildsPerReplica = Math.Clamp(Int(s["BuildsPerReplica"], o.BuildsPerReplica), 0, 63);
         o.ProjectedBatchSize = Math.Clamp(Int(s["ProjectedBatchSize"], o.ProjectedBatchSize), 100, 5000);
-        o.SlicesPerField = Math.Clamp(Int(s["SlicesPerField"], o.SlicesPerField), 1, 8);
+        o.SlicesPerField = Math.Clamp(Int(s["SlicesPerField"], o.SlicesPerField), 1, 16);
         o.SliceMinRows = Math.Max(1, Int(s["SliceMinRows"], o.SliceMinRows));
+        o.NarrowReads = Bool(s["NarrowReads"], o.NarrowReads);
+        o.FastLaneBuilds = Math.Clamp(Int(s["FastLaneBuilds"], o.FastLaneBuilds), 0, 62);
+        o.FastLaneMaxRows = Math.Max(1, Int(s["FastLaneMaxRows"], o.FastLaneMaxRows));
         o.BuildRoundMinutes = Math.Clamp(Int(s["BuildRoundMinutes"], o.BuildRoundMinutes), 1, 24 * 60);
         o.PauseBetweenBatchesMs = Int(s["PauseBetweenBatchesMs"], o.PauseBetweenBatchesMs);
         o.GuardSlowPercent = Int(s["GuardSlowPercent"], o.GuardSlowPercent);
@@ -45,6 +49,8 @@ public static class ComputeConfig
         o.OffPeakEndHourUtc = SignedInt(s["OffPeakEndHourUtc"], o.OffPeakEndHourUtc);
         o.BackfillPollSeconds = Int(s["BackfillPollSeconds"], o.BackfillPollSeconds);
         o.ReconcileHourUtc = Int(s["ReconcileHourUtc"], o.ReconcileHourUtc);
+        o.ReconcileWhileBuilding = Bool(s["ReconcileWhileBuilding"], o.ReconcileWhileBuilding);
+        o.ReconcileMinAgeHours = Int(s["ReconcileMinAgeHours"], o.ReconcileMinAgeHours);
         o.StoreAllCalculatedFields = Bool(s["StoreAllCalculatedFields"], o.StoreAllCalculatedFields);
         o.MinRecordsForStoredColumns = Math.Max(0, SignedInt(s["MinRecordsForStoredColumns"], o.MinRecordsForStoredColumns));
         o.IndexesEnabled =Bool(s["IndexesEnabled"], o.IndexesEnabled);

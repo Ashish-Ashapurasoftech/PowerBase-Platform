@@ -39,15 +39,14 @@ public static class DatabaseGuard
     /// reconciliation) may only take the highest slots (ComputeOptions.BackgroundSessionsPerDatabase), so live changes always have slot 1. Null when no slot frees up within
     /// <paramref name="wait"/>.
     /// </summary>
+    /// <param name="keepFree">Background work only: leave this many of the lowest background slots to others (the fast lane of small
+    /// fields, <see cref="ComputeOptions.FastLaneReserved"/>). At least the highest slot always stays available.</param>
     public static async Task<GuardedConnection?> AcquireAsync(Func<CancellationToken, Task<SqlConnection>> open, ComputeOptions options,
-        bool backgroundOnly, TimeSpan wait, ILogger? logger, CancellationToken ct)
+        bool backgroundOnly, TimeSpan wait, ILogger? logger, CancellationToken ct, int keepFree = 0)
     {
         var connection = await open(ct);
         await connection.OpenAsync(ct);
-        // Background work takes only the highest slots (BackgroundSessionsPerDatabase of them): slot 1 always stays free for live changes.
-        var first = backgroundOnly
-            ? Math.Clamp(options.MaxSessionsPerDatabase - Math.Max(1, options.BackgroundSessionsPerDatabase) + 1, Math.Min(2, options.MaxSessionsPerDatabase), options.MaxSessionsPerDatabase)
-            : 1;
+        var first = FirstSlot(options, backgroundOnly, keepFree);
         var deadline = DateTime.UtcNow + wait;
         try
         {
@@ -74,6 +73,18 @@ public static class DatabaseGuard
         }
         await connection.DisposeAsync();
         return null;
+    }
+
+    /// <summary>
+    /// The lowest slot a session may take. Background work takes only the highest slots (BackgroundSessionsPerDatabase of them), so slot 1
+    /// always stays free for live changes; with <paramref name="keepFree"/> it also skips that many of its lowest slots.
+    /// </summary>
+    internal static int FirstSlot(ComputeOptions options, bool backgroundOnly, int keepFree = 0)
+    {
+        if (!backgroundOnly) return 1;
+        var max = options.MaxSessionsPerDatabase;
+        var first = Math.Clamp(max - Math.Max(1, options.BackgroundSessionsPerDatabase) + 1, Math.Min(2, max), max);
+        return Math.Min(max, first + Math.Max(0, keepFree));
     }
 }
 
@@ -122,16 +133,25 @@ public sealed class GuardedConnection : IAsyncDisposable
     public Task AfterBatchAsync(CancellationToken ct) =>
         _options.PauseBetweenBatchesMs > 0 ? Task.Delay(_options.PauseBetweenBatchesMs, ct) : Task.CompletedTask;
 
+    /// <summary>sys.dm_db_resource_stats has one row per 15 seconds, so one reading per database is shared by every session of this process
+    /// for a few seconds: with 16 sessions the guard used to ask the same question 16 times per batch round.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime ReadUtc, (double? Cpu, double? Io, double? Log) Load)> LoadCache = new();
+    internal static readonly TimeSpan LoadCacheFor = TimeSpan.FromSeconds(4);
+
     private async Task<(double? Cpu, double? Io, double? Log)> ReadLoadAsync(CancellationToken ct)
     {
         if (_statsUnavailable) return (null, null, null);
+        var key = Connection.DataSource + "/" + Connection.Database;
+        if (LoadCache.TryGetValue(key, out var cached) && DateTime.UtcNow - cached.ReadUtc < LoadCacheFor) return cached.Load;
         try
         {
             var row = await Connection.QuerySingleOrDefaultAsync<(decimal? Cpu, decimal? Io, decimal? Log)?>(new CommandDefinition("""
                 SELECT TOP (1) avg_cpu_percent, avg_data_io_percent, avg_log_write_percent
                 FROM sys.dm_db_resource_stats ORDER BY end_time DESC
                 """, cancellationToken: ct));
-            return row is { } r ? ((double?)r.Cpu, (double?)r.Io, (double?)r.Log) : (null, null, null);
+            var load = row is { } r ? ((double?)r.Cpu, (double?)r.Io, (double?)r.Log) : (null, null, null);
+            LoadCache[key] = (DateTime.UtcNow, load);
+            return load;
         }
         catch (SqlException ex) when (ex.Number == InvalidObject)
         {

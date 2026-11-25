@@ -88,17 +88,58 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
     {
         var all = tableIds.Distinct().ToList();
         if (minRecords <= 0 || all.Count == 0) return all.ToHashSet();
-        var names = all.Select(PhysicalNaming.TableName).ToList();
-        var counts = await conn.QueryAsync<(string Name, long Rows)>(new CommandDefinition("""
-            SELECT o.name AS Name, SUM(st.row_count) AS Rows
-            FROM sys.dm_db_partition_stats st
-            JOIN sys.objects o ON o.object_id = st.object_id
-            JOIN sys.schemas s ON s.schema_id = o.schema_id AND s.name = 'data'
-            WHERE st.index_id IN (0, 1) AND o.name IN @names
-            GROUP BY o.name
-            """, new { names }, cancellationToken: ct));
-        var big = counts.Where(c => c.Rows >= minRecords).Select(c => c.Name).ToHashSet();
-        return all.Where(id => big.Contains(PhysicalNaming.TableName(id))).ToHashSet();
+        var counts = await TableRowCountsAsync(conn, all, ct);
+        return all.Where(id => counts.TryGetValue(id, out var rows) && rows >= minRecords).ToHashSet();
+    }
+
+    /// <summary>Approximate row count per table (partition statistics: instant, no scan). A table whose data.t_ table is missing is left out.</summary>
+    private static async Task<Dictionary<long, long>> TableRowCountsAsync(Microsoft.Data.SqlClient.SqlConnection conn, IEnumerable<long> tableIds,
+        CancellationToken ct)
+    {
+        var byName = tableIds.Distinct().ToDictionary(PhysicalNaming.TableName);
+        var result = new Dictionary<long, long>();
+        foreach (var chunk in byName.Keys.Chunk(1000))
+        {
+            var counts = await conn.QueryAsync<(string Name, long Rows)>(new CommandDefinition("""
+                SELECT o.name AS Name, SUM(st.row_count) AS Rows
+                FROM sys.dm_db_partition_stats st
+                JOIN sys.objects o ON o.object_id = st.object_id
+                JOIN sys.schemas s ON s.schema_id = o.schema_id AND s.name = 'data'
+                WHERE st.index_id IN (0, 1) AND o.name IN @chunk
+                GROUP BY o.name
+                """, new { chunk }, cancellationToken: ct));
+            foreach (var (name, rows) in counts) result[byName[name]] = rows;
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// True when the field's build belongs on the fast lane: every table it reads or writes holds fewer than <paramref name="maxRows"/> rows
+    /// (a summary of a small parent over a big child table is big). A field with no plan (refused, not supported yet) costs nothing.
+    /// A table missing from <paramref name="rowCounts"/> counts as empty.
+    /// </summary>
+    internal static bool IsFastLane(MaterializePlan? plan, IReadOnlyDictionary<long, long> rowCounts, long maxRows)
+    {
+        if (plan is null) return true;
+        return LaneTables(plan).All(t => !rowCounts.TryGetValue(t, out var rows) || rows < maxRows);
+    }
+
+    private static IEnumerable<long> LaneTables(MaterializePlan plan) =>
+        InputTables(plan).Append(plan.TableId).Append(MaterializedColumnWriter.ShapeOf(plan).TableId).Distinct();
+
+    /// <summary>
+    /// Splits the build list (already in priority order) into the fast lane (small tables) and the rest, keeping the order inside each.
+    /// No reserved builds = one list, as before.
+    /// </summary>
+    internal static (List<T> Fast, List<T> Big) SplitLanes<T>(IEnumerable<T> ordered, Func<T, MaterializePlan?> planOf,
+        IReadOnlyDictionary<long, long> rowCounts, ComputeOptions options)
+    {
+        var all = ordered.ToList();
+        if (options.FastLaneReserved <= 0) return ([], all);
+        var fast = new List<T>();
+        var big = new List<T>();
+        foreach (var item in all) (IsFastLane(planOf(item), rowCounts, options.FastLaneMaxRows) ? fast : big).Add(item);
+        return (fast, big);
     }
 
     /// <summary>
@@ -137,48 +178,90 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
         // Up to BackgroundSessionsPerDatabase fields side by side, each on its own guarded connection (the guard holds the database to that
         // many background slots and slows or stops them when it is busy).
         var concurrency = options.BuildConcurrency;
+        var onlyApps = options.BuildOnlyAppsFor(QueryContext.TenantId);   // Compute:BuildOnlyApps: null = every app
+        var pending = model.Decisions
+            .Where(d => d.Value.Field.MaterializeMode == MaterializeModes.On && d.Value.Field.MaterializeState is MaterializeStates.None or MaterializeStates.Building)
+            .Where(d => onlyApps is null || model.Schema.AppIdOf(d.Key.TableId) is long app && onlyApps.Contains(app))
+            .OrderBy(d => priority.TryGetValue(d.Key.TableId, out var rank) ? rank : int.MaxValue)
+            .ThenBy(d => order.TryGetValue(d.Key, out var i) ? i : int.MaxValue).ThenBy(d => d.Value.Field.Id)
+            .ToList();
+        if (pending.Count == 0)
+        {
+            var droppedNow = await DropUnusedColumnsAsync(ct);
+            if (droppedNow > 0) _models.Invalidate(QueryContext.TenantId);
+            return outcomes;
+        }
+
+        // Fast lane: FastLaneReserved builds (and database background slots) are kept for fields of small tables, so a few builds of hours on
+        // a big table can no longer hold up hundreds of fields that take a second each. A small field may use any free build; a big one
+        // only the others. No reservation = one lane, exactly as before.
+        var reserved = options.FastLaneReserved;
+        var rowCounts = new Dictionary<long, long>();
+        if (reserved > 0)
+        {
+            await using var conn = await OpenConnectionAsync(ct);
+            rowCounts = await TableRowCountsAsync(conn, pending.Where(d => d.Value.Decision.Plan is not null)
+                .SelectMany(d => LaneTables(d.Value.Decision.Plan!)), ct);
+        }
+        var (fastLane, bigLane) = SplitLanes(pending, d => d.Value.Decision.Plan, rowCounts, options);
+        if (reserved > 0)
+            _logger?.LogInformation("Compute build round: tenant {TenantId}: {Fast} field(s) of small tables on the fast lane ({Reserved} of {Builds} build(s) kept for them), {Big} on big tables.",
+                QueryContext.TenantId, fastLane.Count, reserved, concurrency, bigLane.Count);
+
         using var gate = new SemaphoreSlim(concurrency);
+        using var bigGate = new SemaphoreSlim(Math.Max(1, concurrency - reserved));
         var running = new List<Task>();
         var sync = new object();
-        var busy = false;
         // A round stops starting builds after BuildRoundMinutes: the next one reads the waiting fields (and priorities) again.
         var roundEnds = DateTime.UtcNow.AddMinutes(options.BuildRoundMinutes);
-        foreach (var (key, (field, decision)) in model.Decisions
-                     .Where(d => d.Value.Field.MaterializeMode == MaterializeModes.On && d.Value.Field.MaterializeState is MaterializeStates.None or MaterializeStates.Building)
-                     .OrderBy(d => priority.TryGetValue(d.Key.TableId, out var rank) ? rank : int.MaxValue)
-                     .ThenBy(d => order.TryGetValue(d.Key, out var i) ? i : int.MaxValue).ThenBy(d => d.Value.Field.Id))
-        {
-            ct.ThrowIfCancellationRequested();
-            if (DateTime.UtcNow > roundEnds) break;
-            await gate.WaitAsync(ct);
-            if (DateTime.UtcNow > roundEnds) { gate.Release(); break; }   // waited for a free build past the end of the round
-            FieldKey? waiting;
-            lock (sync)
-            {
-                waiting = busy ? null : decision.Plan is { } p ? StoredInputs(p).FirstOrDefault(k => !readyNow.Contains(k)) : null;
-                if (waiting is { TableId: > 0 } w)
-                    outcomes.Add(new(field.Id, field.Fid ?? 0, field.AppTableId, "waiting", 0, 0, TimeSpan.Zero,
-                        $"Waiting for the stored field it reads ({w}) to be ready."));
-            }
-            if (busy) { gate.Release(); break; }   // the database is busy: stop for now, the next poll continues
-            if (waiting is { TableId: > 0 }) { gate.Release(); continue; }
 
-            running.Add(Task.Run(async () =>
+        // One dispatcher per lane, side by side. "busy" (no slot, or the database stays loaded) stops that lane for this round.
+        async Task DispatchAsync(List<KeyValuePair<FieldKey, (AppField Field, MaterializeDecision Decision)>> lane, bool isBig)
+        {
+            var busy = false;
+            foreach (var (key, (field, decision)) in lane)
             {
-                try
+                ct.ThrowIfCancellationRequested();
+                if (DateTime.UtcNow > roundEnds) break;
+                if (isBig) await bigGate.WaitAsync(ct);
+                await gate.WaitAsync(ct);
+                void Release() { gate.Release(); if (isBig) bigGate.Release(); }
+                if (DateTime.UtcNow > roundEnds) { Release(); break; }   // waited for a free build past the end of the round
+                FieldKey? waiting;
+                bool stop;
+                lock (sync)
                 {
-                    var outcome = await BuildAsync(field, decision, model, options, ct);
-                    lock (sync)
-                    {
-                        outcomes.Add(outcome);
-                        if (outcome.Outcome == "ready") readyNow.Add(key);
-                        if (outcome.Outcome == "busy") busy = true;
-                    }
+                    stop = busy;
+                    waiting = stop ? null : decision.Plan is { } p ? StoredInputs(p).FirstOrDefault(k => !readyNow.Contains(k)) : null;
+                    if (waiting is { TableId: > 0 } w)
+                        outcomes.Add(new(field.Id, field.Fid ?? 0, field.AppTableId, "waiting", 0, 0, TimeSpan.Zero,
+                            $"Waiting for the stored field it reads ({w}) to be ready."));
                 }
-                finally { gate.Release(); }
-            }, ct));
+                if (stop) { Release(); break; }   // the database is busy for this lane: stop for now, the next poll continues
+                if (waiting is { TableId: > 0 }) { Release(); continue; }
+
+                var task = Task.Run(async () =>
+                {
+                    try
+                    {
+                        var outcome = await BuildAsync(field, decision, model, options, ct, keepFree: isBig ? reserved : 0);
+                        lock (sync)
+                        {
+                            outcomes.Add(outcome);
+                            if (outcome.Outcome == "ready") readyNow.Add(key);
+                            if (outcome.Outcome == "busy") busy = true;
+                        }
+                    }
+                    finally { Release(); }
+                }, ct);
+                lock (sync) running.Add(task);
+            }
         }
-        await Task.WhenAll(running);
+
+        await Task.WhenAll(DispatchAsync(fastLane, isBig: false), DispatchAsync(bigLane, isBig: true));
+        Task[] started;
+        lock (sync) started = running.ToArray();
+        await Task.WhenAll(started);
         var dropped = await DropUnusedColumnsAsync(ct);
         if (outcomes.Count > 0 || dropped > 0) _models.Invalidate(QueryContext.TenantId);
         return outcomes;
@@ -205,7 +288,9 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
         return dropped;
     }
 
-    private async Task<FieldOutcome> BuildAsync(AppField field, MaterializeDecision decision, ComputeModel model, ComputeOptions options, CancellationToken ct)
+    /// <param name="keepFree">Database background slots this build leaves to the fast lane (<see cref="ComputeOptions.FastLaneReserved"/>).</param>
+    private async Task<FieldOutcome> BuildAsync(AppField field, MaterializeDecision decision, ComputeModel model, ComputeOptions options, CancellationToken ct,
+        int keepFree = 0)
     {
         var sw = Stopwatch.StartNew();
         FieldOutcome Done(string outcome, long rows = 0, string? reason = null) =>
@@ -241,28 +326,36 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
         var version = await Repo.StartBuildAsync(field.Id, ct);
         if (version is not int v) return Done("skipped", reason: "The field is no longer switched on.");
 
-        long watermark;
-        await using (var conn = await OpenConnectionAsync(ct))
-            watermark = await conn.ExecuteScalarAsync<long>(new CommandDefinition("SELECT ISNULL(MAX(Id), 0) FROM meta.ComputeOutbox", cancellationToken: ct));
-
         try
         {
-            MaterializedColumnWriter.WriteResult result;
-            var sessions = 1;
-            var slices = await SlicesAsync(plan, options, ct);
-            if (slices is null)
+            // Checkpoint: a build that was interrupted (restart, new revision, busy database) continues from the last Id it wrote, over the
+            // same ranges and with the watermark of its first start; a fresh build records its ranges first. Every build is a list of Id
+            // ranges (one range = one session), so the resumed and the fresh path are the same code.
+            var recorded = await Repo.LoadCheckpointAsync(field.Id, v, ct);
+            long watermark;
+            long alreadyWritten = 0;
+            List<BuildRange> work;
+            if (recorded.Count > 0)
             {
-                await using var guard = await DatabaseGuard.AcquireAsync(ConnectionFactory.CreateAsync, options, backgroundOnly: true, TimeSpan.FromMinutes(2), _logger, ct);
-                if (guard is null) return Done("busy", reason: "No background compute slot was free.");
-                result = await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, v, new WriteScope.All(), model.Schema, options, reconcile: false, ct, _decryptor, _projector);
-                await ComputeTableProcessor.PropagateAsync(guard.Connection, model, plan, result, ct);
+                watermark = recorded.Min(r => r.Watermark);
+                alreadyWritten = recorded.Sum(r => r.RowsWritten);
+                work = recorded.Where(r => !r.IsDone).Select(r => new BuildRange(r.After, new WriteScope.Range(r.DoneThroughId, r.UpTo))).ToList();
+                _logger?.LogInformation("Compute: field {FieldId} (t{TableId}.c_{Fid}) resumes its build: {Open} of {Total} range(s) left, {Rows} row(s) already written.",
+                    field.Id, plan.TableId, plan.Fid, work.Count, recorded.Count, alreadyWritten);
             }
             else
             {
-                var sliced = await BuildSlicedAsync(plan, sqlType, v, model, slices, options, ct);
-                if (sliced is null) return Done("busy", reason: "No background compute slot was free.");
-                (result, sessions) = sliced.Value;
+                await using (var conn = await OpenConnectionAsync(ct))
+                    watermark = await conn.ExecuteScalarAsync<long>(new CommandDefinition("SELECT ISNULL(MAX(Id), 0) FROM meta.ComputeOutbox", cancellationToken: ct));
+                var ranges = await SlicesAsync(plan, options, ct) ?? [new WriteScope.Range(0, long.MaxValue)];
+                await Repo.SaveCheckpointAsync(field.Id, v, ranges.Select(r => (r.After, r.UpTo)).ToList(), watermark, ct);
+                work = ranges.Select(r => new BuildRange(r.After, r)).ToList();
             }
+
+            var sliced = await BuildSlicedAsync(plan, sqlType, v, model, work, options, ct, keepFree);
+            if (sliced is null) return Done("busy", reason: "No background compute slot was free.");
+            var (result, sessions) = sliced.Value;
+            result = result with { RowsWritten = result.RowsWritten + alreadyWritten };
 
             // Replay: changes saved while the build ran are in the outbox; everything up to the watermark must be applied before Ready.
             var inputTables = InputTables(plan);
@@ -321,8 +414,20 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
     {
         var model = await _models.GetAsync(QueryContext.TenantId, Repo, fresh: true, ct);
         var outcomes = new List<FieldOutcome>();
+        // The check shares the background slots with the first builds. While fields are still waiting to be built (or half built) every
+        // slot goes to them: a check re-reads whole tables of fields that were computed from current data hours ago, and a worker that
+        // restarts runs it again at once. It follows when the backlog is empty (Compute:ReconcileWhileBuilding = true keeps the old behaviour).
+        var backlog = model.Decisions.Values.Count(d => d.Field.MaterializeMode == MaterializeModes.On
+            && d.Field.MaterializeState is MaterializeStates.None or MaterializeStates.Building && d.Decision.Outcome == MaterializeOutcome.Allowed);
+        if (backlog > 0 && !options.ReconcileWhileBuilding)
+        {
+            _logger?.LogInformation("Compute reconciliation: tenant {TenantId} skipped, {Backlog} field(s) are still waiting for their first build.", QueryContext.TenantId, backlog);
+            return outcomes;
+        }
+        var recent = DateTime.UtcNow.AddHours(-Math.Max(0, options.ReconcileMinAgeHours));
         foreach (var (field, plan) in model.Live().Where(l => l.Field.MaterializeState == MaterializeStates.Ready).OrderBy(l => l.Field.Id))
         {
+            if (field.MaterializedOn is { } madeCurrent && madeCurrent > recent) continue;   // built or checked a few hours ago: nothing to catch yet
             var sw = Stopwatch.StartNew();
             await using var fieldLock = await FieldWorkLock.TryAcquireAsync(ConnectionFactory.CreateAsync, field.Id, ct);
             if (fieldLock is null) continue;   // another replica is checking (or rebuilding) it
@@ -333,8 +438,9 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
             if (sqlType is null) { outcomes.Add(new(field.Id, plan.Fid, plan.TableId, "missing-column", 0, 0, sw.Elapsed)); continue; }
             try
             {
-                var r = await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, field.MaterializeVersion, new WriteScope.All(), model.Schema, options, reconcile: true, ct, _decryptor, _projector);
+                var r = await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, field.MaterializeVersion, new WriteScope.All(), model.Schema, options, reconcile: true, ct, _decryptor, _projector, model: model);
                 await ComputeTableProcessor.PropagateAsync(guard.Connection, model, plan, r, ct);   // fixed values feed their stored dependents
+                await Repo.TouchMaterializedAsync(field.Id, field.MaterializeVersion, ct);
                 outcomes.Add(new(field.Id, plan.Fid, plan.TableId, "checked", r.RowsWritten, r.Differences, sw.Elapsed));
                 var level = r.Differences > 0 ? LogLevel.Warning : LogLevel.Information;
                 _logger?.Log(level, "Compute reconciliation: tenant {TenantId} field {FieldId} (t{TableId}.c_{Fid}): {Differences} difference(s) fixed in {Batches} batch(es), {Seconds:0.0}s.",
@@ -371,7 +477,7 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
             if (sqlType is null) continue;
             try
             {
-                var r = await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, field.MaterializeVersion, new WriteScope.All(), model.Schema, options, reconcile: false, ct, _decryptor, _projector);
+                var r = await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, field.MaterializeVersion, new WriteScope.All(), model.Schema, options, reconcile: false, ct, _decryptor, _projector, model: model);
                 await ComputeTableProcessor.PropagateAsync(guard.Connection, model, plan, r, ct);
                 await guard.Connection.ExecuteAsync(new CommandDefinition(
                     "UPDATE meta.AppField SET MaterializedOn = SYSUTCDATETIME() WHERE Id = @id AND MaterializeVersion = @v AND MaterializeState = @ready",
@@ -404,60 +510,96 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
         _ => [plan.TableId]
     };
 
+    /// <summary>One Id range of a build: <paramref name="Key"/> is the range's first Id as recorded in the checkpoint, <paramref name="Scope"/> where it continues.</summary>
+    private sealed record BuildRange(long Key, WriteScope.Range Scope);
+
+    /// <summary>Id ranges per session: smaller ranges balance the sessions better (a session that finishes early takes the next one) and a
+    /// stopped build loses at most a range's unreported rows.</summary>
+    private const int RangesPerSession = 4;
+    private const int MinRowsPerRange = 25_000;
+
     /// <summary>
-    /// The Id ranges a first build is split into, or null when it runs on one session: splitting is on (<see cref="ComputeOptions.SlicesPerField"/>),
-    /// the values are worked out in C# (the slow kind; set-based SQL builds are already fast), and the table has at least
-    /// <see cref="ComputeOptions.SliceMinRows"/> rows. Equal-sized ranges by row count (NTILE over the clustered Id); the last one is open-ended
-    /// so rows added after the ranges were read are still built.
+    /// The Id ranges a first build is split into, or null when it runs as one range: splitting is on (<see cref="ComputeOptions.SlicesPerField"/>)
+    /// and the table has at least <see cref="ComputeOptions.SliceMinRows"/> rows. Every plan kind is split (formulas, read-code fields,
+    /// and the set-based lookups / summaries too: each range is one keyset walk over the target table's Id). The row count comes from the
+    /// partition statistics and the bounds from MIN / MAX of Id (two index seeks): equal-width ranges, no scan of the table. The first
+    /// range starts at 0 and the last is open-ended, so every row is covered, also ones added meanwhile.
     /// </summary>
     private async Task<IReadOnlyList<WriteScope.Range>?> SlicesAsync(MaterializePlan plan, ComputeOptions options, CancellationToken ct)
     {
-        if (options.SlicesPerField <= 1 || !MaterializedColumnWriter.UsesValueTable(plan)) return null;
+        if (options.SlicesPerField <= 1) return null;
         var table = PhysicalNaming.FullTableName(MaterializedColumnWriter.ShapeOf(plan).TableId);
         await using var conn = await OpenConnectionAsync(ct);
-        var rows = await conn.ExecuteScalarAsync<long>(new CommandDefinition($"SELECT COUNT_BIG(*) FROM {table}", commandTimeout: 600, cancellationToken: ct));
+        var rows = await conn.ExecuteScalarAsync<long?>(new CommandDefinition(
+            "SELECT SUM(row_count) FROM sys.dm_db_partition_stats WHERE object_id = OBJECT_ID(@table) AND index_id IN (0, 1)",
+            new { table }, cancellationToken: ct)) ?? 0;
         if (rows < options.SliceMinRows) return null;
-        var bounds = (await conn.QueryAsync<long>(new CommandDefinition($"""
-            SELECT MAX(Id) FROM (SELECT Id, NTILE(@n) OVER (ORDER BY Id) AS b FROM {table}) x GROUP BY b ORDER BY MAX(Id)
-            """, new { n = options.SlicesPerField }, commandTimeout: 600, cancellationToken: ct))).ToList();
-        if (bounds.Count < 2) return null;
-        var ranges = new List<WriteScope.Range>(bounds.Count);
-        long after = 0;
-        foreach (var upTo in bounds) { ranges.Add(new WriteScope.Range(after, upTo)); after = upTo; }
-        ranges[^1] = ranges[^1] with { UpTo = long.MaxValue };
-        return ranges;
+        var (minId, maxId) = await conn.QuerySingleAsync<(long? Min, long? Max)>(new CommandDefinition(
+            $"SELECT MIN(Id) AS Min, MAX(Id) AS Max FROM {table}", commandTimeout: 120, cancellationToken: ct));
+        if (minId is null || maxId is null) return null;
+        var count = (int)Math.Min(options.SlicesPerField * RangesPerSession, Math.Max(1, rows / MinRowsPerRange));
+        return SliceRanges(minId.Value, maxId.Value, count);
     }
 
     /// <summary>
-    /// Builds the slices side by side, each on its own background slot (as many slots as are free, at least one — waited for like a normal
-    /// build; fewer slots than slices just means a session takes the next slice when it finishes one). The first failure stops the other
+    /// <paramref name="count"/> equal-width Id ranges over [minId, maxId]: the first starts at 0, the last is open-ended (long.MaxValue), so
+    /// together they cover every Id, also ones added after the bounds were read. Null when fewer than two ranges come out.
+    /// </summary>
+    internal static IReadOnlyList<WriteScope.Range>? SliceRanges(long minId, long maxId, int count)
+    {
+        if (count < 2) return null;
+        var width = Math.Max(1, (maxId - minId + count) / count);
+        var ranges = new List<WriteScope.Range>(count);
+        long after = 0;
+        for (var i = 1; i < count; i++)
+        {
+            var upTo = minId - 1 + i * width;
+            if (upTo <= after || upTo >= maxId) continue;
+            ranges.Add(new WriteScope.Range(after, upTo));
+            after = upTo;
+        }
+        ranges.Add(new WriteScope.Range(after, long.MaxValue));
+        return ranges.Count < 2 ? null : ranges;
+    }
+
+    /// <summary>
+    /// Works through the ranges, side by side on as many background slots as are free (up to <see cref="ComputeOptions.SlicesPerField"/>, at
+    /// least one — waited for like a normal build; fewer slots than ranges just means a session takes the next range when it finishes one).
+    /// Every range reports its progress to the checkpoint, so a stopped build continues from there. The first failure stops the other
     /// sessions and is rethrown, so the field ends exactly as a one-session build that failed (busy → stays Building, error → Failed).
-    /// Null when no slot freed up.
+    /// Null when no slot freed up. No ranges left (everything was done before the stop) = an empty result, no slot needed.
     /// </summary>
     private async Task<(MaterializedColumnWriter.WriteResult Result, int Sessions)?> BuildSlicedAsync(MaterializePlan plan, string sqlType, int version,
-        ComputeModel model, IReadOnlyList<WriteScope.Range> slices, ComputeOptions options, CancellationToken ct)
+        ComputeModel model, IReadOnlyList<BuildRange> work, ComputeOptions options, CancellationToken ct, int keepFree = 0)
     {
+        if (work.Count == 0) return (new MaterializedColumnWriter.WriteResult(0, 0, [], false), 0);
+        var sessions = Math.Max(1, Math.Min(work.Count, options.SlicesPerField));
         var guards = new List<GuardedConnection>();
         try
         {
-            var first = await DatabaseGuard.AcquireAsync(ConnectionFactory.CreateAsync, options, backgroundOnly: true, TimeSpan.FromMinutes(2), _logger, ct);
+            var first = await DatabaseGuard.AcquireAsync(ConnectionFactory.CreateAsync, options, backgroundOnly: true, TimeSpan.FromMinutes(2), _logger, ct, keepFree);
             if (first is null) return null;
             guards.Add(first);
-            while (guards.Count < slices.Count
-                   && await DatabaseGuard.AcquireAsync(ConnectionFactory.CreateAsync, options, backgroundOnly: true, TimeSpan.Zero, _logger, ct) is { } more)
+            while (guards.Count < sessions
+                   && await DatabaseGuard.AcquireAsync(ConnectionFactory.CreateAsync, options, backgroundOnly: true, TimeSpan.Zero, _logger, ct, keepFree) is { } more)
                 guards.Add(more);
 
-            var queue = new System.Collections.Concurrent.ConcurrentQueue<WriteScope.Range>(slices);
+            var queue = new System.Collections.Concurrent.ConcurrentQueue<BuildRange>(work);
             var results = new System.Collections.Concurrent.ConcurrentBag<MaterializedColumnWriter.WriteResult>();
             Exception? failure = null;
             using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var repo = Repo;
             await Task.WhenAll(guards.Select(async guard =>
             {
                 try
                 {
-                    while (!stop.IsCancellationRequested && queue.TryDequeue(out var slice))
-                        results.Add(await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, version, slice, model.Schema, options,
-                            reconcile: false, stop.Token, _decryptor, _projector));
+                    while (!stop.IsCancellationRequested && queue.TryDequeue(out var range))
+                    {
+                        var key = range.Key;
+                        results.Add(await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, version, range.Scope, model.Schema, options,
+                            reconcile: false, stop.Token, _decryptor, _projector, model: model,
+                            onProgress: (doneThrough, written, isDone) => repo.AdvanceCheckpointAsync(plan.FieldId, version, key, doneThrough, written, isDone, stop.Token)));
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -480,6 +622,7 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
             foreach (var guard in guards) await guard.DisposeAsync();
         }
     }
+
 
     private async Task<bool> HasRowsUpToAsync(IReadOnlyList<long> tables, long watermark, CancellationToken ct)
     {

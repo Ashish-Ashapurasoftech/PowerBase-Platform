@@ -41,7 +41,10 @@ public sealed class ProjectedValueComputer
     }
 
     /// <summary>(row Id, value) for every id; a row that is gone (deleted) gets NULL, as nothing shows it.</summary>
-    public async Task<IReadOnlyList<(long Id, object? Value)>> ComputeAsync(ProjectedPlan plan, long[] ids, CancellationToken ct)
+    /// <param name="readFids">The fids of this table the value is worked out from (<see cref="ComputeModel.OwnTableReadsOf"/>): only those
+    /// columns are read, which on a table of hundreds of fields is the difference between hours and minutes. Null = every column.</param>
+    public async Task<IReadOnlyList<(long Id, object? Value)>> ComputeAsync(ProjectedPlan plan, long[] ids, CancellationToken ct,
+        IReadOnlySet<int>? readFids = null)
     {
         var (table, fields) = await TableAsync(plan.TableId, ct);
         var field = fields.FirstOrDefault(f => f.Id == plan.FieldId)
@@ -52,7 +55,19 @@ public sealed class ProjectedValueComputer
         var sp = scope.ServiceProvider;
         sp.GetRequiredService<IQueryContext>().SetTenantId(_services.GetRequiredService<IQueryContext>().TenantId);
 
-        var physical = fields.Where(f => f.Fid.HasValue && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)).ToList();
+        var isRelational = field.TypeCode is "Lookup" or "Summary";
+        var formulas = sp.GetRequiredService<IFormulaProjector>();
+        // A formula's reads, as the report's own dependency walk lists them. The columns read are the graph's reads PLUS these, so the
+        // narrow read can only ever be a superset of what either analysis names; unknown reads = every column, as before.
+        var reads = isRelational ? null : formulas.GetFormulaDependencies(fields, [field.Fid!.Value]);
+        if (!isRelational && reads is null && LoggedAllFields.TryAdd(field.Id, 0))
+            _services.GetService<Microsoft.Extensions.Logging.ILogger<ProjectedValueComputer>>()?.LogWarning(
+                "Compute: formula field {FieldId} (t{TableId}.c_{Fid}): its dependencies could not be worked out, so every calculated field of the table is computed for each batch (slow).",
+                field.Id, table.Id, field.Fid);
+        var columns = isRelational ? readFids : reads is null ? null : readFids?.Union(reads.Select(r => (int)r)).ToHashSet();
+
+        var physical = fields.Where(f => f.Fid.HasValue && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)
+                                         && (columns is null || columns.Contains(f.Fid.Value))).ToList();
         var byId = await sp.GetRequiredService<IRecordRepository>().GetRowsByIdsAsync(table, physical, ids, ct);
         var present = ids.Where(byId.ContainsKey).ToArray();
         var rows = present.Select(id => byId[id]).ToList();
@@ -62,7 +77,7 @@ public sealed class ProjectedValueComputer
         {
             using var _ = StoredReadExclusion.Exclude(field.Id);
             var relational = sp.GetRequiredService<IRelationalProjector>();
-            if (field.TypeCode is "Lookup" or "Summary")
+            if (isRelational)
             {
                 var maps = await relational.ProjectAsync(table, [field], rows, ct);
                 for (var i = 0; i < rows.Count; i++) values[present[i]] = maps[i].TryGetValue(field.Fid!.Value, out var v) ? v : null;
@@ -70,15 +85,10 @@ public sealed class ProjectedValueComputer
             else
             {
                 // The formula and what it reads (other formulas, lookups, summaries), seeded the way a report seeds them.
-                var formulas = sp.GetRequiredService<IFormulaProjector>();
-                var reads = formulas.GetFormulaDependencies(fields, [field.Fid!.Value]);
-                if (reads is null && LoggedAllFields.TryAdd(field.Id, 0))
-                    _services.GetService<Microsoft.Extensions.Logging.ILogger<ProjectedValueComputer>>()?.LogWarning(
-                        "Compute: formula field {FieldId} (t{TableId}.c_{Fid}): its dependencies could not be worked out, so every calculated field of the table is computed for each batch (slow).",
-                        field.Id, table.Id, field.Fid);
                 var needed = reads is null
                     ? fields
-                    : fields.Where(f => f.Fid is int fid && (fid == field.Fid || reads.Contains(fid) || !PhysicalNaming.IsComputedTypeCode(f.TypeCode))).ToList();
+                    : fields.Where(f => f.Fid is int fid && (fid == field.Fid || reads.Contains(fid)
+                        || (!PhysicalNaming.IsComputedTypeCode(f.TypeCode) && (columns is null || columns.Contains(fid))))).ToList();
                 var seed = await relational.ProjectAsync(table, needed, rows, ct);
                 var maps = formulas.Project(needed, rows, seed, table);
                 for (var i = 0; i < rows.Count; i++) values[present[i]] = maps[i].TryGetValue(field.Fid!.Value, out var v) ? v : null;

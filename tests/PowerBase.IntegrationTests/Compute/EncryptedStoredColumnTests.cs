@@ -32,7 +32,7 @@ public class EncryptedStoredColumnTests : IClassFixture<ComputeSqlFixture>, IAsy
     // Two fields built side by side (two background slots of three), the lookup's table first.
     private readonly ComputeOptions _options = new()
     {
-        PauseBetweenBatchesMs = 0, SummaryBatchSize = 7, LookupBatchSize = 50, MaxSessionsPerDatabase = 3, BackgroundSessionsPerDatabase = 2,
+        PauseBetweenBatchesMs = 0, SummaryBatchSize = 7, LookupBatchSize = 50, MaxSessionsPerDatabase = 3, BackgroundSessionsPerDatabase = 2, ReconcileMinAgeHours = 0,
     };
     private readonly IEncryptionService _encryption;
     private string _dek = "";

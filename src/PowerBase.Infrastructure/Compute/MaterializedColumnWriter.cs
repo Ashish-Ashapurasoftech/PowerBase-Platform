@@ -36,7 +36,12 @@ public sealed class MaterializeVersionChangedException(long fieldId) : Exception
 /// </summary>
 public static class MaterializedColumnWriter
 {
-    private const int CommandTimeoutSeconds = 120;
+    /// <summary>
+    /// One batch statement. Was 120 s: on UAT a summary batch of 5,000 parents over a 1.1 M-row child table ran longer and Failed the field
+    /// (17 "Execution Timeout Expired" in 4 days). A batch is short work under the version fence, so a slow one is waited for (and retried
+    /// once more, see <see cref="IsRetryable"/>) instead of failing a build of hours.
+    /// </summary>
+    private const int CommandTimeoutSeconds = 600;
     private const string TargetAlias = "x";
     internal const int FormulaBatchSize = 1000;
     /// <summary>Changed ids kept per run; past this a run reports "too many" and dependents are recomputed table-wide.</summary>
@@ -210,15 +215,39 @@ public static class MaterializedColumnWriter
         }
     }
 
+    /// <summary>A SQL deadlock (1205), also when a layer above wrapped it: the batch statements are idempotent, so the batch is simply run again.</summary>
+    internal static bool IsDeadlock(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException)
+            if (e is SqlException { Number: 1205 }) return true;
+        return false;
+    }
+
+    /// <summary>A command timeout (SqlClient reports -2): the batch is retried like a deadlock victim (it is idempotent under the fence).</summary>
+    internal static bool IsTimeout(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException)
+            if (e is SqlException { Number: -2 }) return true;
+        return false;
+    }
+
+    /// <summary>Deadlock or timeout: worth another attempt of the same batch.</summary>
+    internal static bool IsRetryable(Exception ex) => IsDeadlock(ex) || IsTimeout(ex);
+
+    /// <summary>How often a running build tells the checkpoint how far it got (a write per report, so not every batch).</summary>
+    internal static readonly TimeSpan ProgressEvery = TimeSpan.FromSeconds(4);
+
     /// <summary>
     /// Recomputes the plan's stored column for <paramref name="scope"/>, batch by batch through <paramref name="guard"/>, writing only what
     /// changed. Throws <see cref="MaterializeVersionChangedException"/> when the field moved on mid-way.
     /// </summary>
     /// <param name="decryptor">Needed by a plan that reads encrypted data (<see cref="MaterializePlan.DecryptAppId"/>); without it such a
     /// plan fails (the field is marked Failed and keeps today's dynamic path).</param>
+    /// <param name="onProgress">Called now and then with (last Id written through, rows changed since the last call, finished). A build that
+    /// is stopped continues from the last reported Id (checkpoint), so this is what makes a multi-hour build survive a restart.</param>
     public static async Task<WriteResult> RecomputeAsync(GuardedConnection guard, MaterializePlan plan, string sqlType, int version,
         WriteScope scope, ComputeSchema schema, ComputeOptions options, bool reconcile, CancellationToken ct, ComputeDecryptor? decryptor = null,
-        ProjectedValueComputer? projector = null)
+        ProjectedValueComputer? projector = null, Func<long, long, bool, Task>? onProgress = null, ComputeModel? model = null)
     {
         if (plan.DecryptAppId is not null && decryptor is null)
             throw new InvalidOperationException($"Field {plan.FieldId} reads encrypted data and no decryptor is configured for the compute worker.");
@@ -242,6 +271,10 @@ public static class MaterializedColumnWriter
         var tooMany = false;
         var computeTime = TimeSpan.Zero;
         var writeTime = TimeSpan.Zero;
+        long lastId = 0, writtenSinceReport = 0;
+        var reportClock = System.Diagnostics.Stopwatch.StartNew();
+        // Columns of the plan's own table a read-code field needs (null = all): a field on a 400-column table reads a handful, not 400.
+        var ownReads = plan is ProjectedPlan && options.NarrowReads ? model?.OwnTableReadsOf(plan) : null;
 
         if (valueTable)
             await guard.Connection.ExecuteAsync(new CommandDefinition(
@@ -260,27 +293,19 @@ public static class MaterializedColumnWriter
 
                 (string From, string Value) parts;
                 var phase = System.Diagnostics.Stopwatch.StartNew();
-                switch (plan)
+                // A deadlock victim in a read of the batch (another field's build writes the same table) is retried like the UPDATE below:
+                // before, one deadlock failed a build that had been running for hours.
+                for (var attempt = 1; ; attempt++)
                 {
-                    case ProjectedPlan pp:
-                        await CopyValuesAsync(guard.Connection, sqlType, await projector!.ComputeAsync(pp, ids, ct), ct);
-                        parts = ValueTableBatchParts(pp);
+                    try
+                    {
+                        parts = await ComputeBatchAsync(guard, plan, sqlType, ids, parameters, childFields, schema, decryptor, projector, ownReads, options.NarrowReads, ct);
                         break;
-                    case SummaryPlan { DecryptAppId: not null } sp:
-                        await FillEncryptedSummaryValuesAsync(guard.Connection, sp, sqlType, ids, schema, decryptor!, ct);
-                        parts = ValueTableBatchParts(sp);
-                        break;
-                    case LookupPlan { DecryptAppId: not null } lp:
-                        await FillEncryptedLookupValuesAsync(guard.Connection, lp, sqlType, ids, decryptor!, ct);
-                        parts = ValueTableBatchParts(lp);
-                        break;
-                    case SummaryPlan sp: parts = SummaryBatchParts(sp, sqlType, childFields, parameters); break;
-                    case LookupPlan lp: parts = LookupBatchParts(lp, sqlType); break;
-                    case FormulaPlan fp:
-                        await FillFormulaValuesAsync(guard.Connection, fp, ids, schema, decryptor, ct);
-                        parts = FormulaBatchParts(fp);
-                        break;
-                    default: throw new NotSupportedException(plan.GetType().Name);
+                    }
+                    catch (Exception ex) when ((IsDeadlock(ex) && attempt < 6) || (IsTimeout(ex) && attempt < 3))
+                    {
+                        await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), ct);
+                    }
                 }
                 computeTime += phase.Elapsed;
 
@@ -296,9 +321,9 @@ public static class MaterializedColumnWriter
                             UpdateSql(column, sqlType, parts), parameters, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
                         break;
                     }
-                    catch (SqlException ex) when (ex.Number == 1205 && attempt < 4)
+                    catch (SqlException ex) when ((ex.Number == 1205 && attempt < 6) || (ex.Number == -2 && attempt < 3))
                     {
-                        await Task.Delay(TimeSpan.FromMilliseconds(200 * attempt), ct);
+                        await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), ct);
                     }
                 }
                 writeTime += phase.Elapsed;
@@ -311,8 +336,17 @@ public static class MaterializedColumnWriter
                     if (changed.Count > MaxTrackedChanges) { tooMany = true; changed.Clear(); }
                 }
                 batches++;
+                lastId = ids[^1];
+                writtenSinceReport += changedIds.Count;
+                if (onProgress is not null && reportClock.Elapsed >= ProgressEvery)
+                {
+                    await onProgress(lastId, writtenSinceReport, false);
+                    writtenSinceReport = 0;
+                    reportClock.Restart();
+                }
                 await guard.AfterBatchAsync(ct);
             }
+            if (onProgress is not null) await onProgress(lastId, writtenSinceReport, true);   // every row of the range is written
         }
         finally
         {
@@ -322,21 +356,48 @@ public static class MaterializedColumnWriter
         return new WriteResult(written, batches, changed, tooMany) { ComputeTime = computeTime, WriteTime = writeTime };
     }
 
+    /// <summary>Works out one batch of values (into #cv when they are computed in C#) and returns the FROM / value parts of its UPDATE.</summary>
+    private static async Task<(string From, string Value)> ComputeBatchAsync(GuardedConnection guard, MaterializePlan plan, string sqlType, long[] ids,
+        DynamicParameters parameters, IReadOnlyDictionary<long, AppField> childFields, ComputeSchema schema, ComputeDecryptor? decryptor,
+        ProjectedValueComputer? projector, IReadOnlySet<int>? ownReads, bool narrow, CancellationToken ct)
+    {
+        switch (plan)
+        {
+            case ProjectedPlan pp:
+                await CopyValuesAsync(guard.Connection, sqlType, await projector!.ComputeAsync(pp, ids, ct, ownReads), ct);
+                return ValueTableBatchParts(pp);
+            case SummaryPlan { DecryptAppId: not null } sp:
+                await FillEncryptedSummaryValuesAsync(guard.Connection, sp, sqlType, ids, schema, decryptor!, ct);
+                return ValueTableBatchParts(sp);
+            case LookupPlan { DecryptAppId: not null } lp:
+                await FillEncryptedLookupValuesAsync(guard.Connection, lp, sqlType, ids, decryptor!, ct);
+                return ValueTableBatchParts(lp);
+            case SummaryPlan sp: return SummaryBatchParts(sp, sqlType, childFields, parameters);
+            case LookupPlan lp: return LookupBatchParts(lp, sqlType);
+            case FormulaPlan fp:
+                await FillFormulaValuesAsync(guard.Connection, fp, ids, schema, narrow, decryptor, ct);
+                return FormulaBatchParts(fp);
+            default: throw new NotSupportedException(plan.GetType().Name);
+        }
+    }
+
     /// <summary>Reads the batch's rows (their stored fields and the stored values of the calculated fields the formula reads), decrypts the
     /// encrypted ones when the app is encrypted, evaluates the formula for each, and bulk-copies the results into #cv.</summary>
-    private static async Task FillFormulaValuesAsync(SqlConnection connection, FormulaPlan plan, long[] ids, ComputeSchema schema,
+    private static async Task FillFormulaValuesAsync(SqlConnection connection, FormulaPlan plan, long[] ids, ComputeSchema schema, bool narrow,
         ComputeDecryptor? decryptor, CancellationToken ct)
     {
         var tableFields = schema.FieldsOf(plan.TableId);
+        // Only the columns the formula reads (a formula on a 400-column table reads a few); the full list stays for compiling it.
+        var readFields = narrow ? tableFields.Where(f => f.Fid is int fid && plan.PhysicalReads.Contains(fid)).ToList() : tableFields;
         var storedColumns = string.Concat(plan.StoredReads.Select(f => ", " + PhysicalNaming.MaterializedColumnName(f)));
         var sql = $"""
-            {KeysSql}SELECT Id, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{RecordRepository.BuildFieldColumnList(tableFields)}{storedColumns}
+            {KeysSql}SELECT Id, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{RecordRepository.BuildFieldColumnList(readFields)}{storedColumns}
             FROM {PhysicalNaming.FullTableName(plan.TableId)}
             WHERE Id BETWEEN @lo AND @hi AND Id IN {IdsInSql}
             """;
         var mutable = await ReadRowsAsync(connection, sql, new { ids = JsonSerializer.Serialize(ids), lo = ids.Min(), hi = ids.Max() }, ct);
         if (plan.DecryptAppId is long appId)
-            await decryptor!.DecryptRowsAsync(connection, appId, mutable, PhysicalFields(tableFields), ct);
+            await decryptor!.DecryptRowsAsync(connection, appId, mutable, PhysicalFields(readFields), ct);
         var rows = mutable.Select(r => (IReadOnlyDictionary<string, object?>)(Dictionary<string, object?>)r).ToList();
         var values = Formulas.Evaluate(plan, tableFields, rows);
 
@@ -545,6 +606,22 @@ public static class MaterializedColumnWriter
         await connection.ExecuteScalarAsync<int>(new CommandDefinition(
             $"SELECT CASE WHEN {FenceSql} THEN 1 ELSE 0 END", new { fieldId, version }, cancellationToken: ct)) == 1;
 
+    /// <summary>One page of ids; a deadlock victim is retried (the read is repeatable).</summary>
+    private static async Task<long[]> IdsPageAsync(SqlConnection connection, string sql, object parameters, CancellationToken ct)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return (await connection.QueryAsync<long>(new CommandDefinition(sql, parameters, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).ToArray();
+            }
+            catch (SqlException ex) when (ex.Number == 1205 && attempt < 6)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), ct);
+            }
+        }
+    }
+
     /// <summary>The target row ids, batch by batch: keyset over Id (never OFFSET), so each batch is an index seek.</summary>
     internal static async IAsyncEnumerable<long[]> BatchesAsync(SqlConnection connection, MaterializePlan plan, WriteScope scope, int batchSize,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
@@ -559,9 +636,8 @@ public static class MaterializedColumnWriter
             case WriteScope.All:
                 for (long after = 0; ;)
                 {
-                    var ids = (await connection.QueryAsync<long>(new CommandDefinition(
-                        $"SELECT TOP (@batch) Id FROM {table} WHERE Id > @after ORDER BY Id",
-                        new { batch = batchSize, after }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).ToArray();
+                    var ids = await IdsPageAsync(connection, $"SELECT TOP (@batch) Id FROM {table} WHERE Id > @after ORDER BY Id",
+                        new { batch = batchSize, after }, ct);
                     if (ids.Length == 0) yield break;
                     yield return ids;
                     after = ids[^1];
@@ -570,9 +646,8 @@ public static class MaterializedColumnWriter
             case WriteScope.Range range:
                 for (var after = range.After; ;)
                 {
-                    var ids = (await connection.QueryAsync<long>(new CommandDefinition(
-                        $"SELECT TOP (@batch) Id FROM {table} WHERE Id > @after AND Id <= @upTo ORDER BY Id",
-                        new { batch = batchSize, after, upTo = range.UpTo }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).ToArray();
+                    var ids = await IdsPageAsync(connection, $"SELECT TOP (@batch) Id FROM {table} WHERE Id > @after AND Id <= @upTo ORDER BY Id",
+                        new { batch = batchSize, after, upTo = range.UpTo }, ct);
                     if (ids.Length == 0) yield break;
                     yield return ids;
                     after = ids[^1];

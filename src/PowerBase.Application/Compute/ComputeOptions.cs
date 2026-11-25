@@ -82,6 +82,14 @@ public sealed class ComputeOptions
     /// </summary>
     public int SlicesPerField { get; set; } = 1;
 
+    /// <summary>
+    /// A first build / nightly check reads only the columns a field's value is worked out from (formula: the fields it reads; read-code
+    /// field: the dependency graph's inputs on its own table) instead of every column of the table. Measured on UAT: the database is
+    /// nearly idle during a build (CPU 5–25 %, IO ~0 %, a 500-row read takes ~12 ms) while the worker maps 400 columns per row — the
+    /// build is limited by that per-row work. False = read every column, as before.
+    /// </summary>
+    public bool NarrowReads { get; set; } = true;
+
     /// <summary>Smallest table a field is split for (see <see cref="SlicesPerField"/>).</summary>
     public int SliceMinRows { get; set; } = 100_000;
 
@@ -89,10 +97,45 @@ public sealed class ComputeOptions
     public int BuildConcurrency => Math.Max(1, BuildsPerReplica > 0 ? Math.Min(BuildsPerReplica, BackgroundSessionsPerDatabase) : BackgroundSessionsPerDatabase);
 
     /// <summary>
+    /// Fast lane: this many of a replica's builds (and of the database's background slots) are kept for fields of small tables (see
+    /// <see cref="FastLaneMaxRows"/>). Seen on UAT: eight 8–9 h builds of the 1.1 M-row table held every build and every slot, so about
+    /// 870 fields of small tables — about a second each — waited days behind them. A small field may also use any other free build;
+    /// a big one never takes the reserved ones. Always leaves at least one build for big fields; 0 = off (one queue, as before).
+    /// </summary>
+    public int FastLaneBuilds { get; set; } = 2;
+
+    /// <summary>A field is a fast-lane field when every table its build reads or writes holds fewer rows than this (partition statistics).</summary>
+    public int FastLaneMaxRows { get; set; } = 100_000;
+
+    /// <summary>Builds (and background slots) actually kept for the fast lane: <see cref="FastLaneBuilds"/>, leaving at least one for big fields.</summary>
+    public int FastLaneReserved => Math.Clamp(FastLaneBuilds, 0, Math.Max(0, BuildConcurrency - 1));
+
+    /// <summary>
     /// Tables whose fields are built first, in this order: "tenantId:tableId" pairs separated by commas (e.g. "17:243,17:244"). The tables
     /// people open most get their stored columns (and fast pages) first; every other field follows in the usual order.
     /// </summary>
     public string? PriorityTables { get; set; }
+
+    /// <summary>
+    /// Optional: first builds only for the fields of these apps, as "tenantId:appId" pairs separated by commas (e.g. "17:5"). A tenant
+    /// named here builds nothing of its other apps (their fields keep waiting, live changes of Ready fields still apply); a tenant not
+    /// named builds everything as before. Empty = no limit.
+    /// </summary>
+    public string? BuildOnlyApps { get; set; }
+
+    /// <summary>The apps of <paramref name="tenantId"/> whose fields may be built; null = every app.</summary>
+    public IReadOnlySet<long>? BuildOnlyAppsFor(long tenantId)
+    {
+        if (string.IsNullOrWhiteSpace(BuildOnlyApps)) return null;
+        HashSet<long>? result = null;
+        foreach (var part in BuildOnlyApps.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var pair = part.Split(':');
+            if (pair.Length == 2 && long.TryParse(pair[0], out var t) && t == tenantId && long.TryParse(pair[1], out var app))
+                (result ??= new HashSet<long>()).Add(app);
+        }
+        return result;
+    }
 
     /// <summary>Rank of each priority table of <paramref name="tenantId"/> (0 = first); empty when none is set.</summary>
     public IReadOnlyDictionary<long, int> PriorityTablesFor(long tenantId)
@@ -118,6 +161,14 @@ public sealed class ComputeOptions
     public int BackfillPollSeconds { get; set; } = 60;
     /// <summary>Hour (UTC) of the nightly reconciliation sweep.</summary>
     public int ReconcileHourUtc { get; set; } = 1;
+    /// <summary>
+    /// False (default): a tenant's nightly check is skipped while any of its fields is still waiting for (or half way through) its first
+    /// build — the check re-reads whole tables and shares the background slots with the builds, so it only slowed the backlog down.
+    /// True: check and build at the same time, as before.
+    /// </summary>
+    public bool ReconcileWhileBuilding { get; set; }
+    /// <summary>A Ready field built or checked within this many hours is not checked again (a worker restart used to re-check everything at once). 0 = always.</summary>
+    public int ReconcileMinAgeHours { get; set; } = 20;
     /// <summary>
     /// Decision Q3 (2026-11-20): store every Lookup / Summary / Formula field. The worker switches on every calculated field that is not
     /// decided yet (MaterializeMode 0); the rules still refuse the ones that cannot be stored, and a field an admin excluded stays off.

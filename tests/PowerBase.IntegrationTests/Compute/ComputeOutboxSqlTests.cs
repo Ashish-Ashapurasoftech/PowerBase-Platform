@@ -87,7 +87,7 @@ public sealed class ComputeSqlFixture : IAsyncLifetime
         while (dir != null && !Directory.Exists(Path.Combine(dir.FullName, "database", "migrations", "tenant"))) dir = dir.Parent;
         if (dir == null) throw new InvalidOperationException("database/migrations/tenant not found above the test output folder.");
         var tenant = Path.Combine(dir.FullName, "database", "migrations", "tenant");
-        return new[] { "096_create_compute_outbox.sql", "097_appfield_add_materialize.sql", "098_create_replica_heartbeat.sql", "099_appfield_add_materialized_column_name.sql" }
+        return new[] { "096_create_compute_outbox.sql", "097_appfield_add_materialize.sql", "098_create_replica_heartbeat.sql", "099_appfield_add_materialized_column_name.sql", "100_create_compute_build_checkpoint.sql" }
             .Select(f => Path.Combine(tenant, f));
     }
 
