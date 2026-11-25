@@ -23,6 +23,10 @@ builder.Services.AddScoped<QueryContext>();
 builder.Services.AddScoped<IQueryContext>(sp => sp.GetRequiredService<QueryContext>());
 
 // Compute
+// Every tenant query of the worker (the read code's summaries and lookups included) gets a long command timeout: a summary over a 1.1 M-row
+// child table ran past the 30 s default and Failed whole builds on UAT. Compute:CommandTimeoutSeconds, default 600; 0 = SqlClient default.
+var commandTimeout = builder.Configuration.GetValue("Compute:CommandTimeoutSeconds", 600);
+if (commandTimeout > 0) PowerBase.Infrastructure.Persistence.TenantConnectionFactory.ProcessCommandTimeoutSeconds = commandTimeout;
 builder.Services.AddSingleton<IComputeSettings, ComputeSettings>();
 builder.Services.AddScoped<IComputeOutbox, ComputeOutboxRepository>();
 builder.Services.AddSingleton<IComputeQueuePublisher, ServiceBusComputePublisher>();

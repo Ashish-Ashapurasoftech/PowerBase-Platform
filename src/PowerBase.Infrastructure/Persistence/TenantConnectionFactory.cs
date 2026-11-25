@@ -24,6 +24,12 @@ public class TenantConnectionFactory : ITenantConnectionFactory
 
     private long _currentTenantId;
 
+    /// <summary>
+    /// Default command timeout (seconds) for every tenant connection of this process; null = the SqlClient default (30 s). Set only by
+    /// background hosts (the compute worker, config Compute:CommandTimeoutSeconds), never by the API.
+    /// </summary>
+    public static int? ProcessCommandTimeoutSeconds { get; set; }
+
     public async Task<SqlConnection> CreateAsync(CancellationToken ct = default)
     {
         if (_queryContext.TenantId == 0)
@@ -46,8 +52,9 @@ public class TenantConnectionFactory : ITenantConnectionFactory
             }
         }
 
-        // An import (hundreds of CREATE/ALTERs) runs with a longer command timeout than a normal request.
-        if (PowerBase.Application.Import.Jobs.ImportRuntime.CommandTimeoutSeconds is { } seconds)
+        // An import (hundreds of CREATE/ALTERs) runs with a longer command timeout than a normal request; so does a background process that
+        // sets ProcessCommandTimeoutSeconds (the compute worker: the read code's summaries over a million child rows exceed the 30 s default).
+        if ((PowerBase.Application.Import.Jobs.ImportRuntime.CommandTimeoutSeconds ?? ProcessCommandTimeoutSeconds) is { } seconds)
         {
             var builder = new SqlConnectionStringBuilder(_resolvedConnStr) { CommandTimeout = seconds };
             return new SqlConnection(builder.ConnectionString);
