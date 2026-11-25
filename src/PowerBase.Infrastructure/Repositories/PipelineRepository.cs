@@ -866,6 +866,19 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         return results.AsList();
     }
 
+    public async Task<IReadOnlyList<PipelineConnection>> ListConnectionsByCreatorAsync(long userId, string type, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var results = await connection.QueryAsync<PipelineConnection>(new CommandDefinition(
+            """
+            SELECT c.Id, c.PublicId, c.PipelineId, c.Name, c.Type, c.CredentialsJson, c.IsDeleted, c.CreatedOn, c.CreatedBy, c.ModifiedOn, c.ModifiedBy, c.DeletedOn, c.DeletedBy, c.RowVersion
+            FROM meta.PipelineConnection c JOIN meta.Pipeline p ON p.Id = c.PipelineId
+            WHERE c.CreatedBy = @userId AND c.Type = @type AND c.IsDeleted = 0 AND p.IsDeleted = 0
+            ORDER BY c.Id DESC
+            """, new { userId, type }, cancellationToken: ct));
+        return results.AsList();
+    }
+
     public async Task<(Guid PublicId, long Id)> CreateConnectionAsync(PipelineConnection conn, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         var parameters = new

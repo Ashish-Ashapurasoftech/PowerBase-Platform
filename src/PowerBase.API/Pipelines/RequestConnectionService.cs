@@ -52,6 +52,23 @@ public sealed class RequestConnectionService : IRequestConnectionService
         }
         finally { gate.Release(); }
     }
+    public async Task<Guid> EnsureNoAuthenticationAccountAsync(long pipelineId, string name, string baseUrl, long ownerId, CancellationToken ct)
+    {
+        foreach (var row in await _repository.GetConnectionsByPipelineIdAsync(pipelineId, ct))
+        {
+            if (row.IsDeleted || row.Type != "http-request" || row.CreatedBy != ownerId || row.Name != name) continue;
+            var saved = Read(row);
+            if (saved.Connected && saved.Config.BaseUrl == baseUrl && saved.Config.AuthType == "No Authentication") return row.PublicId;
+        }
+        var config = new MakeRequestDefinition { RequestMode = "http", AccountName = name, BaseUrl = baseUrl, AuthType = "No Authentication" };
+        config.ValidateConnection();
+        var created = await _repository.CreateConnectionAsync(new PipelineConnection
+        {
+            PipelineId = pipelineId, Name = name, Type = "http-request", CreatedBy = ownerId,
+            CredentialsJson = Protect(new Credentials { Config = config, Connected = true }),
+        }, ct: ct);
+        return created.PublicId;
+    }
     public async Task ExchangeAsync(Credentials credentials, Dictionary<string,string> form, CancellationToken ct)
     {
         var c=credentials.Config;

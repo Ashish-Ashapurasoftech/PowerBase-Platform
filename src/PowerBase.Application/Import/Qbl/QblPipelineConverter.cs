@@ -39,6 +39,9 @@ public static class QblPipelineConverter
     };
 
     /// <summary>The user details a token can read after a user field (<c>{{aa.owner.email}}</c>).</summary>
+    /// <summary>Config marker: the importer creates an HTTP account without authentication for the step's base URL.</summary>
+    public const string AUTO_HTTP_ACCOUNT = "_qbWebhookAccount";
+
     private static readonly HashSet<string> UserDetails = new(StringComparer.Ordinal) { "id", "name", "first_name", "last_name", "email", "screen_name" };
 
     /// <summary>The parts a token can read after a file field (<c>{{ad.file_field.file_transfer_handle}}</c>).</summary>
@@ -2064,6 +2067,12 @@ public static class QblPipelineConverter
                     HttpRequest();
                 else if (source.Channel == "webhooks" && !CallsMappableQuickbaseApi() && !QuickbaseUrlRewriter.ContainsQuickbaseUrl(Setting("Url")?.ToString()))
                     WebhookRequest();
+                // A Quickbase-channel request to a fixed address outside Quickbase (e.g. a client's own service): PowerBase's account only
+                // reaches PowerBase, so it becomes the same HTTP request a Webhooks-channel one does.
+                else if (source.Channel != "webhooks" && Setting("Url")?.ToString()?.Trim() is { } external && !external.Contains("{{", StringComparison.Ordinal)
+                         && Uri.TryCreate(external, UriKind.Absolute, out var externalUri) && externalUri.Scheme is "http" or "https"
+                         && !QuickbaseUrlRewriter.ContainsQuickbaseUrl(external))
+                    WebhookRequest();
                 else
                     PowerBaseRequest();
             }
@@ -2090,6 +2099,14 @@ public static class QblPipelineConverter
                     Config["path"] = Text(url[Config["baseUrl"]!.ToString()!.Length..].TrimStart('/'), "URL");
                     if (absolute.Host.EndsWith("quickbase.com", StringComparison.OrdinalIgnoreCase))
                         Incomplete("PIPELINE_REQUEST_URL_QUICKBASE", $"The request URL '{url}' calls the Quickbase API, which PowerBase's API does not mirror; it was kept as is. Change it before turning the PowerFlow on.");
+                    else
+                    {
+                        // Quickbase's Webhooks channel needs no account (its own headers carry any credentials): the importer
+                        // creates the same — an HTTP account without authentication for this address, named after its host.
+                        Config["accountName"] = absolute.Host;
+                        Config[AUTO_HTTP_ACCOUNT] = true;
+                        reader.Note(source, "PIPELINE_HTTP_ACCOUNT_CREATED", $"An HTTP account '{absolute.Host}' without authentication was created for {Config["baseUrl"]} (Quickbase's Webhooks channel uses no account; the step's own headers are kept).", changesExecution: false);
+                    }
                 }
                 else
                 {
@@ -2103,7 +2120,8 @@ public static class QblPipelineConverter
 
                 var headers = RequestHeaders().Select(h => (object?)new Dictionary<string, object?>(StringComparer.Ordinal) { ["key"] = h.Name, ["value"] = h.Value }).ToList();
                 Config["stepHeaders"] = headers.Count > 0 ? headers : new List<object?> { new Dictionary<string, object?>(StringComparer.Ordinal) { ["key"] = "", ["value"] = "" } };
-                Incomplete("PIPELINE_HTTP_CONNECTION_MISSING", "This request has no HTTP account in Quickbase; name and save one for its base URL in the step before turning the PowerFlow on.");
+                if (!Config.ContainsKey(AUTO_HTTP_ACCOUNT))
+                    Incomplete("PIPELINE_HTTP_CONNECTION_MISSING", "This request has no HTTP account in Quickbase; name and save one for its base URL in the step before turning the PowerFlow on.");
             }
 
             /// <summary>Quickbase request headers: a "Name" and a "Value" text, one header per line.</summary>
@@ -2190,6 +2208,9 @@ public static class QblPipelineConverter
                 Config["body"] = Setting("Body") is { } body ? Text(body, "Body") : string.Empty;
 
                 var url = Setting("Url")?.ToString()?.Trim();
+                // A Quickbase-channel request may name only the path (/db/{dbid}?a=API_x, /v1/...): it calls the realm's Quickbase API,
+                // so it is checked and mapped exactly like the full address (an unsupported action is reported, never kept).
+                url = QuickbaseApiUrlMap.AbsoluteQuickbaseUrl(url);
                 if (url is not null && QuickbaseUrlRewriter.ContainsQuickbaseUrl(url))
                 {
                     if (!url.Contains("{{", StringComparison.Ordinal) && Uri.TryCreate(url, UriKind.Absolute, out var absolute) && MapQuickbaseApi(absolute, out _))

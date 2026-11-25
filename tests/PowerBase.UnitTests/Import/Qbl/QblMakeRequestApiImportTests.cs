@@ -166,6 +166,52 @@ public class QblMakeRequestApiImportTests
     }
 
     [Fact]
+    public void RelativePath_UnsupportedXmlAction_IsRemovedAndReported()
+    {
+        // Quickbase-channel requests may give only the path; PowerBase has no API_GetRoleInfo.
+        var (pipeline, _) = Import(File(
+            Step("aa", "POST", "https://api.quickbase.com/v1/records/query", """{"from":"bwcrtu9k5","select":[7,20,22]}"""),
+            Step("ab", "POST", "/db/{{aa.name}}?a=API_GetRoleInfo")));
+
+        Render(pipeline.Steps[1].Config["url"]).Should().BeEmpty();
+        pipeline.Steps[1].IsComplete.Should().BeFalse();
+        pipeline.Issues.Should().Contain(i => i.Message.Contains("API_GetRoleInfo"));
+    }
+
+    [Fact]
+    public void RelativePath_SupportedCall_IsMappedLikeTheFullAddress()
+    {
+        var (pipeline, _) = Import(File(Step("aa", "POST", "/v1/records", """{"to":"bwcrtu9k5","data":[{"20":{"value":"x"}}]}""")));
+
+        Render(pipeline.Steps.Single().Config["url"]).Should().Be("/v1/records");
+        Render(pipeline.Steps.Single().Config["body"]).Should().Contain("{table:");
+    }
+
+    [Fact]
+    public void QuickbaseChannel_ExternalAddress_BecomesAnHttpRequestWithAnAccount()
+    {
+        var (pipeline, _) = Import(File(
+            Step("aa", "POST", "https://api.quickbase.com/v1/records/query", """{"from":"bwcrtu9k5","select":[7,20,22]}"""),
+            Step("ab", "GET", "https://signature.example.com/")));
+
+        var step = pipeline.Steps[1];
+        step.Config["requestMode"].Should().Be("http");
+        step.Config["baseUrl"].Should().Be("https://signature.example.com");
+        step.Config.Should().ContainKey(QblPipelineConverter.AUTO_HTTP_ACCOUNT);
+        step.IsComplete.Should().BeTrue();
+    }
+
+    [Fact]
+    public void XmlRunImport_IsFlaggedForThePowerBaseImportId()
+    {
+        var (pipeline, _) = Import(File(
+            Step("aa", "POST", "https://ysl.quickbase.com/db/bwcrtu9k5?a=API_RunImport&id=10")));
+
+        pipeline.Steps.Single().IsComplete.Should().BeFalse();
+        pipeline.Issues.Should().Contain(i => i.Code == "PIPELINE_REQUEST_NEEDS_REVIEW" && i.Message.Contains("saved import '10'"));
+    }
+
+    [Fact]
     public void UnsupportedCall_UrlIsRemovedAndReported()
     {
         var (pipeline, _) = Import(File(

@@ -692,8 +692,12 @@ public class QblPipelineMoreStepsTests
         request.Config["body"].Should().Be("{\"id\": 1}");
         ((List<object?>)request.Config["stepHeaders"]!).Cast<Dictionary<string, object?>>().Select(h => $"{h["key"]}={h["value"]}")
             .Should().Equal("Authorization=Token abc", "X-Realm=ysl");
-        request.IsComplete.Should().BeFalse();
-        pipeline.Issues.Should().Contain(i => i.Code == "PIPELINE_HTTP_CONNECTION_MISSING");
+        // Quickbase's Webhooks channel has no account: the importer creates one without authentication for this base URL.
+        request.IsComplete.Should().BeTrue();
+        request.Config["accountName"].Should().Be("signature.example.com");
+        request.Config.Should().ContainKey(QblPipelineConverter.AUTO_HTTP_ACCOUNT);
+        pipeline.Issues.Should().Contain(i => i.Code == "PIPELINE_HTTP_ACCOUNT_CREATED");
+        pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_HTTP_CONNECTION_MISSING");
         pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_STEP_UNSUPPORTED" || i.Code == "PIPELINE_SETTING_NOT_IMPORTED");
     }
 

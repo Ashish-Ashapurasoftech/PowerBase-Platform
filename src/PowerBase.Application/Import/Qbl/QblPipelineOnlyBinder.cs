@@ -318,7 +318,7 @@ public static class QblPipelineOnlyBinder
                 foreach (var (key, _) in inputs.Children)
                     if (key is YamlScalarNode k && k.Value is { } name) info.Keys.Add(name);
                 // A Make Request calling the Quickbase API names its tables and field ids in the URL / body.
-                foreach (var (qbTable, fids) in QuickbaseApiUrlMap.Evidence(Scalar(inputs, "Url"), Scalar(inputs, "Body")))
+                foreach (var (qbTable, fids) in QuickbaseApiUrlMap.Evidence(QuickbaseApiUrlMap.AbsoluteQuickbaseUrl(Scalar(inputs, "Url")), Scalar(inputs, "Body")))
                     info.Tables.Add((qbTable, null, fids.ToList()));
             }
             if (Child(properties, "Filters") is { } filters)
