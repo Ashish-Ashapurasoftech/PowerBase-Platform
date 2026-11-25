@@ -38,9 +38,11 @@ public class StoredColumnStatusTests
     }
 
     [Fact]
-    public void Min_records_threshold_defaults_to_the_in_memory_limit_and_is_read_from_config()
+    public void Min_records_threshold_is_off_by_default_and_is_read_from_config()
     {
-        ComputeConfig.ReadCompute(new ConfigurationBuilder().Build()).MinRecordsForStoredColumns.Should().Be(50_000);
+        ComputeConfig.ReadCompute(new ConfigurationBuilder().Build()).MinRecordsForStoredColumns.Should().Be(0, "no threshold unless config sets one");
+        ComputeConfig.ReadCompute(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            { ["Compute:MinRecordsForStoredColumns"] = "50000" }).Build()).MinRecordsForStoredColumns.Should().Be(50_000);
         ComputeConfig.ReadCompute(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
             { ["Compute:MinRecordsForStoredColumns"] = "0" }).Build()).MinRecordsForStoredColumns.Should().Be(0);
         ComputeConfig.ReadCompute(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>

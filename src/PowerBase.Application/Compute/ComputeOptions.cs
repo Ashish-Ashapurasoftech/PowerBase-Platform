@@ -125,12 +125,12 @@ public sealed class ComputeOptions
     /// </summary>
     public bool StoreAllCalculatedFields { get; set; } = true;
     /// <summary>
-    /// Large-table threshold: a table is put in the stored-column cache (ALL its Lookup / Summary / Formula fields, together) only when it
-    /// holds at least this many records. Smaller tables stay calculated on the fly. Default 50,000 = Records.InMemoryReadLimit, the size up
-    /// to which the in-memory path still sorts / filters every record. 0 = every table (the earlier behaviour). A table that was stored
-    /// stays stored when it shrinks; fields switched on by hand ignore the threshold.
+    /// Optional large-table threshold (config Compute:MinRecordsForStoredColumns): a table is put in the stored-column cache (ALL its
+    /// Lookup / Summary / Formula fields, together) only when it holds at least this many records; smaller tables stay calculated on the
+    /// fly. Default 0 = no threshold, every table is stored. Set it in config (e.g. 50,000 = Records.InMemoryReadLimit) to keep small tables
+    /// dynamic; no code change needed. A table that was stored stays stored when it shrinks; fields switched on by hand ignore the threshold.
     /// </summary>
-    public int MinRecordsForStoredColumns { get; set; } = 50_000;
+    public int MinRecordsForStoredColumns { get; set; }
     /// <summary>Build / drop the sort-filter indexes of stored columns (IX_t_X_c_N) to match what saved reports and role rules use.</summary>
     public bool IndexesEnabled { get; set; } = true;
     /// <summary>How often each tenant's indexes are compared with its reports (also right after a field becomes Ready).</summary>
