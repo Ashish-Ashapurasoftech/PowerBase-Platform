@@ -16,11 +16,17 @@ public class ImportPreviewQueryHandler
 
     private readonly PowerBase.Application.Import.Services.PipelineOnlyImportService? _pipelineOnly;
     private readonly QuickbaseIdResolver? _qbResolver;
+    private readonly Microsoft.Extensions.Configuration.IConfiguration? _configuration;
+    private readonly IAppFieldRepository? _fieldRepo;
 
     public ImportPreviewQueryHandler(PblValidator validator, IAppRepository appRepo,
         PowerBase.Application.Import.Services.PipelineOnlyImportService? pipelineOnly = null,
-        QuickbaseIdResolver? qbResolver = null)
+        QuickbaseIdResolver? qbResolver = null,
+        Microsoft.Extensions.Configuration.IConfiguration? configuration = null,
+        IAppFieldRepository? fieldRepo = null)
     {
+        _configuration = configuration;
+        _fieldRepo = fieldRepo;
         _pipelineOnly = pipelineOnly;
         _qbResolver = qbResolver;
         _validator = validator;
@@ -198,6 +204,18 @@ public class ImportPreviewQueryHandler
         if (prepared.Apps.Count == 0)
             return FileError("PIPELINE_ONLY_NO_APP", PowerBase.Application.Import.Services.PipelineOnlyImportService.NoAppMessage(prepared.Binding));
 
+        // Two PowerFlows of the file with the same name: the import names the later ones "<name> 2", "<name> 3" (PowerFlow names are
+        // unique per user), as PblPipelinesImporter.UniqueNameAsync does.
+        var renamed = new Dictionary<PblPipeline, string>(ReferenceEqualityComparer.Instance);
+        var nameCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pipeline in prepared.Apps.SelectMany(a => a.Pipelines ?? []))
+        {
+            var key = (pipeline.Name ?? "").Trim();
+            nameCount[key] = nameCount.TryGetValue(key, out var seen) ? seen + 1 : 1;
+            if (nameCount[key] > 1) renamed[pipeline] = $"{key} {nameCount[key]}";
+        }
+
+        var requiredMissing = await RequiredFieldProblemsAsync(prepared.Apps.SelectMany(a => a.Pipelines ?? []), ct);
         var apps = prepared.Apps.Select((app, i) =>
         {
             var target = prepared.Binding.Apps.First(a => a.AppRef == app.AppRef).App;
@@ -210,7 +228,7 @@ public class ImportPreviewQueryHandler
                 TargetAppPublicId = target.PublicId,
                 TableMatches = prepared.Binding.Matches.Where(m => m.AppPublicId == target.PublicId)
                     .Select(m => $"{m.QbTableId} → {m.TableName}").Distinct().ToList(),
-                Pipelines = (app.Pipelines ?? []).Select(ToPipelineItem).ToList(),
+                Pipelines = (app.Pipelines ?? []).Select(p => WithRequired(p, requiredMissing, WithRename(p, renamed, WithSiteCheck(p, ToPipelineItem(p))))).ToList(),
             };
             if (i == 0)
             {
@@ -232,6 +250,70 @@ public class ImportPreviewQueryHandler
         return new ImportPreviewResult { IsValid = true, AppCount = apps.Count, Apps = apps };
     }
 
+    /// <summary>The importer's rule for a Create Record step (PblPipelinesImporter.MissingRequiredFieldsAsync): a required field of the
+    /// table without a value makes the step a draft. Checked here so the wizard shows it before the import.</summary>
+    private async Task<Dictionary<PblPipeline, List<PblIssueDto>>> RequiredFieldProblemsAsync(IEnumerable<PblPipeline> pipelines, CancellationToken ct)
+    {
+        var result = new Dictionary<PblPipeline, List<PblIssueDto>>(ReferenceEqualityComparer.Instance);
+        if (_fieldRepo is null) return result;
+        var fieldsByTable = new Dictionary<long, IReadOnlyList<PowerBase.Domain.Entities.AppField>>();
+        static IEnumerable<PblPipelineStep> All(IEnumerable<PblPipelineStep> steps) => steps.SelectMany(s => new[] { s }.Concat(All(s.Children)));
+        foreach (var pipeline in pipelines)
+            foreach (var step in All(pipeline.Steps).Where(s => s.Subtype == "create-record"))
+            {
+                if (step.Config.GetValueOrDefault("tablePublicId") is not PblPipelineTableValue table
+                    || !table.TableRef.StartsWith("$Table_PB_", StringComparison.Ordinal)
+                    || !long.TryParse(table.TableRef["$Table_PB_".Length..], out var tableId))
+                    continue;
+                if (!fieldsByTable.TryGetValue(tableId, out var fields))
+                    fieldsByTable[tableId] = fields = await _fieldRepo.ListByTableAsync(tableId, ct);
+                var mapped = (step.Config.GetValueOrDefault("fieldMappings") as IEnumerable<object?> ?? [])
+                    .OfType<Dictionary<string, object?>>()
+                    .Where(m => m.GetValueOrDefault("value") is { } v && !string.IsNullOrWhiteSpace(v is string text ? text : "x"))
+                    .Select(m => m.GetValueOrDefault("field") is PblPipelineFieldValue f ? f.SourceId : null)
+                    .Where(fid => fid is not null).Select(fid => fid!.Value).ToHashSet();
+                foreach (var f in fields.Where(f => f.IsRequired && !f.IsSystem && !f.IsDeleted && f.Fid.HasValue
+                             && !PowerBase.Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode) && !mapped.Contains(f.Fid!.Value)))
+                {
+                    if (!result.TryGetValue(pipeline, out var list)) result[pipeline] = list = [];
+                    list.Add(new PblIssueDto
+                    {
+                        Code = "PIPELINE_STEP_INCOMPLETE",
+                        Message = $"Step '{step.Name}' ({step.SourceLabel}): Required field '{(string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label)}' has no value; set it before turning the PowerFlow on.",
+                        ElementRef = step.SourceLabel,
+                    });
+                }
+            }
+        return result;
+    }
+
+    private static ImportPreviewPipelineItem WithRequired(PblPipeline pipeline, Dictionary<PblPipeline, List<PblIssueDto>> missing, ImportPreviewPipelineItem item)
+    {
+        if (missing.TryGetValue(pipeline, out var list)) item.Issues.AddRange(list);
+        return item;
+    }
+
+    private static ImportPreviewPipelineItem WithRename(PblPipeline pipeline, Dictionary<PblPipeline, string> renamed, ImportPreviewPipelineItem item)
+    {
+        if (renamed.TryGetValue(pipeline, out var name))
+            item.Issues.Add(new PblIssueDto { Code = "PIPELINE_RENAMED", Message = $"Another PowerFlow in this file is named '{pipeline.Name}'; this one is imported as '{name}'." });
+        return item;
+    }
+
+    /// <summary>The PowerBase API / site address an imported link is written on is not configured: the import writes the link as a
+    /// relative path and reports it (PblPipelinesImporter); the preview says so beforehand.</summary>
+    private ImportPreviewPipelineItem WithSiteCheck(PblPipeline pipeline, ImportPreviewPipelineItem item)
+    {
+        string? Base(bool api) => api
+            ? (_configuration?["PipelineExecution:ApiBaseUrl"] is { Length: > 0 } a ? a : _configuration?["Api:BaseUrl"])
+            : _configuration?["Frontend:BaseUrl"];
+        if (PipelinePreviewIssues.UsesSite(pipeline, api: true) && string.IsNullOrWhiteSpace(Base(true)))
+            item.Issues.Add(new PblIssueDto { Code = "PIPELINE_STEP_INCOMPLETE", Message = "The PowerBase API address (PipelineExecution:ApiBaseUrl) is not configured; links to the PowerBase API are written as a relative path." });
+        if (PipelinePreviewIssues.UsesSite(pipeline, api: false) && string.IsNullOrWhiteSpace(Base(false)))
+            item.Issues.Add(new PblIssueDto { Code = "PIPELINE_STEP_INCOMPLETE", Message = "The PowerBase site address (Frontend:BaseUrl) is not configured; links to PowerBase pages are written as a relative path." });
+        return item;
+    }
+
     /// <summary>The same grouped, collapsible report an application file's preview shows: the file's notes under "General" and
     /// each PowerFlow's step issues in a group of its own (one sub-entry per step).</summary>
     private static ImportIssueReport PipelinesOnlyIssues(ImportPreviewAppItem item)
@@ -249,25 +331,44 @@ public class ImportPreviewQueryHandler
         var built = ImportIssueReportBuilder.BuildFromImportReport(item.AppName, report, document: null);
         var issues = built.Issues.Select(i => i.ElementType != "Pipeline" ? Regrouped(i) : new ImportIssue
         {
-            Severity = i.Severity,
+            // A note that needs no action (tags, an HTTP account made, a Quickbase link already rewritten) is information, so the
+            // PowerFlows a user must complete stay the only warnings.
+            Severity = PipelinePreviewIssues.IsInformation(i.Code) ? ImportIssueSeverity.Information : i.Severity,
             ApplicationName = i.ApplicationName,
             TableName = $"PowerFlow: {i.FieldName}",
             FieldName = StepOf(i.Description) ?? "PowerFlow",
             ElementType = i.ElementType,
             Description = i.Description,
             OriginalConfiguration = i.OriginalConfiguration,
-            RecommendedAction = i.RecommendedAction,
+            RecommendedAction = PipelinePreviewIssues.Action(i.Code),
             Code = i.Code,
             TechnicalDetail = i.TechnicalDetail,
         }).ToList();
+        // Each imported PowerFlow's group starts with its status: imported as in Quickbase, or a partial import and why.
+        var withStatus = new List<ImportIssue>();
+        var byName = item.Pipelines.GroupBy(p => p.Name, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+        foreach (var group in issues.GroupBy(i => i.TableName ?? "", StringComparer.Ordinal))
+        {
+            var list = group.ToList();
+            if (list.All(i => i.ElementType == "Pipeline") && group.Key.StartsWith("PowerFlow: ", StringComparison.Ordinal)
+                && byName.TryGetValue(group.Key["PowerFlow: ".Length..], out var pipeline)
+                && PipelinePreviewIssues.Status(item.AppName, pipeline.Name, list, pipeline.StepCount, pipeline.SkippedStepCount) is { } status)
+                withStatus.Add(status);
+            withStatus.AddRange(list);
+        }
+        // A PowerFlow whose only change is skipped steps has no note of its own: its status alone.
+        foreach (var pipeline in item.Pipelines.Where(p => p.Issues.Count == 0 && p.SkippedStepCount > 0))
+            if (PipelinePreviewIssues.Status(item.AppName, pipeline.Name, [], pipeline.StepCount, pipeline.SkippedStepCount) is { } status)
+                withStatus.Add(status);
+        issues = withStatus;
         return new ImportIssueReport
         {
             Issues = issues,
             Summary = new ImportIssueSummary
             {
-                ErrorCount = built.Summary.ErrorCount,
-                WarningCount = built.Summary.WarningCount,
-                InformationCount = built.Summary.InformationCount,
+                ErrorCount = issues.Count(i => i.Severity == ImportIssueSeverity.Error),
+                WarningCount = issues.Count(i => i.Severity == ImportIssueSeverity.Warning),
+                InformationCount = issues.Count(i => i.Severity == ImportIssueSeverity.Information),
                 AffectedFieldCount = issues.Where(i => i.Severity != ImportIssueSeverity.Information).Select(i => (i.TableName, i.FieldName)).Distinct().Count(),
             },
         };
@@ -282,7 +383,7 @@ public class ImportPreviewQueryHandler
         (string? table, string? field) = i.Description switch
         {
             var d when d.StartsWith(PREFIX, StringComparison.Ordinal) && d.IndexOf(MIDDLE, StringComparison.Ordinal) is var end and > 0
-                => ($"PowerFlow: {d[PREFIX.Length..end]}", "Not imported"),
+                => ($"Not imported: {d[PREFIX.Length..end]}", "Not imported"),
             var d when d.StartsWith("No existing table matches Quickbase table '", StringComparison.Ordinal)
                 => ("Quickbase tables not found", "Table"),
             _ => (null, null),
@@ -292,7 +393,8 @@ public class ImportPreviewQueryHandler
         {
             Severity = i.Severity, ApplicationName = i.ApplicationName, TableName = table, FieldName = field,
             ElementType = i.ElementType, Description = i.Description, OriginalConfiguration = i.OriginalConfiguration,
-            RecommendedAction = i.RecommendedAction, Code = i.Code, TechnicalDetail = i.TechnicalDetail,
+            RecommendedAction = field == "Not imported" ? PipelinePreviewIssues.NotImportedAction(i.Description) : i.RecommendedAction,
+            Code = i.Code, TechnicalDetail = i.TechnicalDetail,
         };
     }
 

@@ -54,8 +54,39 @@ internal static class QblJinjaFormula
     /// <summary>Null when the value holds only plain references (or Jinja statements): those are handled as before.</summary>
     public static Result? Translate(string text, ResolvePath resolve)
     {
+        _vars = [];
+        _locals = new Dictionary<string, Node>(StringComparer.Ordinal);
+        try { return TranslateCore(text, resolve); }
+        finally { _vars = null; _locals = null; }
+    }
+
+    /// <summary>Formula variables (var dateTime $_v0 = ...;) a long piece is held in, so it is written once: the formula is short.</summary>
+    [ThreadStatic] private static List<(string Type, string Code)>? _vars;
+
+    /// <summary>Names a {% set %} gave a value, in the order of the template.</summary>
+    [ThreadStatic] private static Dictionary<string, Node>? _locals;
+
+    private static string Hoist(string type, string code)
+    {
+        if (_vars is null) return code;
+        var at = _vars.FindIndex(v => v.Code == code);
+        if (at < 0) { _vars.Add((type, code)); at = _vars.Count - 1; }
+        return $"$_v{at}";
+    }
+
+    private static Result? TranslateCore(string text, ResolvePath resolve)
+    {
         var tokens = Token.Matches(text);
-        if (tokens.Count == 0 || tokens.Any(t => !t.Value.StartsWith("{{", StringComparison.Ordinal))) return null;
+        if (tokens.Count == 0) return null;
+        // {% if %} / {% elif %} / {% else %} / {% endif %} → If(…): the only statements with a formula equivalent.
+        if (tokens.Any(t => t.Value.StartsWith("{%", StringComparison.Ordinal)))
+        {
+            var statementRefs = new List<List<object>>();
+            string statementExpression;
+            try { statementExpression = new Template(text, resolve, statementRefs).Translate(); }
+            catch (JinjaNotSupported ex) { return new Result(null, ex.Message); }
+            return Finish(statementExpression, statementRefs);
+        }
         // time.now.year is a date part, not a step reference.
         // a.start.year is the field a.start, then its year, when a.start.year is no field of its own.
         if (tokens.All(t => PlainPath.IsMatch(t.Groups[2].Value) && t.Groups[1].Length == 0 && t.Groups[3].Length == 0
@@ -94,7 +125,14 @@ internal static class QblJinjaFormula
             return new Result(null, ex.Message);
         }
 
-        var expression = string.Join(" & ", pieces);
+        return Finish(string.Join(" & ", pieces), refs);
+    }
+
+    /// <summary>The checked formula value of <paramref name="expression"/>, whose step references are \u0001n\u0002 markers into <paramref name="refs"/>.</summary>
+    private static Result Finish(string expression, List<List<object>> refs)
+    {
+        if (_vars is { Count: > 0 })
+            expression = string.Concat(_vars.Select((v, i) => $"var {v.Type} _v{i} = {v.Code}; ")) + expression;
 
         // Checked as every formula is: with the formula engine, each reference a text field.
         var check = Regex.Replace(expression, @"\u0001(\d+)\u0002", m => $"[{{{{f{m.Groups[1].Value}}}}}]");
@@ -140,7 +178,133 @@ internal static class QblJinjaFormula
 
     private sealed class JinjaNotSupported(string message) : Exception(message);
 
-    private enum T { Any, Text, Number, Bool, Date, DateTime, Duration, Months, Years, List }
+    /// <summary>A Jinja template with <c>{% if %}</c> blocks: text, <c>{{ … }}</c> values and if / elif / else / endif (nested), as one
+    /// text formula — each block an <c>If(condition, …, …)</c> of what its branches print, Jinja's truthiness for the condition.
+    /// Whitespace control (<c>{%-</c>, <c>-%}</c>, <c>{{-</c>, <c>-}}</c>) trims the text next to the tag as Jinja does. Any other
+    /// statement (<c>set</c>, <c>for</c>, …) has no formula equivalent and is reported.</summary>
+    private sealed class Template
+    {
+        private static readonly Regex Tag = new(@"\{\{(-?)(.*?)(-?)\}\}|\{%(-?)\s*(\w+)(.*?)(-?)%\}|\{#.*?#\}", RegexOptions.Singleline | RegexOptions.Compiled);
+        private readonly List<(string Kind, string Text)> _items = [];
+        private readonly ResolvePath _resolve;
+        private readonly List<List<object>> _refs;
+        private int _pos;
+        private int _depth;
+
+        public Template(string text, ResolvePath resolve, List<List<object>> refs)
+        {
+            _resolve = resolve;
+            _refs = refs;
+            var last = 0;
+            var trimNext = false;
+            foreach (Match m in Tag.Matches(text))
+            {
+                var literal = text[last..m.Index];
+                if (trimNext) literal = literal.TrimStart();
+                var trimBefore = m.Groups[1].Length > 0 || m.Groups[4].Length > 0;
+                if (trimBefore) literal = literal.TrimEnd();
+                if (literal.Length > 0) _items.Add(("text", literal));
+                last = m.Index + m.Length;
+                if (m.Value.StartsWith("{#", StringComparison.Ordinal)) { trimNext = false; continue; }
+                if (m.Value.StartsWith("{{", StringComparison.Ordinal))
+                {
+                    _items.Add(("value", m.Groups[2].Value));
+                    trimNext = m.Groups[3].Length > 0;
+                }
+                else
+                {
+                    var keyword = m.Groups[5].Value;
+                    if (keyword is not ("if" or "elif" or "else" or "endif" or "set"))
+                        throw new JinjaNotSupported($"the Jinja statement '{{% {keyword} %}}' has no PowerFlows formula equivalent");
+                    _items.Add((keyword, m.Groups[6].Value.Trim()));
+                    trimNext = m.Groups[7].Length > 0;
+                }
+            }
+            var rest = text[last..];
+            if (trimNext) rest = rest.TrimStart();
+            if (rest.Length > 0) _items.Add(("text", rest));
+        }
+
+        public string Translate()
+        {
+            var code = Sequence();
+            if (_pos < _items.Count) throw new JinjaNotSupported($"'{{% {_items[_pos].Kind} %}}' has no matching '{{% if %}}'");
+            return code;
+        }
+
+        /// <summary>What the items up to the next elif / else / endif print, as one text formula.</summary>
+        private string Sequence()
+        {
+            var pieces = new List<string>();
+            while (_pos < _items.Count && _items[_pos].Kind is not ("elif" or "else" or "endif"))
+            {
+                var (kind, text) = _items[_pos++];
+                if (kind == "set") { Set(text); continue; }
+                pieces.Add(kind switch
+                {
+                    "text" => Str(text),
+                    "value" => AsText(new Parser(text, _resolve, _refs).ParseAll()).Code,
+                    _ => Block(text),
+                });
+            }
+            return pieces.Count == 0 ? "\"\"" : string.Join(" & ", pieces);
+        }
+
+        /// <summary>{% set name = value %} outside an if block: the value is held in a formula variable that later values read
+        /// by name. A block set ({% set x %}…{% endset %}), several names, or a set inside an if (kept only on one branch) is not translated.</summary>
+        private void Set(string text)
+        {
+            var m = Regex.Match(text, @"^([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)(.+)$", RegexOptions.Singleline);
+            if (!m.Success || _depth > 0)
+                throw new JinjaNotSupported("the Jinja statement '{% set %}' has no PowerFlows formula equivalent");
+            var name = m.Groups[1].Value;
+            if (name is "time" or "runtime" or "loop" or "true" or "false" or "none" or "True" or "False" or "None")
+                throw new JinjaNotSupported("the Jinja statement '{% set %}' has no PowerFlows formula equivalent");
+            var node = new Parser(m.Groups[2].Value, _resolve, _refs).ParseAll();
+            var type = node.Type switch
+            {
+                T.Text => "text", T.Number => "number", T.Bool => "bool", T.Date => "date", T.DateTime => "dateTime", T.Duration => "duration",
+                _ => null,
+            };
+            if (_locals is null || type is null || node.Offset is not null || node.SplitText is not null)
+                throw new JinjaNotSupported("the Jinja statement '{% set %}' has no PowerFlows formula equivalent for this value");
+            _locals[name] = node with { Code = Hoist(type, node.Code) };
+        }
+
+        /// <summary>{% if c %}…{% elif d %}…{% else %}…{% endif %} → If(c, …, If(d, …, …)).</summary>
+        private string Block(string condition)
+        {
+            _depth++;
+            try { return BlockCore(condition); }
+            finally { _depth--; }
+        }
+
+        private string BlockCore(string condition)
+        {
+            if (string.IsNullOrWhiteSpace(condition)) throw new JinjaNotSupported("an '{% if %}' without a condition");
+            var test = AsBool(new Parser(condition, _resolve, _refs).ParseAll()).Code;
+            var then = Sequence();
+            if (_pos >= _items.Count) throw new JinjaNotSupported("an '{% if %}' without '{% endif %}'");
+            var (kind, text) = _items[_pos++];
+            var otherwise = kind switch
+            {
+                "elif" => Block(text),
+                "else" => ElseBranch(),
+                _ => "\"\"",
+            };
+            return $"If({test}, {then}, {otherwise})";
+        }
+
+        private string ElseBranch()
+        {
+            var code = Sequence();
+            if (_pos >= _items.Count || _items[_pos].Kind != "endif") throw new JinjaNotSupported("an '{% else %}' without '{% endif %}'");
+            _pos++;
+            return code;
+        }
+    }
+
+    private enum T { Any, Text, Number, Bool, Date, DateTime, Duration, Months, Years, List, Parts }
 
     /// <summary>A translated piece. A list made by <c>.split(sep)</c> keeps its text and separator so <c>[i]</c> can read one part.</summary>
     /// <para><see cref="Float"/>: a number Python holds as a float (a literal with a point, <c>|float</c>, <c>|round</c>, <c>/</c>, or
@@ -149,7 +313,7 @@ internal static class QblJinjaFormula
     /// <c>2026-11-13 05:47:54+00:00</c>), "naive" (time.parse: <c>2025-03-01 00:00:00</c>) or "date" (.date(): <c>2025-03-01</c>).</para>
     /// <para><see cref="FloatWhen"/>: a condition that is true at run time when a number field's value is a float in Quickbase (12.5, not 10),
     /// so arithmetic with it prints with a point as Python does (12.5 * 2 → 25.0).</para>
-    private sealed record Node(string Code, T Type, string? SplitText = null, string? SplitSep = null, bool Float = false, string? Py = null, string? FloatWhen = null);
+    private sealed record Node(string Code, T Type, string? SplitText = null, string? SplitSep = null, bool Float = false, string? Py = null, string? FloatWhen = null, IReadOnlyList<Node>? Items = null, IReadOnlyDictionary<string, Node>? Parts = null, string? Offset = null);
 
     private static bool DateLike(Node n) => n.Type is T.Date or T.DateTime;
 
@@ -165,7 +329,9 @@ internal static class QblJinjaFormula
         // Jinja prints a boolean as True / False.
         T.Bool => new Node($"If({n.Code}, \"True\", \"False\")", T.Text),
         // powerflowextraRd: a date Quickbase made prints as Python prints it (checked in a real Quickbase pipeline; the fraction of a second is left out).
+        T.Date or T.DateTime when n.Offset is not null => new Node($"({PythonDateText(n with { Py = "naive" })} & {OffsetText(n.Offset)})", T.Text),
         T.Date or T.DateTime when n.Py is not null => new Node(PythonDateText(n), T.Text),
+        T.Parts => throw new JinjaNotSupported("a time span cannot be written as text"),
         // A Quickbase date or date/time field: nothing when empty, else a UTC datetime (seconds; the fraction is left out).
         T.Any when n.Py == "field" => new Node(
             $"If(Length(ToText({n.Code})) = 0, \"\", {PythonDateText(new Node($"ToTimestamp({n.Code})", T.DateTime, Py: "aware"))})", T.Text),
@@ -209,6 +375,80 @@ internal static class QblJinjaFormula
     private static string DateOnly(Node n) => AsDate(n) is { Type: T.DateTime } dt ? $"ToDate({dt.Code})" : AsDate(n).Code;
 
     private static string Pad(string code) => $"Right(\"0\" & ToText({code}), 2)";
+
+    /// <summary>A month / year span added to a date (AdjustMonth keeps the day, or the month's last day); a date and time keeps its time.</summary>
+    private static Node AddMonths(Node l, Node span, string count)
+    {
+        var fn = span.Type == T.Months ? "AdjustMonth" : "AdjustYear";
+        var d = AsDate(l);
+        if (l.Offset is not null) throw new JinjaNotSupported("date arithmetic on a value converted with |timezone has no PowerFlows formula equivalent");
+        if (d.Type == T.DateTime)
+            return new Node($"(ToTimestamp({fn}(ToDate({d.Code}), {count})) + ({d.Code} - ToTimestamp(ToDate({d.Code}))))", T.DateTime, Py: l.Py);
+        return new Node($"{fn}({d.Code}, {count})", T.Date, Py: l.Py);
+    }
+
+    /// <summary>relativedelta's set parts: year / month / day (a day past the month's end is its last day), and hour / minute / second
+    /// of a date and time.</summary>
+    private static Node SetParts(Node l, Node parts)
+    {
+        if (l.Offset is not null) throw new JinjaNotSupported("time.delta(...) on a value converted with |timezone has no PowerFlows formula equivalent");
+        var d = AsDate(l);
+        var p = parts.Parts!;
+        string Part(string key, string current) => p.TryGetValue(key, out var v) ? v.Code : current;
+        var date = d.Type == T.DateTime ? $"ToDate({d.Code})" : d.Code;
+        var y = Part("year", $"Year({date})");
+        var m = Part("month", $"Month({date})");
+        var day = Part("day", $"Day({date})");
+        var made = $"Date({y}, {m}, Min({day}, Day(LastDayOfMonth(Date({y}, {m}, 1)))))";
+        if (d.Type == T.Date && !p.Keys.Any(k => k is "hour" or "minute" or "second"))
+            return new Node(made, T.Date, Py: l.Py);
+        var t = d.Type == T.DateTime ? d.Code : $"ToTimestamp({d.Code})";
+        var h = Part("hour", $"Hour({t})");
+        var mi = Part("minute", $"Minute({t})");
+        var sec = Part("second", $"Second({t})");
+        return new Node($"(ToTimestamp({made}) + Hours({h}) + Minutes({mi}) + Seconds({sec}))", T.DateTime, Py: l.Py ?? "naive");
+    }
+
+    /// <summary>Python's UTC offset of an aware datetime: +05:30 / -04:00.</summary>
+    private static string OffsetText(string hours) =>
+        $"(If({hours} < 0, \"-\", \"+\") & Right(\"0\" & ToText(Int(Abs({hours}))), 2) & \":\" & Right(\"0\" & ToText(Round((Abs({hours}) - Int(Abs({hours}))) * 60, 0)), 2))";
+
+    private static readonly Dictionary<string, double> FixedZones = new(StringComparer.Ordinal)
+    {
+        ["UTC"] = 0, ["Etc/UTC"] = 0, ["GMT"] = 0, ["Etc/GMT"] = 0, ["Asia/Kolkata"] = 5.5, ["Asia/Calcutta"] = 5.5,
+        ["America/Phoenix"] = -7, ["US/Arizona"] = -7, ["Pacific/Honolulu"] = -10, ["US/Hawaii"] = -10, ["Asia/Tokyo"] = 9, ["Japan"] = 9,
+        ["Asia/Dubai"] = 4, ["Asia/Shanghai"] = 8, ["Asia/Singapore"] = 8, ["Asia/Manila"] = 8, ["Asia/Karachi"] = 5,
+    };
+
+    /// <summary>US zones: standard offset; daylight time (one hour more) from the second Sunday of March 2:00 local to the first
+    /// Sunday of November 2:00 local, the rule since 2007.</summary>
+    private static readonly Dictionary<string, int> UsZones = new(StringComparer.Ordinal)
+    {
+        ["America/New_York"] = -5, ["US/Eastern"] = -5, ["America/Detroit"] = -5, ["America/Indiana/Indianapolis"] = -5,
+        ["America/Chicago"] = -6, ["US/Central"] = -6, ["America/Denver"] = -7, ["US/Mountain"] = -7,
+        ["America/Los_Angeles"] = -8, ["US/Pacific"] = -8, ["America/Anchorage"] = -9, ["US/Alaska"] = -9,
+    };
+
+    /// <summary>|timezone('zone'): the UTC date and time in that zone (Python astimezone), with its offset for printing.</summary>
+    private static Node Timezone(Node x, string zone)
+    {
+        if (x.Offset is not null) throw new JinjaNotSupported("|timezone on a value already converted has no PowerFlows formula equivalent");
+        var u = AsDate(x);
+        var t = Hoist("dateTime", u.Type == T.DateTime ? u.Code : $"ToTimestamp({u.Code})");
+        string offset;
+        if (FixedZones.TryGetValue(zone, out var fixedHours))
+            offset = fixedHours.ToString(CultureInfo.InvariantCulture);
+        else if (UsZones.TryGetValue(zone, out var std))
+        {
+            string Sunday(int month, int nth) =>
+                $"(Date(Year({t}), {month}, 1) + Days(Mod(8 - WeekDay(Date(Year({t}), {month}, 1)), 7) + {7 * (nth - 1)}))";
+            var start = $"(ToTimestamp({Sunday(3, 2)}) + Hours({2 - std}))";
+            var end = $"(ToTimestamp({Sunday(11, 1)}) + Hours({1 - std}))";
+            offset = Hoist("number", $"({std} + If({t} >= {start} and {t} < {end}, 1, 0))");
+        }
+        else throw new JinjaNotSupported($"the timezone '{zone}' has no PowerFlows formula equivalent");
+        return new Node(Hoist("dateTime", $"({t} + Minutes({offset} * 60))"), T.DateTime, Py: "aware", Offset: offset);
+    }
 
     private enum K { Num, Str, Name, Op, End }
 
@@ -379,6 +619,8 @@ internal static class QblJinjaFormula
 
         private static Node CompareValues(Node l, string op, Node r)
         {
+            if (l.Offset is not null || r.Offset is not null)
+                throw new JinjaNotSupported("comparing a value converted with |timezone has no PowerFlows formula equivalent");
             if (l.Type == T.Number || r.Type == T.Number) return new Node($"({AsNumber(l).Code} {op} {AsNumber(r).Code})", T.Bool);
             if (DateLike(l) || DateLike(r)) return new Node($"({AsDate(l).Code} {op} {AsDate(r).Code})", T.Bool);
             if (l.Type == T.Bool && r.Type == T.Bool) return new Node($"({l.Code} {op} {r.Code})", T.Bool);
@@ -389,6 +631,9 @@ internal static class QblJinjaFormula
         /// <summary><c>x in text</c> → <c>Contains(text, x)</c>; <c>x in a.split(',')</c> → one of the parts equals x.</summary>
         private static Node In(Node needle, Node haystack)
         {
+            if (haystack.Items is { } items)
+                return items.Count == 0 ? new Node("false", T.Bool)
+                    : new Node("(" + string.Join(" or ", items.Select(i => CompareValues(needle, "=", i).Code)) + ")", T.Bool);
             if (haystack.Type == T.List)
             {
                 if (haystack.SplitText is null) throw new JinjaNotSupported("'in' on this list has no PowerFlows formula equivalent");
@@ -505,8 +750,9 @@ internal static class QblJinjaFormula
         {
             if (op == "+")
             {
-                if (r.Type is T.Months or T.Years && l.Type is not (T.Months or T.Years))
-                    return new Node($"{(r.Type == T.Months ? "AdjustMonth" : "AdjustYear")}({DateOnly(l)}, {r.Code})", T.Date, Py: l.Py);
+                if (r.Type is T.Months or T.Years && l.Type is not (T.Months or T.Years)) return AddMonths(l, r, r.Code);
+                if (r.Type == T.Parts) return SetParts(l, r);
+                if (l.Type == T.Parts) return SetParts(r, l);
                 if (l.Type is T.Months or T.Years) return Arithmetic(r, op, l);
                 if (r.Type == T.Duration && l.Type != T.Duration) return new Node($"({AsDate(l).Code} + {r.Code})", AsDate(l).Type, Py: l.Py);
                 if (l.Type == T.Duration && r.Type != T.Duration) return Arithmetic(r, op, l);
@@ -515,10 +761,23 @@ internal static class QblJinjaFormula
                 // Jinja's + joins two texts (a field is text).
                 return new Node($"{AsText(l).Code} & {AsText(r).Code}", T.Text);
             }
-            if (r.Type is T.Months or T.Years)
-                return new Node($"{(r.Type == T.Months ? "AdjustMonth" : "AdjustYear")}({DateOnly(l)}, -({r.Code}))", T.Date, Py: l.Py);
+            if (r.Type is T.Months or T.Years) return AddMonths(l, r, $"-({r.Code})");
+            // relativedelta(day=1) subtracted still sets the day (an absolute part is not negated).
+            if (r.Type == T.Parts) return SetParts(l, r);
+            if (l.Offset is not null || r.Offset is not null)
+                throw new JinjaNotSupported("date arithmetic on a value converted with |timezone has no PowerFlows formula equivalent");
             if (r.Type == T.Duration) return new Node($"({AsDate(l).Code} - {r.Code})", AsDate(l).Type, Py: l.Py);
-            if (DateLike(l) || DateLike(r)) return new Node($"({AsDate(l).Code} - {AsDate(r).Code})", T.Duration);
+            if (DateLike(l) || DateLike(r))
+            {
+                // A date and time minus a date (or the other way): both as date and time, as Python subtracts two datetimes.
+                Node dl = AsDate(l), dr = AsDate(r);
+                if (dl.Type != dr.Type)
+                {
+                    if (dl.Type == T.Date) dl = new Node($"ToTimestamp({dl.Code})", T.DateTime);
+                    if (dr.Type == T.Date) dr = new Node($"ToTimestamp({dr.Code})", T.DateTime);
+                }
+                return new Node($"({dl.Code} - {dr.Code})", T.Duration);
+            }
             return Num($"({AsNumber(l).Code} - {AsNumber(r).Code})", l, r);
         }
 
@@ -529,6 +788,19 @@ internal static class QblJinjaFormula
             {
                 case K.Num: return new Node(tok.Text, T.Number, Float: tok.Text.Contains('.'));
                 case K.Str: return new Node(Str(tok.Text), T.Text);
+                case K.Op when tok.Text == "[":
+                {
+                    // A list literal ([a.x, 2, 'y']): its items, for |max |min |sum |length |join |first |last and 'in'.
+                    var items = new List<Node>();
+                    while (!IsOp("]"))
+                    {
+                        items.Add(ParseExpr());
+                        if (IsOp(",")) _pos++;
+                        else if (!IsOp("]")) Expect("]");
+                    }
+                    _pos++;
+                    return new Node("", T.List, Items: items);
+                }
                 case K.Op when tok.Text == "(":
                     var inner = ParseExpr();
                     Expect(")");
@@ -572,6 +844,8 @@ internal static class QblJinjaFormula
                 case "time.today.year" or "time.today.month" or "time.today.day":
                     return DatePart(new Node("ToDate(Now())", T.Date), path[^1]);
             }
+            if (path.Count == 1 && _locals is not null && _locals.TryGetValue(name, out var local))
+                return local;
             if (path.Count < 2 || path[0] is "time" or "runtime" or "loop")
                 throw new JinjaNotSupported($"'{name}' has no PowerFlows formula equivalent");
 
@@ -677,6 +951,17 @@ internal static class QblJinjaFormula
                 ("upper", 0) => new Node($"Upper({AsText(node).Code})", T.Text),
                 ("lower", 0) => new Node($"Lower({AsText(node).Code})", T.Text),
                 ("strip", 0) => new Node($"Trim({AsText(node).Code})", T.Text),
+                ("lstrip", 0) => new Node($"RegexReplace({AsText(node).Code}, {Str(@"^\s+")}, {Str("")})", T.Text),
+                ("rstrip", 0) => new Node($"RegexReplace({AsText(node).Code}, {Str(@"\s+$")}, {Str("")})", T.Text),
+                ("zfill", 1) when p[0] is { Type: T.Number } width && int.TryParse(width.Code, NumberStyles.Integer, CultureInfo.InvariantCulture, out var w) => ZFill(node, w),
+                ("isdigit" or "isnumeric" or "isdecimal", 0) => new Node($"RegexMatch({AsText(node).Code}, {Str(@"^[0-9]+$")})", T.Bool),
+                ("isalpha", 0) => new Node($"RegexMatch({AsText(node).Code}, {Str(@"^\p{L}+$")})", T.Bool),
+                ("isalnum", 0) => new Node($"RegexMatch({AsText(node).Code}, {Str(@"^[\p{L}\p{N}]+$")})", T.Bool),
+                ("isspace", 0) => new Node($"RegexMatch({AsText(node).Code}, {Str(@"^\s+$")})", T.Bool),
+                ("isupper", 0) => new Node($"(RegexMatch({AsText(node).Code}, {Str(@"\p{Lu}")}) and not RegexMatch({AsText(node).Code}, {Str(@"\p{Ll}")}))", T.Bool),
+                ("islower", 0) => new Node($"(RegexMatch({AsText(node).Code}, {Str(@"\p{Ll}")}) and not RegexMatch({AsText(node).Code}, {Str(@"\p{Lu}")}))", T.Bool),
+                ("total_seconds", 0) when node.Type == T.Duration => new Node($"ToSeconds({node.Code})", T.Number, Float: true),
+                ("time", 0) when node.Type is T.Date or T.DateTime or T.Any => TimeText(node),
                 ("capitalize", 0) => Capitalize(node),
                 ("startswith", 1) => new Node($"Begins({AsText(node).Code}, {AsText(p[0]).Code})", T.Bool),
                 ("endswith", 1) => new Node($"Ends({AsText(node).Code}, {AsText(p[0]).Code})", T.Bool),
@@ -687,6 +972,21 @@ internal static class QblJinjaFormula
                 ("split", 1) => new Node($"Split({AsText(node).Code}, {AsText(p[0]).Code})", T.List, AsText(node).Code, AsText(p[0]).Code),
                 _ => throw new JinjaNotSupported($"'.{member}(…)' has no PowerFlows formula equivalent"),
             };
+        }
+
+        /// <summary>Python zfill: zeros after a leading sign up to the width.</summary>
+        private static Node ZFill(Node node, int width)
+        {
+            var s = AsText(node).Code;
+            string Fill(string text, int n) => $"If(Length({text}) >= {n}, {text}, Right({Str(new string('0', Math.Max(n, 1)))} & {text}, {n}))";
+            return new Node($"If(Begins({s}, \"-\") or Begins({s}, \"+\"), Left({s}, 1) & {Fill($"NotLeft({s}, 1)", width - 1)}, {Fill(s, width)})", T.Text);
+        }
+
+        /// <summary>datetime.time(): prints HH:MM:SS.</summary>
+        private static Node TimeText(Node node)
+        {
+            var t = AsTimestamp(Stamp(node)).Code;
+            return new Node($"({Pad($"Hour({t})")} & \":\" & {Pad($"Minute({t})")} & \":\" & {Pad($"Second({t})")})", T.Text);
         }
 
         private static Node Capitalize(Node node)
@@ -768,6 +1068,11 @@ internal static class QblJinjaFormula
         {
             if (args.Positional.Count > 0 || args.Named.Count == 0)
                 throw new JinjaNotSupported("time.delta(…) needs named spans such as days=1");
+            // Singular names set a part (time.delta(day=1) is the first of the month), as dateutil's relativedelta.
+            if (args.Named.Keys.All(k => k is "year" or "month" or "day" or "hour" or "minute" or "second"))
+                return new Node("", T.Parts, Parts: args.Named.ToDictionary(kv => kv.Key, kv => AsNumber(kv.Value)));
+            if (args.Named.Keys.Any(k => k is "year" or "month" or "day" or "hour" or "minute" or "second"))
+                throw new JinjaNotSupported("time.delta(...) mixing set parts and spans has no PowerFlows formula equivalent");
             if (args.Named.Count == 1 && args.Named.First().Key is "months" or "years")
                 return new Node(AsNumber(args.Named.First().Value).Code, args.Named.First().Key == "months" ? T.Months : T.Years);
             var spans = args.Named.Select(kv => kv.Key switch
@@ -810,6 +1115,19 @@ internal static class QblJinjaFormula
                 case "urlencode": return Only(new Node($"URLEncode({AsText(x).Code})", T.Text));
                 // powerflowextraRd: html2text is not here: Quickbase turns HTML into Markdown with it (<b>x</b> → **x**), which no formula does.
                 case "striptags": return Only(new Node($"HTMLToText({AsText(x).Code})", T.Text));
+                case "max" or "min" or "sum" when x.Items is { Count: > 0 } items && items.All(i => i.Type == T.Number):
+                {
+                    var fn = name switch { "max" => "Max", "min" => "Min", _ => "Sum" };
+                    return Only(Num($"{fn}({string.Join(", ", items.Select(i => i.Code))})", [.. items]));
+                }
+                case "length" or "count" when x.Items is { } counted: return Only(new Node(counted.Count.ToString(CultureInfo.InvariantCulture), T.Number));
+                case "first" or "last" when x.Items is { Count: > 0 } ends: return Only(name == "first" ? ends[0] : ends[^1]);
+                case "join" when x.Items is { } joined && args.Named.Count == 0 && args.Positional.Count <= 1:
+                {
+                    var sep = args.Positional.Count == 1 ? AsText(args.Positional[0]).Code : "\"\"";
+                    return joined.Count == 0 ? new Node("\"\"", T.Text)
+                        : new Node("(" + string.Join($" & {sep} & ", joined.Select(i => AsText(i).Code)) + ")", T.Text);
+                }
                 case "length" or "count" when x.Type == T.List: return Only(new Node($"Count({x.Code})", T.Number));
                 case "length" or "count": return Only(new Node($"Length({AsText(x).Code})", T.Number));
                 case "first" when x.Type == T.List && x.SplitText is not null: return Only(new Node($"Part({x.SplitText}, 1, {x.SplitSep})", T.Text));
@@ -879,9 +1197,72 @@ internal static class QblJinjaFormula
                         ? new Node($"If({empty}, {x.Code}, {fallback.Code})", x.Type, Float: x.Float || fallback.Float)
                         : new Node($"If({empty}, {AsText(x).Code}, {AsText(fallback).Code})", T.Text);
                 }
+                // escape / e: Jinja's HTML escaping (& first, then < > " ').
+                case "escape" or "e":
+                    return Only(new Node(Replaces(AsText(x).Code, ("&", "&amp;"), ("<", "&lt;"), (">", "&gt;"), ("\"", "&#34;"), ("'", "&#39;")), T.Text));
+                // tojson / to_json: a JSON value (number / boolean as is, no value as null, a text quoted with JSON escapes).
+                case "tojson" or "to_json": return Only(Json(x));
+                case "timezone" when args.Named.Count == 0 && args.Positional is [{ Type: T.Text } zone] && zone.Code.StartsWith('"'):
+                    return Timezone(x, Unquote(zone.Code));
+                // Jinja's wordcount: the number of \w+ runs (each run replaced by one character, compared with none).
+                case "wordcount": return Only(new Node($"(Length(RegexReplace({AsText(x).Code}, {Str(@"\w+")}, {Str("x")})) - Length(RegexReplace({AsText(x).Code}, {Str(@"\w+")}, {Str("")})))", T.Number));
+                case "truncate" when args.Positional.Count <= 4 && args.Named.Keys.All(k => k is "length" or "killwords" or "end" or "leeway"):
+                    return Truncate(x, args);
                 default:
                     throw new JinjaNotSupported($"the '{name}' filter has no PowerFlows formula equivalent");
             }
+        }
+
+        private static string Replaces(string code, params (string From, string To)[] pairs) =>
+            pairs.Aggregate(code, (c, p) => $"SearchAndReplace({c}, {Str(p.From)}, {Str(p.To)})");
+
+        /// <summary>Jinja's tojson (htmlsafe json.dumps): a number or boolean as is; a text quoted, with \ " and control characters
+        /// escaped and &lt; &gt; &amp; ' written as < > & '; a field without a value (None) as null.</summary>
+        private static Node Json(Node x)
+        {
+            switch (x.Type)
+            {
+                case T.Number: return new Node(AsText(x).Code, T.Text);
+                case T.Bool: return new Node($"If({x.Code}, {Str("true")}, {Str("false")})", T.Text);
+                case T.Text or T.Any:
+                {
+                    var text = AsText(x).Code;
+                    var escaped = Replaces(text, ("\\", "\\\\"), ("\"", "\\\""), ("\n", "\\n"), ("\r", "\\r"), ("\t", "\\t"),
+                        ("\b", "\\b"), ("\f", "\\f"), ("<", "\\u003c"), (">", "\\u003e"), ("&", "\\u0026"), ("'", "\\u0027"));
+                    var quoted = $"({Str("\"")} & {escaped} & {Str("\"")})";
+                    return x.Code.StartsWith('"') ? new Node(quoted, T.Text)
+                        : new Node($"If(Length({text}) = 0, {Str("null")}, {quoted})", T.Text);
+                }
+                default: throw new JinjaNotSupported("this value has no PowerFlows formula equivalent for |tojson");
+            }
+        }
+
+        /// <summary>Jinja truncate(length=255, killwords=False, end='...', leeway=5): the text as is when at most length + leeway long;
+        /// else its first length - len(end) characters (without killwords: up to the last space) and end.</summary>
+        private static Node Truncate(Node x, Args args)
+        {
+            Node? Arg(int i, string key) => args.Named.TryGetValue(key, out var n) ? n : args.Positional.ElementAtOrDefault(i);
+            int Literal(Node? n, int fallback) => n is null ? fallback
+                : n.Type == T.Number && int.TryParse(n.Code, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) && v >= 0 ? v
+                : throw new JinjaNotSupported("truncate(…) needs whole-number literals");
+            var length = Literal(Arg(0, "length"), 255);
+            var killwords = Arg(1, "killwords")?.Code switch
+            {
+                null or "false" => false,
+                "true" => true,
+                _ => throw new JinjaNotSupported("truncate(…) with a computed killwords has no PowerFlows formula equivalent"),
+            };
+            var endNode = Arg(2, "end");
+            if (endNode is not null && !(endNode.Type == T.Text && endNode.Code.StartsWith('"')))
+                throw new JinjaNotSupported("truncate(…) needs a literal end text");
+            var end = endNode is null ? "..." : Unquote(endNode.Code);
+            var leeway = Literal(Arg(3, "leeway"), 5);
+            if (length < end.Length) throw new JinjaNotSupported("truncate(…) shorter than its end text");
+            var s = AsText(x).Code;
+            var cut = $"Left({s}, {length - end.Length})";
+            // Python's rsplit(' ', 1)[0]: everything before the last space (all of it when there is none).
+            var body = killwords ? cut : $"RegexReplace({cut}, {Str(" [^ ]*$")}, {Str("")})";
+            return new Node($"If(Length({s}) <= {length + leeway}, {s}, {body} & {Str(end)})", T.Text);
         }
 
         private static Node Strftime(Node d, string format)
