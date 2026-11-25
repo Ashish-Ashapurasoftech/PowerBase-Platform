@@ -191,6 +191,18 @@ public class BuildSpeedTests
     }
 
     [Fact]
+    public void ParentKeyChunks_SplitLongListsIntoSortedChunksOfAtMostAThousand()
+    {
+        var keys = Enumerable.Range(1, 2_500).Reverse().Select(i => (object)(long)i).ToList();
+
+        var chunks = PowerBase.Infrastructure.Repositories.RecordRepository.ParentKeyChunks(keys);
+
+        chunks.Select(c => c.Count).Should().Equal(1000, 1000, 500);
+        chunks.SelectMany(c => c).Cast<long>().Should().BeInAscendingOrder().And.HaveCount(2_500).And.OnlyHaveUniqueItems();
+        PowerBase.Infrastructure.Repositories.RecordRepository.ParentKeyChunks(keys.Take(1000).ToList()).Should().HaveCount(1, "a short list stays one query");
+    }
+
+    [Fact]
     public void BuildOnlyApps_LimitsOnlyTheTenantsNamed()
     {
         var o = ComputeConfig.ReadCompute(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>

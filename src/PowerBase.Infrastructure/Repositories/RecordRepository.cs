@@ -1217,12 +1217,36 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         };
     }
 
+    /// <summary>
+    /// The parent keys in sorted chunks of at most <see cref="SqlInList.MaxParameters"/>. A longer list used to go to SQL as one OPENJSON
+    /// array, and on UAT SQL Server answered "children of 3,000 parents" with a scan of the whole 1.1 M-row child table that parsed the
+    /// JSON for every row (ten minutes, nothing returned); a plain IN list of up to 1,000 keys seeks the reference index. The chunks are
+    /// sorted, so results concatenated chunk by chunk keep the "by parent key" order of one query.
+    /// </summary>
+    internal static IReadOnlyList<IReadOnlyCollection<object>> ParentKeyChunks(IReadOnlyCollection<object> keys)
+    {
+        if (keys.Count <= SqlInList.MaxParameters) return [keys];
+        List<object> sorted;
+        try { sorted = keys.OrderBy(k => k, Comparer<object>.Default).ToList(); }
+        catch (ArgumentException) { sorted = keys.ToList(); }   // keys of mixed types: no order to keep
+        return sorted.Chunk(SqlInList.MaxParameters).Select(c => (IReadOnlyCollection<object>)c).ToList();
+    }
+
     public async Task<IReadOnlyDictionary<object, object?>> AggregateByReferenceAsync(
         AppTable childTable, int referenceFid, string function, int? targetFid,
         IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree, string? targetSubField = null,
         IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null,
         CancellationToken ct = default)
     {
+        if (parentKeyValues.Count > SqlInList.MaxParameters)
+        {
+            var merged = new Dictionary<object, object?>();
+            foreach (var chunk in ParentKeyChunks(parentKeyValues))
+                foreach (var (key, value) in await AggregateByReferenceAsync(childTable, referenceFid, function, targetFid, chunk, filterTree,
+                             targetSubField, fieldLookup, parentScope, ct))
+                    merged[key] = value;
+            return merged;
+        }
         var result = new Dictionary<object, object?>();
         if (parentKeyValues.Count == 0) return result;
 
@@ -1273,6 +1297,15 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         int? sortFid, bool sortDescending, IReadOnlyDictionary<long, AppField>? fieldLookup = null,
         ParentFieldScope? parentScope = null, CancellationToken ct = default)
     {
+        if (parentKeyValues.Count > SqlInList.MaxParameters)
+        {
+            // Sorted chunks, concatenated: still ordered by parent key, then by the sort within each parent, as one query was.
+            var merged = new List<(object, object)>();
+            foreach (var chunk in ParentKeyChunks(parentKeyValues))
+                merged.AddRange(await ListValuesByReferenceAsync(childTable, referenceFid, targetFid, targetSubField, chunk, filterTree,
+                    sortFid, sortDescending, fieldLookup, parentScope, ct));
+            return merged;
+        }
         var result = new List<(object, object)>();
         if (parentKeyValues.Count == 0) return result;
 
@@ -1313,6 +1346,14 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         CancellationToken ct = default)
     {
         if (parentKeyValues.Count == 0) return [];
+        if (parentKeyValues.Count > SqlInList.MaxParameters)
+        {
+            // Chunks, then one Id order across them, as the single query returned.
+            var all = new List<IReadOnlyDictionary<string, object?>>();
+            foreach (var chunk in ParentKeyChunks(parentKeyValues))
+                all.AddRange(await ListRowsByReferenceAsync(childTable, fields, referenceFid, chunk, filterTree, fieldLookup, parentScope, ct));
+            return all.OrderBy(r => r.TryGetValue("Id", out var id) && id is not null ? Convert.ToInt64(id) : long.MaxValue).ToList();
+        }
 
         var refCol = PhysicalNaming.ColumnName(referenceFid);
         var parameters = new DynamicParameters();
