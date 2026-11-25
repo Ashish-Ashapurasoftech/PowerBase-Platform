@@ -208,6 +208,8 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
             _logger?.LogInformation("Compute build round: tenant {TenantId}: {Fast} field(s) of small tables on the fast lane ({Reserved} of {Builds} build(s) kept for them), {Big} on big tables.",
                 QueryContext.TenantId, fastLane.Count, reserved, concurrency, bigLane.Count);
 
+        await AddBigTableColumnsAsync(bigLane.Select(d => d.Value.Decision.Plan), rowCounts, options, ct);
+
         using var gate = new SemaphoreSlim(concurrency);
         using var bigGate = new SemaphoreSlim(Math.Max(1, concurrency - reserved));
         var running = new List<Task>();
@@ -265,6 +267,45 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
         var dropped = await DropUnusedColumnsAsync(ct);
         if (outcomes.Count > 0 || dropped > 0) _models.Invalidate(QueryContext.TenantId);
         return outcomes;
+    }
+
+    /// <summary>
+    /// On a big table every first build's ADD COLUMN can rewrite the whole table (wide rows, one per page) and blocks every build on it
+    /// for minutes. So before the round starts, the stored columns of all its pending fields on such a table whose type is known now are
+    /// added together in one ALTER TABLE: one rewrite instead of one per field. The per-field path then finds its column ready.
+    /// A failure here only logs: each build still adds its own column as before.
+    /// </summary>
+    private async Task AddBigTableColumnsAsync(IEnumerable<MaterializePlan?> plans, Dictionary<long, long> rowCounts, ComputeOptions options, CancellationToken ct)
+    {
+        var byTable = plans.OfType<MaterializePlan>()
+            .Where(p => rowCounts.TryGetValue(p.TableId, out var rows) && rows > options.FastLaneMaxRows)
+            .GroupBy(p => p.TableId).ToList();
+        foreach (var table in byTable)
+        {
+            try
+            {
+                var missing = new List<(int Fid, string SqlType)>();
+                await using (var probe = await OpenConnectionAsync(ct))
+                {
+                    foreach (var plan in table.DistinctBy(p => p.Fid))
+                    {
+                        if (await SqlColumnType.ReadAsync(probe, PhysicalNaming.FullTableName(plan.TableId), PhysicalNaming.MaterializedColumnName(plan.Fid), ct: ct) is not null)
+                            continue;
+                        if (await MaterializedColumnWriter.StoredTypeAsync(probe, plan, ct) is { } sqlType)
+                            missing.Add((plan.Fid, sqlType));
+                    }
+                }
+                if (missing.Count < 2) continue;   // one column: the per-field path is the same single ALTER
+                var sw = Stopwatch.StartNew();
+                var added = await _schemaEngine.EnsureMaterializedColumnsAsync(table.Key, missing, ct);
+                _logger?.LogInformation("Compute: {Added} of {Missing} stored column(s) of big table t{TableId} added in one ALTER TABLE ({Seconds:F0} s).",
+                    added, missing.Count, table.Key, sw.Elapsed.TotalSeconds);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger?.LogWarning(ex, "Compute: adding the stored columns of t{TableId} together failed; each build adds its own.", table.Key);
+            }
+        }
     }
 
     /// <summary>

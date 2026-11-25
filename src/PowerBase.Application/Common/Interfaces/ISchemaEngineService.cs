@@ -84,6 +84,13 @@ public interface ISchemaEngineService
     /// </summary>
     Task<bool> EnsureMaterializedColumnAsync(long tableId, int fid, string sqlType, CancellationToken ct = default);
 
+    /// <summary>
+    /// Adds every missing stored column of <paramref name="columns"/> (fid, SQL type) to the table in ONE ALTER TABLE. On a wide table of
+    /// big rows SQL Server rewrites the whole table for an ADD, so adding the columns of a build round together costs one rewrite instead
+    /// of one per field. Columns that already exist are left alone; the 1,024-column headroom is kept. Returns how many were added.
+    /// </summary>
+    Task<int> EnsureMaterializedColumnsAsync(long tableId, IReadOnlyList<(int Fid, string SqlType)> columns, CancellationToken ct = default);
+
     /// <summary>Drops the stored cache column c_{fid} (and any index on it) if it exists.</summary>
     Task DropMaterializedColumnAsync(long tableId, int fid, CancellationToken ct = default);
 

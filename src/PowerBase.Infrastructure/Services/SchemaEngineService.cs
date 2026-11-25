@@ -508,7 +508,7 @@ public class SchemaEngineService : ISchemaEngineService
             SET XACT_ABORT ON;
             BEGIN TRAN;
             DECLARE @r INT;
-            EXEC @r = sp_getapplock @Resource = @lockName, @LockMode = 'Exclusive', @LockOwner = 'Transaction', @LockTimeout = 120000;
+            EXEC @r = sp_getapplock @Resource = @lockName, @LockMode = 'Exclusive', @LockOwner = 'Transaction', @LockTimeout = {DdlLockTimeoutMs};
             IF @r < 0 THROW 50001, 'Timed out waiting for the stored-column DDL lock of the table.', 1;
             DROP INDEX IF EXISTS IX_{PhysicalNaming.TableName(tableId)}_{column} ON {physicalTable};
             DROP INDEX IF EXISTS UX_{PhysicalNaming.TableName(tableId)}_{column} ON {physicalTable};
@@ -522,10 +522,60 @@ public class SchemaEngineService : ISchemaEngineService
             try
             {
                 await connection.ExecuteAsync(new CommandDefinition(sql, new { lockName = $"pb_ddl_{PhysicalNaming.TableName(tableId)}" },
-                    commandTimeout: 300, cancellationToken: ct));
+                    commandTimeout: DdlCommandTimeoutSeconds, cancellationToken: ct));
                 return true;
             }
             catch (Microsoft.Data.SqlClient.SqlException ex) when (ex.Number == 1205 && attempt < 5)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), ct);
+            }
+        }
+    }
+
+    /// <summary>An ADD on a big wide table can rewrite the table (minutes): the DDL lock and command wait that long instead of failing.</summary>
+    internal const int DdlLockTimeoutMs = 1_200_000;
+    internal const int DdlCommandTimeoutSeconds = 1_800;
+
+    public async Task<int> EnsureMaterializedColumnsAsync(long tableId, IReadOnlyList<(int Fid, string SqlType)> columns, CancellationToken ct = default)
+    {
+        var wanted = columns.Where(c => Compute.SqlColumnType.IsAllowed(c.SqlType)).DistinctBy(c => c.Fid).ToList();
+        if (wanted.Count == 0) return 0;
+
+        var physicalTable = PhysicalNaming.FullTableName(tableId);
+        var json = System.Text.Json.JsonSerializer.Serialize(
+            wanted.Select(c => new { name = PhysicalNaming.MaterializedColumnName(c.Fid), type = c.SqlType }));
+        // Inside the table's DDL lock: only the columns still missing are added, all in one ALTER TABLE, and no more than the headroom
+        // under the 1,024-column limit allows (the rest stay for the per-field path, which marks them Not allowed).
+        var sql = $"""
+            SET XACT_ABORT ON;
+            BEGIN TRAN;
+            DECLARE @r INT;
+            EXEC @r = sp_getapplock @Resource = @lockName, @LockMode = 'Exclusive', @LockOwner = 'Transaction', @LockTimeout = {DdlLockTimeoutMs};
+            IF @r < 0 THROW 50001, 'Timed out waiting for the stored-column DDL lock of the table.', 1;
+            DECLARE @room INT = @limit - (SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID(@table));
+            DECLARE @add NVARCHAR(MAX) = N'', @n INT = 0;
+            SELECT TOP (CASE WHEN @room > 0 THEN @room ELSE 0 END) @add = @add + N', ' + QUOTENAME(c.name) + N' ' + c.type + N' NULL', @n = @n + 1
+            FROM OPENJSON(@json) WITH (name SYSNAME '$.name', type NVARCHAR(40) '$.type') c
+            WHERE COL_LENGTH(@table, c.name) IS NULL;
+            IF @n > 0
+            BEGIN
+                DECLARE @ddl NVARCHAR(MAX) = N'ALTER TABLE {physicalTable} ADD ' + STUFF(@add, 1, 2, N'') + N';';
+                EXEC sp_executesql @ddl;
+            END
+            COMMIT;
+            SELECT @n;
+            """;
+        await using var connection = await _connectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql,
+                    new { lockName = $"pb_ddl_{PhysicalNaming.TableName(tableId)}", table = physicalTable, json, limit = MaterializedColumnHeadroomLimit },
+                    commandTimeout: DdlCommandTimeoutSeconds, cancellationToken: ct));
+            }
+            catch (SqlException ex) when (ex.Number == 1205 && attempt < 5)
             {
                 await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), ct);
             }
