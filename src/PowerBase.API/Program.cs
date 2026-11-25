@@ -496,6 +496,7 @@ builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IExemptFieldE
 builder.Services.AddScoped<PowerBase.Application.Fields.Commands.CleanupExemptFieldEncryption.CleanupExemptFieldEncryptionCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IDatabaseDecryptionService, PowerBase.Infrastructure.Services.DatabaseDecryptionService>();
 builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.DecryptionJobTracker>();
+builder.Services.AddHostedService<PowerBase.API.Workers.DecryptDatabaseOnStartupWorker>();
 builder.Services.AddScoped<IPermissionRepository, PermissionRepository>();
 builder.Services.AddScoped<IUserPermissionRepository, UserPermissionRepository>();
 builder.Services.AddScoped<IFormRepository, FormRepository>();

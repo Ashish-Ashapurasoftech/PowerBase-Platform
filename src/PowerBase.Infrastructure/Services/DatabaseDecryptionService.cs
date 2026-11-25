@@ -78,8 +78,23 @@ public class DatabaseDecryptionService : IDatabaseDecryptionService
 
     public async Task RunAsync(DecryptDatabaseResult job, int tableParallelism, CancellationToken ct = default)
     {
+        // One decrypt at a time across ALL API instances: two runs would fight over the same f_N_new columns.
+        await using var lockConnection = _controlFactory.Create();
+        var lockHeld = false;
         try
         {
+            await lockConnection.OpenAsync(ct);
+            var lockResult = await lockConnection.ExecuteScalarAsync<int>(new CommandDefinition(
+                "DECLARE @r INT; EXEC @r = sp_getapplock @Resource = N'PowerBase.DecryptDatabase', @LockMode = N'Exclusive', @LockOwner = N'Session', @LockTimeout = 0; SELECT @r;",
+                cancellationToken: ct));
+            if (lockResult < 0)
+            {
+                job.AddError("Another API instance is already running a decrypt; this run was skipped.");
+                job.Update(j => { j.State = "Failed"; j.FinishedUtc = DateTime.UtcNow; });
+                return;
+            }
+            lockHeld = true;
+
             var tenant = await FindTenantAsync(job.Database, ct)
                 ?? throw new InvalidOperationException($"No tenant uses database '{job.Database}'.");
             job.Update(j => { j.TenantId = tenant.Id; j.TenantName = tenant.Name; });
@@ -113,6 +128,17 @@ public class DatabaseDecryptionService : IDatabaseDecryptionService
             _logger.LogError(ex, "[DecryptDatabase] FAILED {Database}", job.Database);
             job.AddError(ex.Message);
             job.Update(j => { j.State = "Failed"; j.FinishedUtc = DateTime.UtcNow; });
+        }
+        finally
+        {
+            if (lockHeld)
+            {
+                try
+                {
+                    await lockConnection.ExecuteAsync("EXEC sp_releaseapplock @Resource = N'PowerBase.DecryptDatabase', @LockOwner = N'Session';");
+                }
+                catch { /* closing the connection releases it anyway */ }
+            }
         }
     }
 
