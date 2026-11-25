@@ -624,6 +624,13 @@ public sealed class ReferenceSettings
     public string? OriginalTypeCode { get; set; }
     public string? OriginalSettings { get; set; }
 
+    /// <summary>The field type this Reference is shown as, a value type code (Text, Number, Currency, Date, …), saved
+    /// when the Reference is made: for a new Reference field the type of the parent's key field (Number for Record ID#),
+    /// for an existing child field converted into the Reference that field's own type. Lets a client show the field as
+    /// "Number - Reference" without reading the parent table. Unlike <see cref="OriginalTypeCode"/> (kept only so deleting
+    /// the relationship can restore the field) it is always set. Null for References saved before it existed.</summary>
+    public string? ResultTypeCode { get; set; }
+
     /// <summary>Dependent-dropdown conditions ("the values in this field depend on a selection in
     /// another field"). All conditions must hold (AND). Null/empty = every parent record is offered.</summary>
     public List<ReferenceFilterCondition>? FilterConditions { get; set; }

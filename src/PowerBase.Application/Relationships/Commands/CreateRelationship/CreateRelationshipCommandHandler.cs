@@ -129,9 +129,14 @@ public class CreateRelationshipCommandHandler
         string? conversionWarning = null;
         int? originalFid = null;
         string? originalTypeCode = null, originalSettings = null;
+        // The type the Reference is shown as (ReferenceSettings.ResultTypeCode): a new field takes the parent key's
+        // type, an existing child field keeps its own.
+        string referenceResultTypeCode;
         var referenceIsExistingField = command.ReferenceFieldFid is not null;
         if (!referenceIsExistingField)
         {
+            referenceResultTypeCode = FieldValueTypes.ForNewReference(KeyFieldResolver.ResolveDisplayKey(
+                new Relationship { DisplayKeyFieldId = displayKeyFieldId }, parent, parentFields));
             refField = await _fieldFactory.CreateAsync(
                 child, FieldTypeCodeNames.Reference, command.ReferenceFieldLabel!.Trim(),
                 command.IsReferenceRequired,
@@ -155,6 +160,9 @@ public class CreateRelationshipCommandHandler
                 {
                     ["referenceFieldFid"] = [$"The reference field must be an existing, non-system field on the child table whose type matches the parent's key field ({keyTypeCode})."],
                 });
+
+            // Read before the field is turned into a Reference below.
+            referenceResultTypeCode = FieldValueTypes.ForConvertedReference(existing);
 
             var refType = await _fieldTypeRepo.GetByCodeAsync(FieldTypeCodeNames.Reference, ct)
                 ?? throw new NotFoundException("FieldType", "Reference");
@@ -206,10 +214,14 @@ public class CreateRelationshipCommandHandler
             {
                 RelationshipId = relId, ParentTableId = parent.Id, OriginalFid = originalFid,
                 OriginalTypeCode = originalTypeCode, OriginalSettings = originalSettings,
+                ResultTypeCode = referenceResultTypeCode,
             }), ct);
 
         // 3. Lookup fields on the child (first one becomes the proxy).
-        var createdFields = new List<RelationshipFieldDto> { new(refField.PublicId, refField.Fid!.Value, refField.Label ?? refField.Name, "reference", "Reference") };
+        var createdFields = new List<RelationshipFieldDto>
+        {
+            new(refField.PublicId, refField.Fid!.Value, refField.Label ?? refField.Name, "reference", "Reference") { ResultTypeCode = referenceResultTypeCode },
+        };
         // Same precedence as KeyFieldResolver.ResolveDisplayKey (the just-resolved override, else the
         // parent's global Set Key, else Record ID#) — matches what GetAsync returns on a later reload.
         var parentKeyField = KeyFieldResolver.ResolveDisplayKey(
@@ -242,7 +254,7 @@ public class CreateRelationshipCommandHandler
                     SourceSubField = spec.SourceSubField,
                 }, ct);
             firstLookup ??= lookup;
-            createdFields.Add(new(lookup.PublicId, lookup.Fid!.Value, lookup.Label ?? lookup.Name, "lookup", sourceTypeCode));
+            createdFields.Add(new(lookup.PublicId, lookup.Fid!.Value, lookup.Label ?? lookup.Name, "lookup", sourceTypeCode) { ResultTypeCode = resultTypeCode });
             childAddFids.Add(lookup.Fid!.Value);
         }
 
@@ -274,7 +286,10 @@ public class CreateRelationshipCommandHandler
                         target is null ? null : TargetKeyType(target, referenceKeys, lookupSources, spec.Function) ?? FieldValueTypes.Of(target), spec.TargetSubField),
                     TargetSubField = spec.TargetSubField,
                 }, ct);
-            createdFields.Add(new(summary.PublicId, summary.Fid!.Value, summary.Name, "summary"));
+            createdFields.Add(new(summary.PublicId, summary.Fid!.Value, summary.Name, "summary")
+            {
+                ResultTypeCode = PowerBase.Application.Formulas.FormulaTypeMap.ParseSummarySettings(summary.Settings)?.ResultTypeCode,
+            });
             parentAddFids.Add(summary.Fid!.Value);
         }
 
@@ -335,6 +350,8 @@ public class CreateRelationshipCommandHandler
             ParentTableName = parent.Name,
             ChildTablePublicId = child.PublicId,
             ChildTableName = child.Name,
+            ParentSingularLabel = string.IsNullOrWhiteSpace(parent.SingularLabel) ? parent.Name : parent.SingularLabel,
+            ChildSingularLabel = string.IsNullOrWhiteSpace(child.SingularLabel) ? child.Name : child.SingularLabel,
             ReferenceFid = refField.Fid!.Value,
             ReferenceFieldName = refField.Name,
             ProxyFid = firstLookup?.Fid,
