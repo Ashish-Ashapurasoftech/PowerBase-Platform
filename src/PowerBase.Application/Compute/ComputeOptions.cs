@@ -69,6 +69,22 @@ public sealed class ComputeOptions
     /// </summary>
     public int BuildRoundMinutes { get; set; } = 15;
 
+    /// <summary>
+    /// Rows per batch of a field worked out by the read code (a <see cref="ProjectedPlan"/>). Each batch runs the projector once, so a larger
+    /// batch pays its fixed per-batch reads fewer times; it also holds more rows in the worker's memory. 100–5,000, default 500.
+    /// </summary>
+    public int ProjectedBatchSize { get; set; } = 500;
+
+    /// <summary>
+    /// A first build of a field worked out in C# (formula, read-code / projected, or one that decrypts) on a table of at least
+    /// <see cref="SliceMinRows"/> rows is split into this many Id ranges, built side by side on their own background slots: one huge field
+    /// no longer runs on a single session for hours. 1 = off (one session per field, as before). Slots stay the database-wide limit.
+    /// </summary>
+    public int SlicesPerField { get; set; } = 1;
+
+    /// <summary>Smallest table a field is split for (see <see cref="SlicesPerField"/>).</summary>
+    public int SliceMinRows { get; set; } = 100_000;
+
     /// <summary>How many fields this replica builds at once.</summary>
     public int BuildConcurrency => Math.Max(1, BuildsPerReplica > 0 ? Math.Min(BuildsPerReplica, BackgroundSessionsPerDatabase) : BackgroundSessionsPerDatabase);
 

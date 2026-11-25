@@ -502,14 +502,34 @@ public class SchemaEngineService : ISchemaEngineService
         }
 
         // Another type: the stored values are worthless for the new type, so the column is replaced (empty) and rebuilt by the worker.
-        await connection.ExecuteAsync(new CommandDefinition($"""
+        // Several fields of one table are built side by side, so their ALTER TABLEs on that table are taken one at a time (a table-wide
+        // application lock inside the transaction) and a deadlock with other work on the table is simply tried again.
+        var sql = $"""
+            SET XACT_ABORT ON;
+            BEGIN TRAN;
+            DECLARE @r INT;
+            EXEC @r = sp_getapplock @Resource = @lockName, @LockMode = 'Exclusive', @LockOwner = 'Transaction', @LockTimeout = 120000;
+            IF @r < 0 THROW 50001, 'Timed out waiting for the stored-column DDL lock of the table.', 1;
             DROP INDEX IF EXISTS IX_{PhysicalNaming.TableName(tableId)}_{column} ON {physicalTable};
             DROP INDEX IF EXISTS UX_{PhysicalNaming.TableName(tableId)}_{column} ON {physicalTable};
             IF COL_LENGTH('{physicalTable}', '{column}') IS NOT NULL
                 ALTER TABLE {physicalTable} DROP COLUMN {column};
             ALTER TABLE {physicalTable} ADD {column} {sqlType} NULL;
-            """, cancellationToken: ct));
-        return true;
+            COMMIT;
+            """;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await connection.ExecuteAsync(new CommandDefinition(sql, new { lockName = $"pb_ddl_{PhysicalNaming.TableName(tableId)}" },
+                    commandTimeout: 300, cancellationToken: ct));
+                return true;
+            }
+            catch (Microsoft.Data.SqlClient.SqlException ex) when (ex.Number == 1205 && attempt < 5)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), ct);
+            }
+        }
     }
 
     public async Task DropMaterializedColumnAsync(long tableId, int fid, CancellationToken ct = default)

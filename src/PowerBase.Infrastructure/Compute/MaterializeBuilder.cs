@@ -248,11 +248,20 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
         try
         {
             MaterializedColumnWriter.WriteResult result;
-            await using (var guard = await DatabaseGuard.AcquireAsync(ConnectionFactory.CreateAsync, options, backgroundOnly: true, TimeSpan.FromMinutes(2), _logger, ct))
+            var sessions = 1;
+            var slices = await SlicesAsync(plan, options, ct);
+            if (slices is null)
             {
+                await using var guard = await DatabaseGuard.AcquireAsync(ConnectionFactory.CreateAsync, options, backgroundOnly: true, TimeSpan.FromMinutes(2), _logger, ct);
                 if (guard is null) return Done("busy", reason: "No background compute slot was free.");
                 result = await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, v, new WriteScope.All(), model.Schema, options, reconcile: false, ct, _decryptor, _projector);
                 await ComputeTableProcessor.PropagateAsync(guard.Connection, model, plan, result, ct);
+            }
+            else
+            {
+                var sliced = await BuildSlicedAsync(plan, sqlType, v, model, slices, options, ct);
+                if (sliced is null) return Done("busy", reason: "No background compute slot was free.");
+                (result, sessions) = sliced.Value;
             }
 
             // Replay: changes saved while the build ran are in the outbox; everything up to the watermark must be applied before Ready.
@@ -282,8 +291,10 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
             if (!await Repo.MarkReadyAsync(field.Id, v, ct)) return Done("superseded", result.RowsWritten, "The field changed during the build.");
             // Decision Q7: the whole field goes into the search index (one field re-index job), now that it can be read from c_.
             if (_search is not null) await _search.ValuesChangedAsync(field, [], tooMany: true, ct);
-            _logger?.LogInformation("Compute: field {FieldId} (t{TableId}.c_{Fid}) built: {Rows} row(s) in {Batches} batch(es), {Seconds:0.0}s. Ready.",
-                field.Id, plan.TableId, plan.Fid, result.RowsWritten, result.Batches, sw.Elapsed.TotalSeconds);
+            _logger?.LogInformation("Compute: field {FieldId} (t{TableId}.c_{Fid}) built: {Rows} row(s) in {Batches} batch(es), {Seconds:0.0}s. Ready. " +
+                "({Plan}, {Sessions} session(s), compute {ComputeSeconds:0.0}s, write {WriteSeconds:0.0}s summed over sessions)",
+                field.Id, plan.TableId, plan.Fid, result.RowsWritten, result.Batches, sw.Elapsed.TotalSeconds,
+                plan.GetType().Name, sessions, result.ComputeTime.TotalSeconds, result.WriteTime.TotalSeconds);
             return Done("ready", result.RowsWritten);
         }
         catch (DatabaseBusyException ex)
@@ -392,6 +403,83 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
         LookupPlan l => new[] { l.ParentTableId, l.ChildTableId }.Distinct().ToList(),
         _ => [plan.TableId]
     };
+
+    /// <summary>
+    /// The Id ranges a first build is split into, or null when it runs on one session: splitting is on (<see cref="ComputeOptions.SlicesPerField"/>),
+    /// the values are worked out in C# (the slow kind; set-based SQL builds are already fast), and the table has at least
+    /// <see cref="ComputeOptions.SliceMinRows"/> rows. Equal-sized ranges by row count (NTILE over the clustered Id); the last one is open-ended
+    /// so rows added after the ranges were read are still built.
+    /// </summary>
+    private async Task<IReadOnlyList<WriteScope.Range>?> SlicesAsync(MaterializePlan plan, ComputeOptions options, CancellationToken ct)
+    {
+        if (options.SlicesPerField <= 1 || !MaterializedColumnWriter.UsesValueTable(plan)) return null;
+        var table = PhysicalNaming.FullTableName(MaterializedColumnWriter.ShapeOf(plan).TableId);
+        await using var conn = await OpenConnectionAsync(ct);
+        var rows = await conn.ExecuteScalarAsync<long>(new CommandDefinition($"SELECT COUNT_BIG(*) FROM {table}", commandTimeout: 600, cancellationToken: ct));
+        if (rows < options.SliceMinRows) return null;
+        var bounds = (await conn.QueryAsync<long>(new CommandDefinition($"""
+            SELECT MAX(Id) FROM (SELECT Id, NTILE(@n) OVER (ORDER BY Id) AS b FROM {table}) x GROUP BY b ORDER BY MAX(Id)
+            """, new { n = options.SlicesPerField }, commandTimeout: 600, cancellationToken: ct))).ToList();
+        if (bounds.Count < 2) return null;
+        var ranges = new List<WriteScope.Range>(bounds.Count);
+        long after = 0;
+        foreach (var upTo in bounds) { ranges.Add(new WriteScope.Range(after, upTo)); after = upTo; }
+        ranges[^1] = ranges[^1] with { UpTo = long.MaxValue };
+        return ranges;
+    }
+
+    /// <summary>
+    /// Builds the slices side by side, each on its own background slot (as many slots as are free, at least one — waited for like a normal
+    /// build; fewer slots than slices just means a session takes the next slice when it finishes one). The first failure stops the other
+    /// sessions and is rethrown, so the field ends exactly as a one-session build that failed (busy → stays Building, error → Failed).
+    /// Null when no slot freed up.
+    /// </summary>
+    private async Task<(MaterializedColumnWriter.WriteResult Result, int Sessions)?> BuildSlicedAsync(MaterializePlan plan, string sqlType, int version,
+        ComputeModel model, IReadOnlyList<WriteScope.Range> slices, ComputeOptions options, CancellationToken ct)
+    {
+        var guards = new List<GuardedConnection>();
+        try
+        {
+            var first = await DatabaseGuard.AcquireAsync(ConnectionFactory.CreateAsync, options, backgroundOnly: true, TimeSpan.FromMinutes(2), _logger, ct);
+            if (first is null) return null;
+            guards.Add(first);
+            while (guards.Count < slices.Count
+                   && await DatabaseGuard.AcquireAsync(ConnectionFactory.CreateAsync, options, backgroundOnly: true, TimeSpan.Zero, _logger, ct) is { } more)
+                guards.Add(more);
+
+            var queue = new System.Collections.Concurrent.ConcurrentQueue<WriteScope.Range>(slices);
+            var results = new System.Collections.Concurrent.ConcurrentBag<MaterializedColumnWriter.WriteResult>();
+            Exception? failure = null;
+            using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            await Task.WhenAll(guards.Select(async guard =>
+            {
+                try
+                {
+                    while (!stop.IsCancellationRequested && queue.TryDequeue(out var slice))
+                        results.Add(await MaterializedColumnWriter.RecomputeAsync(guard, plan, sqlType, version, slice, model.Schema, options,
+                            reconcile: false, stop.Token, _decryptor, _projector));
+                }
+                catch (Exception ex)
+                {
+                    Interlocked.CompareExchange(ref failure, ex, null);
+                    stop.Cancel();
+                }
+            }));
+            if (failure is not null)
+            {
+                ct.ThrowIfCancellationRequested();
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+            }
+
+            var result = MaterializedColumnWriter.WriteResult.Combine(results.ToList());
+            await ComputeTableProcessor.PropagateAsync(guards[0].Connection, model, plan, result, ct);
+            return (result, guards.Count);
+        }
+        finally
+        {
+            foreach (var guard in guards) await guard.DisposeAsync();
+        }
+    }
 
     private async Task<bool> HasRowsUpToAsync(IReadOnlyList<long> tables, long watermark, CancellationToken ct)
     {

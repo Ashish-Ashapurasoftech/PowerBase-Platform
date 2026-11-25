@@ -20,6 +20,8 @@ public abstract record WriteScope
     public sealed record Rows(IReadOnlyCollection<long> Ids) : WriteScope;
     /// <summary>Lookup only: every child of these parents (a parent's source value changed, or the parent was deleted/restored).</summary>
     public sealed record ChildrenOf(IReadOnlyCollection<long> ParentIds) : WriteScope;
+    /// <summary>Every row of the field's table with <c>After &lt; Id &lt;= UpTo</c>: one slice of a split first build.</summary>
+    public sealed record Range(long After, long UpTo) : WriteScope;
 }
 
 /// <summary>The field's MaterializeVersion moved on while it was being written: the work for the old version is abandoned.</summary>
@@ -184,6 +186,28 @@ public static class MaterializedColumnWriter
     public sealed record WriteResult(long RowsWritten, int Batches, IReadOnlyCollection<long> ChangedIds, bool TooManyChanges)
     {
         public long Differences => RowsWritten;
+        /// <summary>Time spent working values out (reading rows + the read code / formula engine + copying into #cv), summed over batches.</summary>
+        public TimeSpan ComputeTime { get; init; }
+        /// <summary>Time spent in the UPDATE statements that write the changed values.</summary>
+        public TimeSpan WriteTime { get; init; }
+
+        /// <summary>Several slices of one build as one result (changed ids up to <see cref="MaxTrackedChanges"/>, as a single run keeps them).</summary>
+        public static WriteResult Combine(IReadOnlyCollection<WriteResult> parts)
+        {
+            var tooMany = parts.Any(p => p.TooManyChanges);
+            var ids = new HashSet<long>();
+            if (!tooMany)
+                foreach (var p in parts)
+                {
+                    ids.UnionWith(p.ChangedIds);
+                    if (ids.Count > MaxTrackedChanges) { tooMany = true; ids.Clear(); break; }
+                }
+            return new WriteResult(parts.Sum(p => p.RowsWritten), parts.Sum(p => p.Batches), ids, tooMany)
+            {
+                ComputeTime = TimeSpan.FromTicks(parts.Sum(p => p.ComputeTime.Ticks)),
+                WriteTime = TimeSpan.FromTicks(parts.Sum(p => p.WriteTime.Ticks))
+            };
+        }
     }
 
     /// <summary>
@@ -204,7 +228,7 @@ public static class MaterializedColumnWriter
         var column = PhysicalNaming.MaterializedColumnName(plan.Fid);
         var batchSize = plan switch
         {
-            ProjectedPlan => ProjectedBatchSize,
+            ProjectedPlan => options.ProjectedBatchSize > 0 ? options.ProjectedBatchSize : ProjectedBatchSize,
             SummaryPlan => options.SummaryBatchSize,
             FormulaPlan => FormulaBatchSize,
             LookupPlan when plan.DecryptAppId is not null => FormulaBatchSize,
@@ -216,6 +240,8 @@ public static class MaterializedColumnWriter
         var batches = 0;
         var changed = new HashSet<long>();
         var tooMany = false;
+        var computeTime = TimeSpan.Zero;
+        var writeTime = TimeSpan.Zero;
 
         if (valueTable)
             await guard.Connection.ExecuteAsync(new CommandDefinition(
@@ -233,6 +259,7 @@ public static class MaterializedColumnWriter
                 parameters.Add("version", version);
 
                 (string From, string Value) parts;
+                var phase = System.Diagnostics.Stopwatch.StartNew();
                 switch (plan)
                 {
                     case ProjectedPlan pp:
@@ -255,9 +282,26 @@ public static class MaterializedColumnWriter
                         break;
                     default: throw new NotSupportedException(plan.GetType().Name);
                 }
+                computeTime += phase.Elapsed;
 
-                var changedIds = (await guard.Connection.QueryAsync<long>(new CommandDefinition(
-                    UpdateSql(column, sqlType, parts), parameters, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
+                phase.Restart();
+                // The batch UPDATE is idempotent (it writes only differences, under the version fence), so a deadlock with other work on
+                // the table — another field's ALTER TABLE, a slice of the same field — is retried instead of failing the whole build.
+                List<long> changedIds;
+                for (var attempt = 1; ; attempt++)
+                {
+                    try
+                    {
+                        changedIds = (await guard.Connection.QueryAsync<long>(new CommandDefinition(
+                            UpdateSql(column, sqlType, parts), parameters, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
+                        break;
+                    }
+                    catch (SqlException ex) when (ex.Number == 1205 && attempt < 4)
+                    {
+                        await Task.Delay(TimeSpan.FromMilliseconds(200 * attempt), ct);
+                    }
+                }
+                writeTime += phase.Elapsed;
                 if (changedIds.Count == 0 && !await FenceHoldsAsync(guard.Connection, plan.FieldId, version, ct))
                     throw new MaterializeVersionChangedException(plan.FieldId);
                 written += changedIds.Count;
@@ -275,7 +319,7 @@ public static class MaterializedColumnWriter
             if (valueTable && guard.Connection.State == ConnectionState.Open)
                 await guard.Connection.ExecuteAsync("IF OBJECT_ID('tempdb..#cv') IS NOT NULL DROP TABLE #cv;");
         }
-        return new WriteResult(written, batches, changed, tooMany);
+        return new WriteResult(written, batches, changed, tooMany) { ComputeTime = computeTime, WriteTime = writeTime };
     }
 
     /// <summary>Reads the batch's rows (their stored fields and the stored values of the calculated fields the formula reads), decrypts the
@@ -518,6 +562,17 @@ public static class MaterializedColumnWriter
                     var ids = (await connection.QueryAsync<long>(new CommandDefinition(
                         $"SELECT TOP (@batch) Id FROM {table} WHERE Id > @after ORDER BY Id",
                         new { batch = batchSize, after }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).ToArray();
+                    if (ids.Length == 0) yield break;
+                    yield return ids;
+                    after = ids[^1];
+                }
+
+            case WriteScope.Range range:
+                for (var after = range.After; ;)
+                {
+                    var ids = (await connection.QueryAsync<long>(new CommandDefinition(
+                        $"SELECT TOP (@batch) Id FROM {table} WHERE Id > @after AND Id <= @upTo ORDER BY Id",
+                        new { batch = batchSize, after, upTo = range.UpTo }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).ToArray();
                     if (ids.Length == 0) yield break;
                     yield return ids;
                     after = ids[^1];

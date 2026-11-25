@@ -175,6 +175,29 @@ public class StoredFormulaAndChainTests : IClassFixture<ComputeSqlFixture>, IAsy
     }
 
     [Fact]
+    public async Task Formula_builds_split_into_id_slices_on_several_sessions_are_exact()
+    {
+        // Every formula table is "big" here (SliceMinRows = 1): each formula build is cut into 3 Id ranges built on up to 3 sessions.
+        var options = new ComputeOptions
+        {
+            PauseBetweenBatchesMs = 0, SummaryBatchSize = 100, LookupBatchSize = 100,
+            MaxSessionsPerDatabase = 4, BackgroundSessionsPerDatabase = 3, SlicesPerField = 3, SliceMinRows = 1
+        };
+
+        // Fields built side by side: one that reads another stored field of the same round waits for it and is built in the next round.
+        var first = await Worker().Builder.BuildPendingAsync(options, CancellationToken.None);
+        var second = await Worker().Builder.BuildPendingAsync(options, CancellationToken.None);
+
+        first.Concat(second).Where(o => o.Outcome == "ready").Select(o => o.FieldId)
+            .Should().BeEquivalentTo([_sumOfHours, _sumOfSum, _annual, _doubleHours, _fullName],
+                string.Join("; ", first.Concat(second).Select(o => $"{o.FieldId}:{o.Outcome}:{o.Reason}")));
+        (await WrongAsync()).Should().AllBeEquivalentTo(0);
+        await using var conn = await OpenAsync();
+        (await conn.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM data.t_{Emp} WHERE c_12 IS NULL"))
+            .Should().Be(0, "every slice, the open-ended last one included, was built");
+    }
+
+    [Fact]
     public async Task A_task_change_flows_through_the_chain_to_the_department_and_the_formula()
     {
         var (builder, processor) = Worker();

@@ -28,10 +28,15 @@ public static class ComputeConfig
         o.SummaryBatchSize = Math.Clamp(Int(s["SummaryBatchSize"], o.SummaryBatchSize), 100, 5000);
         o.LookupBatchSize = Math.Clamp(Int(s["LookupBatchSize"], o.LookupBatchSize), 100, 5000);
         o.DrainBatchSize = Math.Clamp(Int(s["DrainBatchSize"], o.DrainBatchSize), 1, 5000);
-        o.MaxSessionsPerDatabase = Math.Clamp(Int(s["MaxSessionsPerDatabase"], o.MaxSessionsPerDatabase), 1, 8);
-        o.BackgroundSessionsPerDatabase = Math.Clamp(Int(s["BackgroundSessionsPerDatabase"], o.BackgroundSessionsPerDatabase), 1, 7);
+        // Up to 16 worker sessions per database (15 for background work, slot 1 always kept for live changes). The load guard still
+        // backs off above GuardSlow/StopPercent, so a small database is protected by the guard, not by this ceiling.
+        o.MaxSessionsPerDatabase = Math.Clamp(Int(s["MaxSessionsPerDatabase"], o.MaxSessionsPerDatabase), 1, 16);
+        o.BackgroundSessionsPerDatabase = Math.Clamp(Int(s["BackgroundSessionsPerDatabase"], o.BackgroundSessionsPerDatabase), 1, 15);
         o.PriorityTables = string.IsNullOrWhiteSpace(s["PriorityTables"]) ? o.PriorityTables : s["PriorityTables"];
-        o.BuildsPerReplica = Math.Clamp(Int(s["BuildsPerReplica"], o.BuildsPerReplica), 0, 7);
+        o.BuildsPerReplica = Math.Clamp(Int(s["BuildsPerReplica"], o.BuildsPerReplica), 0, 15);
+        o.ProjectedBatchSize = Math.Clamp(Int(s["ProjectedBatchSize"], o.ProjectedBatchSize), 100, 5000);
+        o.SlicesPerField = Math.Clamp(Int(s["SlicesPerField"], o.SlicesPerField), 1, 8);
+        o.SliceMinRows = Math.Max(1, Int(s["SliceMinRows"], o.SliceMinRows));
         o.BuildRoundMinutes = Math.Clamp(Int(s["BuildRoundMinutes"], o.BuildRoundMinutes), 1, 24 * 60);
         o.PauseBetweenBatchesMs = Int(s["PauseBetweenBatchesMs"], o.PauseBetweenBatchesMs);
         o.GuardSlowPercent = Int(s["GuardSlowPercent"], o.GuardSlowPercent);

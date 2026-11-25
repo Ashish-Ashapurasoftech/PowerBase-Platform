@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Compute;
 using PowerBase.Application.Formulas;
@@ -21,6 +22,8 @@ public sealed class ProjectedValueComputer
     private readonly IServiceProvider _services;
     private readonly Dictionary<long, (AppTable Table, IReadOnlyList<AppField> Fields)> _tables = new();
     private readonly SemaphoreSlim _lock = new(1, 1);
+    /// <summary>Fields already reported as "dependencies unknown" (one warning per field per process).</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, byte> LoggedAllFields = new();
 
     public ProjectedValueComputer(IServiceProvider services) => _services = services;
 
@@ -69,6 +72,10 @@ public sealed class ProjectedValueComputer
                 // The formula and what it reads (other formulas, lookups, summaries), seeded the way a report seeds them.
                 var formulas = sp.GetRequiredService<IFormulaProjector>();
                 var reads = formulas.GetFormulaDependencies(fields, [field.Fid!.Value]);
+                if (reads is null && LoggedAllFields.TryAdd(field.Id, 0))
+                    _services.GetService<Microsoft.Extensions.Logging.ILogger<ProjectedValueComputer>>()?.LogWarning(
+                        "Compute: formula field {FieldId} (t{TableId}.c_{Fid}): its dependencies could not be worked out, so every calculated field of the table is computed for each batch (slow).",
+                        field.Id, table.Id, field.Fid);
                 var needed = reads is null
                     ? fields
                     : fields.Where(f => f.Fid is int fid && (fid == field.Fid || reads.Contains(fid) || !PhysicalNaming.IsComputedTypeCode(f.TypeCode))).ToList();
