@@ -455,6 +455,9 @@ public static class QblPipelineConverter
             SkipBrokenDependencies();
             _pipeline.AppRef = PickApp();
             _pipeline.Steps = Build(_roots);
+            // A PowerFlow whose steps name no table data source (only a Quickbase API call, rewritten to an existing table) belongs
+            // to the app of that table.
+            _pipeline.AppRef ??= AllSteps(_pipeline.Steps).SelectMany(s => TableValues(s.Config)).Select(t => t.AppRef).FirstOrDefault(a => !string.IsNullOrEmpty(a));
             RequireValidStart();
             return _pipeline;
         }
@@ -692,6 +695,19 @@ public static class QblPipelineConverter
                 if (!ReferenceEquals(targetPath[i], readerPath[i])) return false;
             return target.Entry?.Type != "loop" || reader.IsInside(target);
         }
+
+        private static IEnumerable<PblPipelineStep> AllSteps(IEnumerable<PblPipelineStep> steps) => steps.SelectMany(s =>
+            new[] { s }.Concat(AllSteps(s.Children)).Concat(AllSteps(s.ElseChildren)).Concat(AllSteps(s.SuccessChildren)).Concat(AllSteps(s.ErrorChildren)));
+
+        private static IEnumerable<PblPipelineTableValue> TableValues(object? value) => value switch
+        {
+            PblPipelineTableValue t => [t],
+            PblPipelineTextValue t => t.Parts.SelectMany(TableValues),
+            IDictionary<string, object?> d => d.Values.SelectMany(TableValues),
+            string => [],
+            System.Collections.IEnumerable e => e.Cast<object?>().SelectMany(TableValues),
+            _ => [],
+        };
 
         private string? PickApp()
         {
@@ -1006,6 +1022,14 @@ public static class QblPipelineConverter
                     var compact = wanted.Replace("_", "", StringComparison.Ordinal);
                     candidates = fields.Where(f => !f.IsAddressPart && NormalizeKey(f.Label).Replace("_", "", StringComparison.Ordinal) == compact).ToList();
                 }
+                // Quickbase gives a label whose key is already taken (a field labelled "ID" next to the built-in id) a numbered
+                // key: "ID" → id_0. Only when exactly one user field has the key without its number.
+                if (candidates.Count == 0 && Regex.Match(wanted, @"^(.+)_\d+$") is { Success: true } numbered)
+                {
+                    var stem = numbered.Groups[1].Value;
+                    var users = fields.Where(f => !f.IsAddressPart && !f.IsBuiltIn && NormalizeKey(f.Label) == stem).ToList();
+                    if (users.Count == 1) candidates = users;
+                }
                 if (candidates.Count > 1 && owner is not null && preferSource is not null && owner.DataSources.TryGetValue(preferSource, out var preferred)
                     && preferred.Properties.TryGetValue("Fields", out var raw) && raw is IEnumerable<object?> refs)
                 {
@@ -1020,8 +1044,18 @@ public static class QblPipelineConverter
                 // Quickbase names a part after its address field: "T Address" + "City" → T_Address_City.
                 static string Compact(string text) => NormalizeKey(text).Replace("_", "", StringComparison.Ordinal);
                 var wanted = Compact(key);
-                return reader.Index.Fields(table.App, table.Table).FirstOrDefault(f => f.IsAddressPart
+                var found = reader.Index.Fields(table.App, table.Table).FirstOrDefault(f => f.IsAddressPart
                     && (Compact(f.Label) == wanted || (reader.Index.AddressOf(f) is { } address && Compact(address.Label + " " + f.Label) == wanted)));
+                // A numbered address key (Full_Address_0_City: Quickbase numbers a key that is already taken): only when one address
+                // field of the table has that name.
+                if (found is null && Regex.Match(key, @"^(.+?)_\d+_(.+)$") is { Success: true } numbered)
+                {
+                    var stem = Compact(numbered.Groups[1].Value);
+                    var addresses = reader.Index.Fields(table.App, table.Table).Where(f => f.IsAddressPart && reader.Index.AddressOf(f) is { } a && Compact(a.Label) == stem)
+                        .Select(f => reader.Index.AddressOf(f)!.FieldRef).Distinct().Count();
+                    if (addresses == 1) found = AddressPart(table, numbered.Groups[1].Value + "_" + numbered.Groups[2].Value);
+                }
+                return found;
             }
 
             /// <summary>A value that may hold Jinja tokens. Only <c>{{stepId.key}}</c> naming a record field of an earlier, reachable
@@ -2281,6 +2315,11 @@ public static class QblPipelineConverter
                             if (part is string piece && Split(piece) is { } pieces) all.AddRange(pieces);
                             else all.Add(part);
                         return new PblPipelineTextValue(all);
+                    // Inside an expression the Quickbase id stays: PowerBase's Quickbase-compatible API finds a table by the Quickbase
+                    // id stored when it was imported (meta.AppTable.QBTableID), so a call to an imported table works unchanged.
+                    case var _ when qbTableIds.All(id => reader.Index.TableByQbId(id) is not null):
+                        reader.Note(source, "PIPELINE_REQUEST_QB_TABLE_ID_KEPT", $"The request body names Quickbase table '{string.Join("', '", qbTableIds)}' inside an expression; the id is kept and PowerBase's Quickbase-compatible API finds the imported table by it.", changesExecution: false);
+                        return body;
                     default:
                         Incomplete("PIPELINE_REQUEST_NEEDS_REVIEW", $"The request body names Quickbase table '{string.Join("', '", qbTableIds)}' inside an expression; put the imported table's id there before turning the PowerFlow on.");
                         return body;

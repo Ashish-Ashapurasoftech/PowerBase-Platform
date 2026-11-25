@@ -248,6 +248,19 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
             """, new { qbTableId }, cancellationToken: ct));
     }
 
+    public async Task<IReadOnlyList<(long AppId, string? QbAppId, long? TableId, string? QbTableId)>> ListQuickbaseIdsAsync(IReadOnlyCollection<long> appIds, CancellationToken ct = default)
+    {
+        if (appIds.Count == 0) return [];
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<(long AppId, string? QbAppId, long? TableId, string? QbTableId)>(new CommandDefinition(
+            """
+            SELECT a.Id AS AppId, a.QBAppID AS QbAppId, t.Id AS TableId, t.QBTableID AS QbTableId
+            FROM meta.App a LEFT JOIN meta.AppTable t ON t.AppId = a.Id AND t.IsDeleted = 0
+            WHERE a.Id IN @appIds AND a.IsDeleted = 0
+            """, new { appIds = appIds.ToArray() }, cancellationToken: ct));
+        return rows.AsList();
+    }
+
     public async Task<AppTable> GetByIdAsync(long id, CancellationToken ct = default)
     {
         // A table that does not exist throws and is never cached. Each caller gets its own copy.

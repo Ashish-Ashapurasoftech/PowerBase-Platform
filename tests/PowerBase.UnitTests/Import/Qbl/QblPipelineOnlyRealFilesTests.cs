@@ -1,6 +1,6 @@
 using System.Text;
+using System.Text.Json;
 using FluentAssertions;
-using PowerBase.Application.Import.Pbl;
 using PowerBase.Application.Import.Qbl;
 using PowerBase.Application.Import.Services;
 using Xunit;
@@ -9,258 +9,131 @@ using Xunit.Abstractions;
 namespace PowerBase.UnitTests.Import.Qbl;
 
 /// <summary>
-/// The customer's real pair of files (2026-11-18): an application export with 5 apps and a pipeline-only export of 1094
-/// PowerFlows from ~45 Quickbase apps. The apps are built from the application export exactly as the import creates them
-/// (Fid = Quickbase field id), then the pipeline file is bound to them. Skipped when the files are not on this machine.
+/// The customer's real pipeline-only export (AllActivePipelines.yaml, 2026-11-19) bound to a snapshot of the imported apps
+/// (meta.App / meta.AppTable / meta.AppField of the local tenant on 2026-11-24, with the Quickbase ids the app import stored).
+/// A pipeline goes in only when every Quickbase app / table id it uses is stored on an imported app / table; nothing is ever
+/// matched by name or fields. Skipped when the files are not on this machine.
 /// </summary>
 public class QblPipelineOnlyRealFilesTests(ITestOutputHelper output)
 {
-    private const string APP_FILE = @"C:\Users\Administrator\Downloads\QBL-0.12-ba97eac7-399f-4445-9dcd-faa6e0744bb5.yaml";
-    private const string PIPELINE_FILE = @"C:\Users\Administrator\Downloads\AllActivePipelines.yaml";
+    internal const string SNAPSHOT = @"C:\ASP\test-data\qbl\pb_apps_snapshot_20261124.json";
+    internal const string PIPELINE_FILE = @"C:\Users\Administrator\Downloads\drive-download-20261119T051341Z-1-001\AllActivePipelines.yaml";
 
-    internal static IReadOnlyList<PipelineOnlyApp> AppsFromExport(string path)
-    {
-        var results = QblToPblConverter.ConvertAll(QblSerializer.Deserialize(System.IO.File.ReadAllText(path)));
-        var apps = new List<PipelineOnlyApp>();
-        long tableId = 1000;
-        foreach (var (result, i) in results.Select((r, i) => (r, i)))
-        {
-            var tables = new List<PipelineOnlyTable>();
-            foreach (var table in result.Document.Tables)
-            {
-                var fields = new List<PipelineOnlyField>
-                {
-                    new(1, "Date_Created", "Date Created", "DateTime", true), new(2, "Date_Modified", "Date Modified", "DateTime", true),
-                    new(3, "Record_ID", "Record ID#", "Number", true), new(4, "Record_Owner", "Record Owner", "User", true),
-                    new(5, "Last_Modified_By", "Last Modified By", "User", true),
-                };
-                fields.AddRange(table.Fields.Where(f => f.SourceId is > 5)
-                    .Select(f => new PipelineOnlyField(f.SourceId!.Value, f.Name, f.Label ?? f.Name, f.TypeCode, false)));
-                // Reference / Lookup fields live on the child, Summary and report-link fields on the parent (relationships).
-                foreach (var rel in result.Document.Relationships)
-                {
-                    if (rel.ChildTableRef == table.LogicalRef)
-                    {
-                        if (rel.ReferenceFieldSourceId is { } rid) fields.Add(new(rid, rel.ReferenceFieldName, rel.ReferenceFieldLabel ?? rel.ReferenceFieldName, "Reference", false));
-                        fields.AddRange(rel.Lookups.Where(l => l.SourceId is > 5).Select(l => new PipelineOnlyField(l.SourceId!.Value, l.Name, l.Label ?? l.Name, "Lookup", false)));
-                    }
-                    if (rel.ParentTableRef == table.LogicalRef)
-                    {
-                        fields.AddRange(rel.Summaries.Where(l => l.SourceId is > 5).Select(l => new PipelineOnlyField(l.SourceId!.Value, l.Name, l.Label ?? l.Name, "Summary", false)));
-                        if (rel.ReportLink is { SourceId: > 5 } link) fields.Add(new(link.SourceId!.Value, link.Label ?? "", link.Label ?? "", "ReportLink", false));
-                    }
-                }
-                tables.Add(new PipelineOnlyTable(tableId++, table.Name, null, fields.GroupBy(f => f.Fid).Select(g => g.First()).ToList()));
-            }
-            apps.Add(new PipelineOnlyApp(Guid.NewGuid(), i + 1, result.Document.App.Name, tables));
-        }
-        return apps;
-    }
+    private static bool Available => File.Exists(SNAPSHOT) && File.Exists(PIPELINE_FILE);
+
+    private sealed record SnapField(int Fid, string Name, string Label, string TypeCode, bool IsSystem, string? ResultTypeCode);
+    private sealed record SnapTable(long Id, string Name, string? QbTableId, int? KeyFid, List<SnapField>? Fields);
+    private sealed record SnapApp(long Id, Guid PublicId, string Name, string? QbAppId, List<SnapTable>? Tables);
+
+    /// <summary>The imported apps as the pipeline-only import reads them (only apps with a stored Quickbase app id, like
+    /// PipelineOnlyImportService.CandidatesAsync).</summary>
+    internal static IReadOnlyList<PipelineOnlyApp> SnapshotApps() =>
+        JsonSerializer.Deserialize<List<SnapApp>>(File.ReadAllText(SNAPSHOT))!
+            .Where(a => !string.IsNullOrWhiteSpace(a.QbAppId))
+            .Select(a => new PipelineOnlyApp(a.PublicId, a.Id, a.Name,
+                (a.Tables ?? []).Select(t => new PipelineOnlyTable(t.Id, t.Name, t.KeyFid,
+                    (t.Fields ?? []).Select(f => new PipelineOnlyField(f.Fid, f.Name, f.Label, f.TypeCode, f.IsSystem, f.ResultTypeCode)).ToList(),
+                    t.QbTableId)).ToList(),
+                a.QbAppId))
+            .ToList();
+
+    private static int PipelineCount(string content) =>
+        System.Text.RegularExpressions.Regex.Matches(content, @"^  \S[^\r\n]*:\r?\n    Type: QB::Pipeline\r?$", System.Text.RegularExpressions.RegexOptions.Multiline).Count;
+
+    private static string Signature(PipelineOnlyBinding b) =>
+        string.Join("\n", b.Matches.OrderBy(m => m.QbTableId).Select(m => $"{m.QbTableId}>{m.TableId}"))
+        + "\n#" + string.Join("\n", b.SkippedPipelines.Select(s => s.Name).Order());
 
     [Fact]
-    public void RealFiles_PipelinesGoOnlyToTheirOwnApps()
+    public void RealFile_EveryMatchIsTheStoredId_EveryPipelineIsKeptOrReported()
     {
-        if (!System.IO.File.Exists(APP_FILE) || !System.IO.File.Exists(PIPELINE_FILE)) return;
+        if (!Available) return;
+        var content = File.ReadAllText(PIPELINE_FILE);
+        var apps = SnapshotApps();
+        var trace = new StringBuilder();
+        QblPipelineOnlyBinder.Trace = l => trace.AppendLine(l);
+        PipelineOnlyBinding binding;
+        try { binding = QblPipelineOnlyBinder.Bind(content, apps); }
+        finally { QblPipelineOnlyBinder.Trace = null; }
+        File.WriteAllText(Path.Combine(Path.GetTempPath(), "pipeline_ids_trace.txt"), trace.ToString());
 
-        var apps = AppsFromExport(APP_FILE);
-        apps.Should().HaveCount(5);
-        var binding = QblPipelineOnlyBinder.Bind(System.IO.File.ReadAllText(PIPELINE_FILE), apps);
+        var tableById = apps.SelectMany(a => a.Tables.Select(t => (App: a, Table: t))).ToDictionary(x => x.Table.Id);
+        // Exact: every match is the table whose stored QBTableID is that Quickbase id, inside the app of its stored QBAppID.
+        foreach (var m in binding.Matches)
+        {
+            var (app, table) = tableById[m.TableId];
+            table.QbTableId.Should().BeEquivalentTo(m.QbTableId);
+            m.AppPublicId.Should().Be(app.PublicId);
+        }
+        // Nothing lost: every pipeline of the file is either still in the rewritten file or reported with its reason.
+        var total = PipelineCount(content);
+        var kept = PipelineCount(binding.Content);
+        (kept + binding.SkippedPipelines.Count).Should().Be(total);
+        binding.SkippedPipelines.Should().OnlyContain(s => s.Reason.Length > 0);
+        // A skipped pipeline names an id that really is not stored.
+        var storedTables = apps.SelectMany(a => a.Tables).Select(t => t.QbTableId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var storedApps = apps.Select(a => a.QbAppId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        binding.UnmatchedTables.Should().OnlyContain(t => !storedTables.Contains(t));
+        binding.UnmatchedApps.Should().OnlyContain(a => !storedApps.Contains(a));
+
+        // Converted: every kept pipeline lands in a matched app.
         var pipelines = QblPipelineConverter.ConvertAll(QblSerializer.Deserialize(binding.Content), binding.Content, skipStepsWithUnmatchedTable: true);
-        var (kept, notImported) = PipelineOnlyImportService.SplitByApp(pipelines, binding.Apps.Select(a => a.AppRef).ToList());
-
-        var report = new StringBuilder();
-        report.AppendLine($"pipelines={pipelines.Count} kept={kept.Count} notImported={notImported.Count}");
-        report.AppendLine($"matchedTables={binding.Matches.Count} unmatchedTables={binding.UnmatchedTables.Count} unmatchedApps={binding.UnmatchedApps.Count}");
-        foreach (var group in binding.Matches.GroupBy(m => m.AppName))
-            report.AppendLine($"APP {group.Key}: {string.Join(", ", group.Select(m => $"{m.QbTableId}({m.QbAppId ?? "-"})→{m.TableName}"))}");
-        foreach (var (appRef, app) in binding.Apps)
-        {
-            var mine = kept.Where(p => p.AppRef == appRef).ToList();
-            report.AppendLine($"PIPELINES {app.Name}: {mine.Count}");
-            foreach (var p in mine)
-                report.AppendLine($"   {p.Name} | changes={p.ChangesExecution} steps={p.SourceStepCount}/skipped={p.SkippedStepCount} | {string.Join(",", p.Issues.Select(i => i.Code).Distinct())}");
-        }
-        report.AppendLine("ISSUES (kept): " + string.Join(", ", kept.SelectMany(p => p.Issues.Select(i => i.Code).Distinct())
-            .GroupBy(c => c).OrderByDescending(g => g.Count()).Select(g => $"{g.Key}={g.Count()}")));
-        foreach (var issue in kept.SelectMany(p => p.Issues.Select(i => (p.Name, i)))
-                     .Where(x => x.i.Code is "PIPELINE_FIELD_NOT_FOUND" or "PIPELINE_NO_VALID_START" or "PIPELINE_STEP_NOT_SAVED" or "PIPELINE_FILTER_OPERATOR" or "PIPELINE_STEP_UNSUPPORTED" or "PIPELINE_INPUT_MISSING"))
-            report.AppendLine($"DETAIL {issue.Name} | {issue.i.Code} | {issue.i.StepName} | {issue.i.Message}");
-        foreach (var (name, reason) in notImported) report.AppendLine($"NOTIMPORTED {name} | {reason}");
-        foreach (var note in binding.Notes.Take(200)) report.AppendLine("NOTE " + note);
-        System.IO.File.WriteAllText(Path.Combine(Path.GetTempPath(), "pipelineonly_realfiles_report.txt"), report.ToString());
-        output.WriteLine(report.ToString());
-
-        // No imported step may point at a step that was skipped (a missing step makes the editor refuse every step).
-        foreach (var pipeline in kept)
-        {
-            var json = System.Text.Json.JsonSerializer.Serialize(pipeline.Steps);
-            var refIds = System.Text.RegularExpressions.Regex.Matches(json, "\"RefId\":\"(ref_[A-Za-z0-9_]+)\"").Select(m => m.Groups[1].Value).ToHashSet();
-            foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(json, @"steps\.(ref_[A-Za-z0-9_]+)\.count"))
-                refIds.Should().Contain(m.Groups[1].Value, $"'{pipeline.Name}' uses the count of {m.Groups[1].Value}");
-        }
-
-        pipelines.Should().HaveCount(1094);
-        (kept.Count + notImported.Count).Should().Be(1094);
-    }
-
-    // ---------------------------------------------------------------- many apps: nothing depends on how many apps there are
-
-    private static (List<PblPipeline> Kept, List<(string Name, string Reason)> NotImported, PipelineOnlyBinding Binding) Run(IReadOnlyList<PipelineOnlyApp> apps)
-    {
-        var binding = QblPipelineOnlyBinder.Bind(System.IO.File.ReadAllText(PIPELINE_FILE), apps);
-        var pipelines = QblPipelineConverter.ConvertAll(QblSerializer.Deserialize(binding.Content), binding.Content, skipStepsWithUnmatchedTable: true);
-        var (kept, notImported) = PipelineOnlyImportService.SplitByApp(pipelines, binding.Apps.Select(a => a.AppRef).ToList());
-        return (kept, notImported, binding);
-    }
-
-    private static Dictionary<string, string> AppOf(List<PblPipeline> kept, PipelineOnlyBinding binding) =>
-        kept.ToDictionary(p => p.LogicalRef, p => binding.Apps.Single(a => a.AppRef == p.AppRef).App.Name);
-
-    /// <summary>Unrelated apps that share field ids with the real ones (every app has fields 6, 7, 8 …), like a "max coverage" test
-    /// app with every field type: decoys with the same ids but other labels, and decoys with common labels.</summary>
-    internal static List<PipelineOnlyApp> Decoys(IReadOnlyList<PipelineOnlyApp> real, int count)
-    {
-        var common = new[] { "Name", "Email", "Status", "Start Date", "End Date", "Notes", "Phone", "Address", "Related Client", "Related Status", "Active", "Type", "Description", "Date", "Amount" };
-        var result = new List<PipelineOnlyApp>();
-        long tableId = 900_000;
-        for (var i = 0; i < count; i++)
-        {
-            var tables = new List<PipelineOnlyTable>();
-            for (var t = 0; t < 6; t++)
-            {
-                var fields = new List<PipelineOnlyField>
-                {
-                    new(1, "Date_Created", "Date Created", "DateTime", true), new(2, "Date_Modified", "Date Modified", "DateTime", true),
-                    new(3, "Record_ID", "Record ID#", "Number", true), new(4, "Record_Owner", "Record Owner", "User", true),
-                    new(5, "Last_Modified_By", "Last Modified By", "User", true),
-                };
-                for (var fid = 6; fid < 6 + 40 + i % 50; fid++)
-                    fields.Add(new(fid, $"F{fid}", fid - 6 < common.Length && (i + t) % 2 == 0 ? common[fid - 6] : $"Decoy {i}-{t} Field {fid}", "Text", false));
-                tables.Add(new PipelineOnlyTable(tableId++, $"Decoy Table {t}", null, fields));
-            }
-            result.Add(new PipelineOnlyApp(Guid.NewGuid(), 10_000 + i, $"Decoy App {i}", tables));
-        }
-        return result;
+        var (keptPipelines, notImported) = PipelineOnlyImportService.SplitByApp(pipelines, binding.Apps.Select(a => a.AppRef).ToList());
+        pipelines.Should().HaveCount(kept);
+        pipelines.SelectMany(p => p.Issues).Should().NotContain(i => i.Code == "PIPELINE_STEP_TABLE_NOT_MATCHED");
+        output.WriteLine($"file={total} idsFound={kept} idsMissing={binding.SkippedPipelines.Count} imported={keptPipelines.Count} notConvertible={notImported.Count} apps={binding.Apps.Count}");
+        foreach (var (name, reason) in notImported) output.WriteLine($"  NOT CONVERTIBLE {name}: {reason}");
     }
 
     [Fact]
-    public void RealFiles_ManyApps_DecoysAndCopies_GetNothing_RealAppsKeepExactlyTheirPipelines()
+    public void RealFile_SameResult_WhateverTheOrderOfTheApps()
     {
-        if (!System.IO.File.Exists(APP_FILE) || !System.IO.File.Exists(PIPELINE_FILE)) return;
-        var real = AppsFromExport(APP_FILE);
-        var baseline = Run(real);
-        var baselineApps = AppOf(baseline.Kept, baseline.Binding);
-
-        // 5 real apps + 40 decoys = 45 apps.
-        var many = real.Concat(Decoys(real, 40)).ToList();
-        var withDecoys = Run(many);
-        AppOf(withDecoys.Kept, withDecoys.Binding).Should().BeEquivalentTo(baselineApps,
-            "adding unrelated apps must not move or add a single PowerFlow");
-        withDecoys.Binding.Matches.Should().OnlyContain(m => real.Any(a => a.PublicId == m.AppPublicId));
-
-        // Apps listed in another order give the same result.
-        var shuffled = Run(many.OrderBy(a => a.Name.GetHashCode(StringComparison.Ordinal)).Reverse().ToList());
-        AppOf(shuffled.Kept, shuffled.Binding).Should().BeEquivalentTo(baselineApps);
-    }
-
-    /// <summary>Partial copies of the real apps under other names (70% of each table's fields): look like the apps the clone
-    /// Quickbase apps (DSS / DSP / Voyage…) were copied from, so they must get nothing.</summary>
-    internal static List<PipelineOnlyApp> LookAlikes(IReadOnlyList<PipelineOnlyApp> real)
-    {
-        long tableId = 800_000;
-        return real.Select((app, i) => new PipelineOnlyApp(Guid.NewGuid(), 20_000 + i, $"Look-alike {i}",
-            app.Tables.Select(tb => new PipelineOnlyTable(tableId++, tb.Name, null,
-                tb.Fields.Where(fl => fl.IsSystem || fl.Fid % 10 < 7).ToList())).ToList())).ToList();
+        if (!Available) return;
+        var content = File.ReadAllText(PIPELINE_FILE);
+        var apps = SnapshotApps();
+        var expected = Signature(QblPipelineOnlyBinder.Bind(content, apps));
+        var shuffled = apps.OrderBy(a => a.Name.GetHashCode(StringComparison.Ordinal) ^ 0x5bd1e995).Reverse().ToList();
+        Signature(QblPipelineOnlyBinder.Bind(content, shuffled)).Should().Be(expected);
     }
 
     [Fact]
-    public void RealFiles_LookAlikeApps_GetNothing()
+    public void RealFile_LookAlikeAppsWithoutIds_GetNothing()
     {
-        if (!System.IO.File.Exists(APP_FILE) || !System.IO.File.Exists(PIPELINE_FILE)) return;
-        var real = AppsFromExport(APP_FILE);
-        var baseline = AppOf(Run(real).Kept, Run(real).Binding);
-        var run = Run(real.Concat(LookAlikes(real)).Concat(Decoys(real, 20)).ToList());
-        AppOf(run.Kept, run.Binding).Should().BeEquivalentTo(baseline);
-        run.Binding.Matches.Should().OnlyContain(m => real.Any(a => a.PublicId == m.AppPublicId));
-
-        // Only the look-alikes (renamed, older copies of the real apps): a Quickbase app may only be matched to the copy of its
-        // OWN app, never to the copy of another app (a clone Quickbase app must not take it).
-        var own = run.Binding.Matches.Where(m => m.QbAppId is not null).GroupBy(m => m.QbAppId!).ToDictionary(g => g.Key, g => real.ToList().FindIndex(a => a.PublicId == g.First().AppPublicId));
-        var lookAlikes = LookAlikes(real);
-        var alone = Run(lookAlikes);
-        foreach (var m in alone.Binding.Matches.Where(m => m.QbAppId is not null))
+        if (!Available) return;
+        var content = File.ReadAllText(PIPELINE_FILE);
+        var apps = SnapshotApps();
+        // Newer exact copies of every app (same names, tables, fields) that were not imported from Quickbase: no stored ids.
+        var copies = apps.Select((a, i) => a with
         {
-            own.Should().ContainKey(m.QbAppId!, $"Quickbase app {m.QbAppId} is not one of the imported apps, so it may not take '{m.AppName}'");
-            lookAlikes.FindIndex(a => a.PublicId == m.AppPublicId).Should().Be(own[m.QbAppId!]);
-        }
+            Id = 100000 + i, PublicId = Guid.NewGuid(), QbAppId = null,
+            Tables = a.Tables.Select(t => t with { Id = 1000000 + t.Id, QbTableId = null }).ToList(),
+        });
+        var binding = QblPipelineOnlyBinder.Bind(content, apps.Concat(copies).ToList());
+
+        binding.Matches.Should().OnlyContain(m => m.TableId < 1000000);
+        Signature(binding).Should().Be(Signature(QblPipelineOnlyBinder.Bind(content, apps)));
     }
 
     [Fact]
-    public void RealFiles_AnAppNotImported_ItsPipelinesGoNowhereElse()
+    public void RealFile_AnAppNotImported_OnlyItsPipelinesAreSkipped()
     {
-        if (!System.IO.File.Exists(APP_FILE) || !System.IO.File.Exists(PIPELINE_FILE)) return;
-        var real = AppsFromExport(APP_FILE);
-        var first = Run(real);
-        var baselineMatches = first.Binding.Matches.ToDictionary(m => m.QbTableId, m => m.TableId);
-        var baselinePipelines = first.Kept.Select(p => p.LogicalRef).ToHashSet();
+        if (!Available) return;
+        var content = File.ReadAllText(PIPELINE_FILE);
+        var apps = SnapshotApps();
+        var full = QblPipelineOnlyBinder.Bind(content, apps);
+        // The app most kept pipelines use.
+        var busiest = full.Matches.GroupBy(m => m.AppPublicId).OrderByDescending(g => g.Count()).First().Key;
+        var removed = apps.Single(a => a.PublicId == busiest);
+        var without = QblPipelineOnlyBinder.Bind(content, apps.Where(a => a.PublicId != busiest).ToList());
 
-        foreach (var missing in real)
-        {
-            var others = real.Where(a => a.Id != missing.Id).Concat(Decoys(real, 10)).ToList();
-            var run = Run(others);
-            // Every Quickbase table keeps exactly the table it had (or none): removing an app never re-maps a table elsewhere.
-            // (2026-11-19) Tables whose steps name their Quickbase app keep exactly their table. A table no step names an app for is
-            // matched among all apps by its fields, so with its own app missing it may go to the one remaining app that fits it
-            // completely; it never goes to the missing app or a decoy.
-            run.Binding.Matches.Where(m => m.QbAppId is not null).Should().OnlyContain(m => baselineMatches.ContainsKey(m.QbTableId) && baselineMatches[m.QbTableId] == m.TableId,
-                $"without '{missing.Name}' no Quickbase table may be matched to another table");
-            AppOf(run.Kept, run.Binding).Values.Should().NotContain(missing.Name).And.OnlyContain(n => real.Any(a => a.Name == n));
-        }
-    }
-
-    [Fact]
-    public void RealFiles_EveryImportedStepUsesOnlyTablesAndFieldsOfItsMatchedApps()
-    {
-        if (!System.IO.File.Exists(APP_FILE) || !System.IO.File.Exists(PIPELINE_FILE)) return;
-        var real = AppsFromExport(APP_FILE);
-        var run = Run(real.Concat(Decoys(real, 40)).ToList());
-        var tableRefs = run.Binding.Apps.SelectMany(a => a.App.Tables.Select(t => (Ref: $"$Table_PB_{t.Id}", Table: t))).ToDictionary(x => x.Ref, x => x.Table);
-        foreach (var pipeline in run.Kept)
-            foreach (var step in Flatten(pipeline.Steps))
-                foreach (var value in Values(step.Config))
-                {
-                    if (value is PblPipelineTableValue tv)
-                        tableRefs.Should().ContainKey(tv.TableRef, $"'{pipeline.Name}' step '{step.Name}'");
-                    if (value is PblPipelineFieldValue fv && fv.TableRef is { } fieldTable && fv.SourceId is { } fid && !fv.IsBuiltIn && tableRefs.TryGetValue(fieldTable, out var table))
-                        table.Fields.Select(f => f.Fid).Concat(table.Fields.Where(f => f.TypeCode == "Address").SelectMany(f => Enumerable.Range(f.Fid + 1, 6)))
-                            .Should().Contain(fid, $"'{pipeline.Name}' step '{step.Name}' field {fid} must be a field of '{table.Name}'");
-                }
-    }
-
-    private static IEnumerable<PblPipelineStep> Flatten(IEnumerable<PblPipelineStep> steps)
-    {
-        foreach (var step in steps)
-        {
-            yield return step;
-            foreach (var child in Flatten(step.Children.Concat(step.ElseChildren).Concat(step.SuccessChildren).Concat(step.ErrorChildren))) yield return child;
-        }
-    }
-
-    private static IEnumerable<object?> Values(object? node)
-    {
-        switch (node)
-        {
-            case PblPipelineTextValue text:
-                foreach (var part in text.Parts) foreach (var v in Values(part)) yield return v;
-                break;
-            case System.Collections.IDictionary map:
-                foreach (var v in map.Values) foreach (var x in Values(v)) yield return x;
-                break;
-            case string: yield return node; break;
-            case System.Collections.IEnumerable list:
-                foreach (var v in list) foreach (var x in Values(v)) yield return x;
-                break;
-            default: yield return node; break;
-        }
+        without.Matches.Should().NotContain(m => m.AppPublicId == busiest);
+        without.SkippedPipelines.Count.Should().BeGreaterThan(full.SkippedPipelines.Count);
+        // Everything skipped before is still skipped; what is newly skipped names one of the removed app's ids.
+        without.SkippedPipelines.Select(s => s.Name).Should().Contain(full.SkippedPipelines.Select(s => s.Name));
+        var removedIds = removed.Tables.Select(t => t.QbTableId!).Append(removed.QbAppId!).ToList();
+        var newly = without.SkippedPipelines.Where(s => !full.SkippedPipelines.Contains(s) && !full.SkippedPipelines.Any(f => f.Name == s.Name)).ToList();
+        newly.Should().NotBeEmpty();
+        newly.Should().OnlyContain(s => removedIds.Any(id => s.Reason.Contains(id, StringComparison.OrdinalIgnoreCase)));
+        output.WriteLine($"removed '{removed.Name}': +{newly.Count} skipped");
     }
 }

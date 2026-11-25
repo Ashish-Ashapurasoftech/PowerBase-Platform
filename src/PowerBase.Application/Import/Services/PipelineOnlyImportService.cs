@@ -9,7 +9,7 @@ namespace PowerBase.Application.Import.Services;
 /// <summary>
 /// Imports a QBL file that holds only pipelines (no <c>QB::Application</c>) into apps that already exist — typically apps
 /// imported earlier from the matching application export. The file's Quickbase table ids are matched to the user's tables
-/// (<see cref="QblPipelineOnlyBinder"/>); the pipelines are then converted and created by the normal pipeline import, and a
+/// by the Quickbase ids stored at app import (meta.App.QBAppID / meta.AppTable.QBTableID, <see cref="QblPipelineOnlyBinder"/>); the pipelines are then converted and created by the normal pipeline import, and a
 /// pipeline whose steps use tables of several apps keeps each step on its own app's table. No app, table or field is changed.
 /// </summary>
 public class PipelineOnlyImportService(
@@ -65,7 +65,7 @@ public class PipelineOnlyImportService(
         var binding = QblPipelineOnlyBinder.Bind(content, candidates);
         var bindMs = sw.ElapsedMilliseconds; sw.Restart();
         if (binding.Apps.Count == 0)
-            return new Prepared(binding, []);
+            return new Prepared(binding, [], binding.SkippedPipelines);
 
         // The two reads of the file are independent: the plain read runs while the file is deserialized.
         var rawRead = Task.Run(() => QblPipelineConverter.ReadRaw(binding.Content), ct);
@@ -78,6 +78,8 @@ public class PipelineOnlyImportService(
             candidates.Count, candidates.Sum(c => c.Tables.Count), candidatesMs, bindMs, readMs, sw.ElapsedMilliseconds);
         var appRefs = binding.Apps.Select(a => a.AppRef).ToList();
         var (kept, notImported) = SplitByApp(pipelines, appRefs);
+        // Pipelines whose Quickbase app / table ids are not all stored on imported apps were already left out of the file.
+        notImported.InsertRange(0, binding.SkippedPipelines);
         var parsed = binding.Apps
             .Select((a, i) => new ParsedApp(a.AppRef, Document(a.AppRef, a.App), [], QblPipelineConverter.ForApp(kept, appRefs, i)))
             .ToList();
@@ -137,7 +139,7 @@ public class PipelineOnlyImportService(
             imported[0].Report.Skipped.Add(new ImportSkippedItem
             {
                 LogicalRef = table, Name = $"Quickbase table {table}",
-                Reason = "No existing table matches this Quickbase table; its steps were skipped (its Quickbase app was not imported, or the table is a copy in another Quickbase app).",
+                Reason = "No imported table has this Quickbase table id (meta.AppTable.QBTableID); the PowerFlows that use it were not imported.",
             });
 
         if (pipelinesImporter is not null)
@@ -149,19 +151,31 @@ public class PipelineOnlyImportService(
     }
 
     public static string NoAppMessage(PipelineOnlyBinding binding) =>
-        "This file holds only pipelines, and none of its tables matches a table of an app you administer. "
+        "This file holds only pipelines, and no pipeline's Quickbase app and table ids are all stored on apps you administer. "
         + "Import the application file first, then this file."
-        + (binding.UnmatchedTables.Count > 0 ? $" Quickbase tables in the file: {string.Join(", ", binding.UnmatchedTables)}." : "");
+        + (binding.UnmatchedApps.Count > 0 ? $" Quickbase app ids not found: {string.Join(", ", binding.UnmatchedApps)}." : "")
+        + (binding.UnmatchedTables.Count > 0 ? $" Quickbase table ids not found: {string.Join(", ", binding.UnmatchedTables)}." : "");
 
     /// <summary>The apps the user may add PowerFlows to (Administrator of the app), with their tables and fields.</summary>
     private async Task<IReadOnlyList<PipelineOnlyApp>> CandidatesAsync(CancellationToken ct)
     {
         var result = new List<PipelineOnlyApp>();
+        var administered = new List<PowerBase.Domain.Entities.App>();
         foreach (var app in await appRepo.ListAllByUserAsync(queryContext.UserId, ct))
         {
             try { await accessService.RequireAppRoleAsync(app.PublicId, ADMINISTRATOR_ROLE, ct); }
             catch (DomainException) { continue; }
             catch (UnauthorizedAccessException) { continue; }
+            administered.Add(app);
+        }
+        // The Quickbase ids stored by the app import: only they decide where a pipeline goes.
+        var ids = await tableRepo.ListQuickbaseIdsAsync(administered.Select(a => a.Id).ToList(), ct);
+        var qbAppIdOf = ids.GroupBy(r => r.AppId).ToDictionary(g => g.Key, g => g.Select(r => r.QbAppId).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)));
+        var qbTableIdOf = ids.Where(r => r.TableId is not null).ToDictionary(r => r.TableId!.Value, r => r.QbTableId);
+        foreach (var app in administered)
+        {
+            // An app without a stored Quickbase app id was not imported from Quickbase: pipelines never go into it.
+            if (string.IsNullOrWhiteSpace(qbAppIdOf.GetValueOrDefault(app.Id))) continue;
 
             var tables = new List<PipelineOnlyTable>();
             // All the app's fields in one read (one per table meant thousands of queries for a user with many apps).
@@ -174,9 +188,9 @@ public class PipelineOnlyImportService(
                     .Select(f => new PipelineOnlyField(f.Fid!.Value, f.Name, f.Label ?? f.Name, f.TypeCode, f.IsSystem, ResultTypeOf(f.TypeCode, f.Settings)))
                     .ToList();
                 var keyFid = table.KeyFieldId is { } keyId ? all.FirstOrDefault(f => f.Id == keyId)?.Fid : null;
-                tables.Add(new PipelineOnlyTable(table.Id, table.Name, keyFid, fields));
+                tables.Add(new PipelineOnlyTable(table.Id, table.Name, keyFid, fields, qbTableIdOf.GetValueOrDefault(table.Id)));
             }
-            result.Add(new PipelineOnlyApp(app.PublicId, app.Id, app.Name, tables));
+            result.Add(new PipelineOnlyApp(app.PublicId, app.Id, app.Name, tables, qbAppIdOf.GetValueOrDefault(app.Id)));
         }
         return result;
     }

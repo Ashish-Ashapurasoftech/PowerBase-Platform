@@ -223,7 +223,7 @@ public class ImportPreviewQueryHandler
                 item.Warnings.AddRange(prepared.Binding.UnmatchedTables.Select(t => new PblIssueDto
                 {
                     Code = "PIPELINE_ONLY_TABLE_NOT_FOUND",
-                    Message = $"No existing table matches Quickbase table '{t}'; its steps are skipped.",
+                    Message = $"Quickbase table id '{t}' is not stored on any imported table (meta.AppTable.QBTableID); the PowerFlows that use it are not imported.",
                 }));
             }
             item.Issues = PipelinesOnlyIssues(item);

@@ -4927,6 +4927,11 @@ public partial class PipelineEngine : IPipelineEngine
             }, null);
         }
 
+        // Search Records writes how many records it found ({{steps.x.count}}, "the search returned records"): a number, not a field.
+        if (sourceStep.Subtype == "search-records" && fieldRef.Equals("count", StringComparison.OrdinalIgnoreCase)
+            && System.Text.RegularExpressions.Regex.IsMatch(trimmedToken, @"^\{\{\s*(?:steps\.)?[a-zA-Z0-9_]+\.count\s*\}\}$"))
+            return ("NUMBER", null);
+
         // If source step is a Loop step, resolve table metadata from its loopOverStepId step
         if (sourceStep.Type == "loop" || sourceStep.Subtype == "for-each")
         {

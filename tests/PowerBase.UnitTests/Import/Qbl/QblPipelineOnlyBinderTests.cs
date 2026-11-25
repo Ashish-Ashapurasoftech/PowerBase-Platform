@@ -5,8 +5,8 @@ using Xunit;
 
 namespace PowerBase.UnitTests.Import.Qbl;
 
-/// <summary>Pipeline-only QBL files (no QB::Application): Quickbase table ids are matched to existing tables and the file is
-/// rewritten so the normal converter reads it.</summary>
+/// <summary>Pipeline-only QBL files (no QB::Application): Quickbase app / table ids are matched to the ids stored on imported
+/// apps and tables (QBAppID / QBTableID) and the file is rewritten so the normal converter reads it.</summary>
 public class QblPipelineOnlyBinderTests
 {
     private const string File = """
@@ -136,17 +136,18 @@ Resources:
         F(4, "Record Owner", "User", true), F(5, "Last Modified By", "User", true),
     ];
 
-    private static PipelineOnlyTable Employee(long id) => new(id, "Employee", null,
-        [.. Sys(), F(7, "Email", "Email"), F(20, "Name"), F(22, "Status"), F(27, "TRating", "Rating"), F(37, "TAddress", "Address")]);
+    private static PipelineOnlyTable Employee(long id, string? qbId = "bwcrtu9k5") => new(id, "Employee", null,
+        [.. Sys(), F(7, "Email", "Email"), F(20, "Name"), F(22, "Status"), F(27, "TRating", "Rating"), F(37, "TAddress", "Address")], qbId);
 
-    private static PipelineOnlyTable Employee1(long id) => new(id, "Employee1", null,
-        [.. Sys(), F(6, "Employee Name"), F(7, "Employee Code")]);
+    private static PipelineOnlyTable Employee1(long id, string? qbId = "bwepvdwy6") => new(id, "Employee1", null,
+        [.. Sys(), F(6, "Employee Name"), F(7, "Employee Code")], qbId);
 
-    /// <summary>App 1 has both tables; app 2 has an unrelated table that shares some field ids.</summary>
+    /// <summary>Quickbase app bt2kqxkqk (Employee) and bxxxxxxx2 (Employee1) as the app import stored them, plus an unrelated app.</summary>
     private static IReadOnlyList<PipelineOnlyApp> Apps() =>
     [
-        new(Guid.Parse("00000000-0000-0000-0000-000000000001"), 1, "YSL Dev Docs", [Employee(10), Employee1(11), new(12, "Orders", null, [.. Sys(), F(7, "Total", "Number")])]),
-        new(Guid.Parse("00000000-0000-0000-0000-000000000002"), 2, "Other", [new(20, "Customers", null, [.. Sys(), F(6, "Company"), F(7, "Email", "Email")])]),
+        new(Guid.Parse("00000000-0000-0000-0000-000000000001"), 1, "YSL Dev Docs", [Employee(10), new(12, "Orders", null, [.. Sys(), F(7, "Total", "Number")], "bwordersx")], "bt2kqxkqk"),
+        new(Guid.Parse("00000000-0000-0000-0000-000000000003"), 3, "YSL Staff", [Employee1(11)], "bxxxxxxx2"),
+        new(Guid.Parse("00000000-0000-0000-0000-000000000002"), 2, "Other", [new(20, "Customers", null, [.. Sys(), F(6, "Company"), F(7, "Email", "Email")], "bcustomer")], "bother001"),
     ];
 
     [Fact]
@@ -157,33 +158,28 @@ Resources:
     }
 
     [Fact]
-    public void Bind_MatchesEachQuickbaseTableByFieldIdsAndKeys()
+    public void Bind_MatchesEachQuickbaseTableByItsStoredId()
     {
         var binding = QblPipelineOnlyBinder.Bind(File, Apps());
 
-        binding.Matches.Should().Contain(m => m.QbTableId == "bwcrtu9k5" && m.TableName == "Employee" && m.AppName == "YSL Dev Docs");
-        // bwepvdwy6 belongs to another Quickbase app (bxxxxxxx2): an app is the copy of ONE Quickbase app, so it is not put
-        // into YSL Dev Docs (the copy of bt2kqxkqk) even though a table there looks like it.
-        binding.UnmatchedTables.Should().Equal("bwepvdwy6");
-        binding.UnmatchedApps.Should().Equal("bxxxxxxx2");
-        binding.Apps.Should().ContainSingle(a => a.App.Name == "YSL Dev Docs");
+        binding.SkippedPipelines.Should().BeEmpty();
+        binding.Matches.Select(m => $"{m.QbTableId}={m.AppName}/{m.TableName}").Should()
+            .BeEquivalentTo(["bwcrtu9k5=YSL Dev Docs/Employee", "bwepvdwy6=YSL Staff/Employee1"]);
+        binding.Apps.Select(a => a.App.Name).Should().BeEquivalentTo(["YSL Dev Docs", "YSL Staff"]);
+        binding.UnmatchedTables.Should().BeEmpty();
+        binding.UnmatchedApps.Should().BeEmpty();
     }
 
     [Fact]
     public void Bind_RewrittenFileConvertsLikeAFullExport()
     {
-        // The Create Record step's table is in another Quickbase app (bxxxxxxx2): its copy is a second app.
-        var binding = QblPipelineOnlyBinder.Bind(File,
-        [
-            new(Guid.Parse("00000000-0000-0000-0000-000000000001"), 1, "YSL Dev Docs", [Employee(10), new(12, "Orders", null, [.. Sys(), F(7, "Total", "Number")])]),
-            new(Guid.Parse("00000000-0000-0000-0000-000000000003"), 3, "YSL Staff", [Employee1(11)]),
-        ]);
+        var binding = QblPipelineOnlyBinder.Bind(File, Apps());
         var qbl = QblSerializer.Deserialize(binding.Content);
         var pipelines = QblPipelineConverter.ConvertAll(qbl, binding.Content);
 
         var pipeline = pipelines.Should().ContainSingle().Subject;
         pipeline.Name.Should().Be("Copy of All Step");
-        pipeline.AppRef.Should().Be(binding.Apps[0].AppRef);
+        pipeline.AppRef.Should().Be(binding.Apps.Single(a => a.App.Name == "YSL Dev Docs").AppRef);
         pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_TABLE_MISSING");
         pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_FIELD_NOT_FOUND");
 
@@ -194,6 +190,9 @@ Resources:
             .Should().Contain(f => f.SourceId == 37 && f.Part == "city");
         var create = pipeline.Steps[1];
         create.Config["tablePublicId"].Should().BeOfType<PblPipelineTableValue>().Which.TableRef.Should().Be("$Table_PB_11");
+        // Each step keeps its own app.
+        create.Config["tablePublicId"].Should().BeOfType<PblPipelineTableValue>().Which.AppRef
+            .Should().Be(binding.Apps.Single(a => a.App.Name == "YSL Staff").AppRef);
     }
 
     [Fact]
@@ -206,58 +205,141 @@ Resources:
         request.Config["requestMode"].Should().Be("quickbase");
         request.Config["method"].Should().Be("POST");
         request.Config["url"].Should().Be("/v1/records/query");
-        // The body keeps Quickbase's format (the compatible API reads it); only the table id becomes the matched table.
         var body = request.Config["body"].Should().BeOfType<PblPipelineTextValue>().Subject;
         body.Parts.Should().HaveCount(3);
         body.Parts[0].Should().Be("{\"from\":\"");
         body.Parts[1].Should().BeOfType<PblPipelineTableValue>().Which.TableRef.Should().Be("$Table_PB_10");
         body.Parts[2].Should().Be("\"}");
         request.IsComplete.Should().BeTrue();
-        pipeline.Issues.Should().Contain(i => i.Code == "PIPELINE_REQUEST_URL_MAPPED");
         pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_REQUEST_URL_QUICKBASE");
     }
 
     [Fact]
-    public void Bind_NoMatchingTable_LeavesTablesUnmatched()
+    public void Convert_NumberedQuickbaseKey_IdZeroIsTheUserFieldLabelledId()
+    {
+        // Quickbase keys a field labelled "ID" as id_0 (id is the built-in Record ID#).
+        var file = File.Replace("{{aa.name}} {{aa.t_rating}}", "{{aa.id_0}}");
+        var apps = Apps().Select(a => a.Name == "YSL Dev Docs"
+            ? a with { Tables = [Employee(10) with { Fields = [.. Employee(10).Fields, F(50, "ID")] }] } : a).ToList();
+        var binding = QblPipelineOnlyBinder.Bind(file, apps);
+        var pipeline = QblPipelineConverter.ConvertAll(QblSerializer.Deserialize(binding.Content), binding.Content).Single();
+
+        pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_REFERENCE_CLEARED");
+        System.Text.Json.JsonSerializer.Serialize(pipeline.Steps[1].Config).Should().Contain("50");
+    }
+
+    [Fact]
+    public void Convert_NumberedAddressKey_IsThePartOfTheOnlyAddressWithThatName()
+    {
+        var file = File.Replace("{{aa.name}} {{aa.t_rating}}", "{{aa.t_address_0_city}}");
+        var binding = QblPipelineOnlyBinder.Bind(file, Apps());
+        var pipeline = QblPipelineConverter.ConvertAll(QblSerializer.Deserialize(binding.Content), binding.Content).Single();
+
+        pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_REFERENCE_CLEARED");
+    }
+
+    [Fact]
+    public void Bind_FieldsAndNamesNeverMatter_OnlyTheStoredIds()
+    {
+        // A table with exactly the right fields but WITHOUT the Quickbase id is not used; one with the id but other fields is.
+        var apps = new List<PipelineOnlyApp>
+        {
+            new(Guid.NewGuid(), 1, "Look-alike", [Employee(10, qbId: null), Employee1(11, qbId: null)], QbAppId: null),
+            new(Guid.NewGuid(), 2, "Real", [new(20, "Staff", null, [.. Sys(), F(7, "Email", "Email")], "bwcrtu9k5")], "bt2kqxkqk"),
+            new(Guid.NewGuid(), 3, "Real 2", [new(21, "People", null, [.. Sys(), F(6, "N")], "bwepvdwy6")], "bxxxxxxx2"),
+        };
+        var binding = QblPipelineOnlyBinder.Bind(File, apps);
+
+        binding.Matches.Should().OnlyContain(m => m.AppName == "Real" || m.AppName == "Real 2");
+        binding.Matches.Select(m => m.TableName).Should().BeEquivalentTo(["Staff", "People"]);
+    }
+
+    [Fact]
+    public void Bind_QuickbaseIdsAreCaseInsensitiveAndTrimmed()
+    {
+        var apps = new List<PipelineOnlyApp>
+        {
+            new(Guid.NewGuid(), 1, "A", [Employee(10, " BWCRTU9K5 ")], "BT2KQXKQK "),
+            new(Guid.NewGuid(), 3, "B", [Employee1(11, "BWEPVDWY6")], " bxxxxxxx2"),
+        };
+        QblPipelineOnlyBinder.Bind(File, apps).SkippedPipelines.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Bind_OneTableIdMissing_SkipsTheWholePipeline()
+    {
+        // Employee1 (bwepvdwy6) was not imported: the pipeline is not imported at all, not half of it.
+        var apps = new List<PipelineOnlyApp>
+        {
+            new(Guid.NewGuid(), 1, "YSL Dev Docs", [Employee(10)], "bt2kqxkqk"),
+            new(Guid.NewGuid(), 3, "YSL Staff", [Employee1(11, qbId: null)], "bxxxxxxx2"),
+        };
+        var binding = QblPipelineOnlyBinder.Bind(File, apps);
+
+        binding.Apps.Should().BeEmpty();
+        binding.Matches.Should().BeEmpty();
+        var skipped = binding.SkippedPipelines.Should().ContainSingle().Subject;
+        skipped.Name.Should().Be("Copy of All Step");
+        skipped.Reason.Should().Contain("bwepvdwy6");
+        binding.UnmatchedTables.Should().Equal("bwepvdwy6");
+        QblPipelineConverter.ConvertAll(QblSerializer.Deserialize(binding.Content), binding.Content).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Bind_AppIdMissing_SkipsThePipeline()
+    {
+        var apps = new List<PipelineOnlyApp>
+        {
+            new(Guid.NewGuid(), 1, "YSL Dev Docs", [Employee(10)], "bt2kqxkqk"),
+            // bwepvdwy6 is stored, but app bxxxxxxx2 is not.
+            new(Guid.NewGuid(), 3, "YSL Staff", [Employee1(11)], null),
+        };
+        var binding = QblPipelineOnlyBinder.Bind(File, apps);
+
+        binding.SkippedPipelines.Should().ContainSingle().Which.Reason.Should().Contain("app id bxxxxxxx2");
+        binding.UnmatchedApps.Should().Equal("bxxxxxxx2");
+    }
+
+    [Fact]
+    public void Bind_TableImportedUnderAnotherApp_SkipsThePipeline()
+    {
+        // The step says table bwepvdwy6 is in app bxxxxxxx2, but it is stored in the app of bt2kqxkqk.
+        var apps = new List<PipelineOnlyApp>
+        {
+            new(Guid.NewGuid(), 1, "YSL Dev Docs", [Employee(10), Employee1(11)], "bt2kqxkqk"),
+            new(Guid.NewGuid(), 3, "YSL Staff", [], "bxxxxxxx2"),
+        };
+        var binding = QblPipelineOnlyBinder.Bind(File, apps);
+
+        binding.SkippedPipelines.Should().ContainSingle().Which.Reason.Should().Contain("different app");
+    }
+
+    [Fact]
+    public void Bind_NoStoredIds_NothingIsImported()
     {
         var binding = QblPipelineOnlyBinder.Bind(File, [new(Guid.NewGuid(), 9, "Empty", [new(90, "Notes", null, [.. Sys(), F(50, "Note")])])]);
 
         binding.Apps.Should().BeEmpty();
-        binding.UnmatchedTables.Should().Contain(["bwcrtu9k5", "bwepvdwy6"]);
+        binding.UnmatchedTables.Should().BeEquivalentTo(["bwcrtu9k5", "bwepvdwy6"]);
+        binding.UnmatchedApps.Should().BeEquivalentTo(["bt2kqxkqk", "bxxxxxxx2"]);
     }
 
     [Fact]
-    public void Bind_TwoIdenticalAppCopies_UsesTheNewestAndSaysSo()
+    public void Bind_SameQuickbaseAppImportedTwice_UsesTheNewestAndSaysSo()
     {
-        var older = new PipelineOnlyApp(Guid.NewGuid(), 1, "YSL Dev Docs", [Employee(10), Employee1(11)]);
-        var newer = new PipelineOnlyApp(Guid.NewGuid(), 5, "YSL Dev Docs (2)", [Employee(50), Employee1(51)]);
-
-        var binding = QblPipelineOnlyBinder.Bind(File, [older, newer]);
-
-        binding.Matches.Should().OnlyContain(m => m.AppName == "YSL Dev Docs (2)");
-    }
-
-    [Fact]
-    public void Bind_TablesOfDifferentAppsInOnePipeline_EachStepKeepsItsApp()
-    {
-        // Employee in app 1, Employee1 in app 2 (and its Quickbase app id differs in the file).
         var apps = new List<PipelineOnlyApp>
         {
-            new(Guid.NewGuid(), 1, "HR", [Employee(10)]),
-            new(Guid.NewGuid(), 2, "Payroll", [Employee1(20)]),
+            new(Guid.NewGuid(), 1, "YSL Dev Docs", [Employee(10)], "bt2kqxkqk"),
+            new(Guid.NewGuid(), 5, "YSL Dev Docs (2)", [Employee(50)], "bt2kqxkqk"),
+            new(Guid.NewGuid(), 3, "YSL Staff", [Employee1(11)], "bxxxxxxx2"),
         };
         var binding = QblPipelineOnlyBinder.Bind(File, apps);
-        binding.Apps.Should().HaveCount(2);
 
-        var pipeline = QblPipelineConverter.ConvertAll(QblSerializer.Deserialize(binding.Content), binding.Content).Single();
-        var hr = binding.Apps.Single(a => a.App.Name == "HR").AppRef;
-        var payroll = binding.Apps.Single(a => a.App.Name == "Payroll").AppRef;
-        pipeline.Steps[0].Config["tableId"].Should().BeOfType<PblPipelineTableValue>().Which.AppRef.Should().Be(hr);
-        pipeline.Steps[1].Config["tablePublicId"].Should().BeOfType<PblPipelineTableValue>().Which.AppRef.Should().Be(payroll);
+        binding.Matches.Single(m => m.QbTableId == "bwcrtu9k5").AppName.Should().Be("YSL Dev Docs (2)");
+        binding.Notes.Should().Contain(n => n.Contains("imported more than once"));
     }
 
-    /// <summary>A pipeline of another Quickbase app: a Create Record on table bzzzzzzz1 writing fields 6, 7, 8 (ids nearly every
-    /// table has) and a key 'Ticket_Number' no existing table has.</summary>
+    /// <summary>A pipeline of another Quickbase app with a table only.</summary>
     private const string ForeignFile = """
 Version: 0.12
 ParameterDefinitions:
@@ -305,77 +387,41 @@ Resources:
 """;
 
     [Fact]
-    public void Bind_OnlySharedFieldIds_IsNoMatch()
-    {
-        // Every table here has fields 6-8, but none has 'Ticket Number': the Quickbase table is not one of them.
-        var apps = new List<PipelineOnlyApp>
-        {
-            new(Guid.NewGuid(), 1, "HR", [new(10, "People", null, [.. Sys(), F(6, "Name"), F(7, "Email"), F(8, "Phone")])]),
-        };
-        var binding = QblPipelineOnlyBinder.Bind(ForeignFile, apps);
-
-        binding.Matches.Should().BeEmpty();
-        binding.UnmatchedTables.Should().Contain("bzzzzzzz1");
-    }
-
-    [Fact]
-    public void Bind_FieldIdsWithoutAnyKey_IsNoMatch()
-    {
-        var file = ForeignFile.Replace("            Ticket_Number: '42'\n", "            {}\n").Replace("          Inputs:\n            {}\n", "");
-        var apps = new List<PipelineOnlyApp>
-        {
-            new(Guid.NewGuid(), 1, "HR", [new(10, "People", null, [.. Sys(), F(6, "Name"), F(7, "Email"), F(8, "Phone"), F(9, "City")])]),
-            new(Guid.NewGuid(), 2, "Sales", [new(20, "Leads", null, [.. Sys(), F(6, "Lead"), F(7, "Source"), F(8, "Owner")])]),
-        };
-        // Ids alone match only when exactly one table has them all; two do here.
-        QblPipelineOnlyBinder.Bind(file, apps).Matches.Should().BeEmpty();
-    }
-
-    [Fact]
-    public void Bind_KeyAndIdsFound_TableWithoutAppIsMatched()
+    public void Bind_TableWithoutAppDataSource_IsMatchedByTableIdAlone()
     {
         var apps = new List<PipelineOnlyApp>
         {
-            new(Guid.NewGuid(), 1, "Helpdesk", [new(10, "Tickets", null, [.. Sys(), F(6, "Ticket Number"), F(7, "Subject"), F(8, "Body")])]),
-            new(Guid.NewGuid(), 2, "HR", [new(20, "People", null, [.. Sys(), F(6, "Name"), F(7, "Email"), F(8, "Phone")])]),
+            new(Guid.NewGuid(), 1, "Helpdesk", [new(10, "Tickets", null, [.. Sys(), F(6, "Ticket Number"), F(7, "Subject"), F(8, "Body")], "bzzzzzzz1")], "bhelpdesk"),
         };
         var binding = QblPipelineOnlyBinder.Bind(ForeignFile, apps);
 
         binding.Matches.Should().ContainSingle(m => m.QbTableId == "bzzzzzzz1" && m.AppName == "Helpdesk" && m.TableName == "Tickets");
+        binding.SkippedPipelines.Should().BeEmpty();
     }
 
     [Fact]
-    public void Bind_QuickbaseAppNotImported_ItsTablesStayUnmatchedEvenIfOneFieldFits()
+    public void Bind_PerfectFieldMatchWithoutId_IsNotUsed()
     {
-        // bxxxxxxx2's only evidence (field 6 + key Employee_Name) is in "Other"? No: give "Other" a table with 'Employee Name'
-        // but none of bt2kqxkqk's fields; the File's bt2kqxkqk app must not be matched to it.
         var apps = new List<PipelineOnlyApp>
         {
-            new(Guid.NewGuid(), 2, "Other", [new(20, "Customers", null, [.. Sys(), F(7, "Email", "Email"), F(20, "Name")])]),
+            new(Guid.NewGuid(), 1, "Helpdesk", [new(10, "Tickets", null, [.. Sys(), F(6, "Ticket Number"), F(7, "Subject"), F(8, "Body")])], "bhelpdesk"),
         };
-        var binding = QblPipelineOnlyBinder.Bind(File, apps);
-
-        // Employee (7, 20, 27, 40 + t_rating) is not here: 27/40/t_rating are missing, so bt2kqxkqk is not this app.
-        binding.UnmatchedApps.Should().Contain("bt2kqxkqk");
-        binding.Matches.Should().NotContain(m => m.QbTableId == "bwcrtu9k5");
-    }
-
-    [Fact]
-    public void Bind_TwoQuickbaseClonesFitOneTableEqually_NeitherIsUsed()
-    {
-        // Same pipeline twice on two Quickbase tables (clones in two Quickbase apps); only one PowerBase copy exists.
-        var foreign = ForeignFile.Replace("\r\n", "\n");
-        var pipeline2 = foreign.Replace("$Pipeline_F:", "$Pipeline_G:").Replace("bzzzzzzz1", "byyyyyyy1").Split("Resources:\n")[1];
-        var file = foreign + "\n" + pipeline2;
-        var apps = new List<PipelineOnlyApp>
-        {
-            new(Guid.NewGuid(), 1, "Helpdesk", [new(10, "Tickets", null, [.. Sys(), F(6, "Ticket Number"), F(7, "Subject"), F(8, "Body")])]),
-        };
-        var binding = QblPipelineOnlyBinder.Bind(file, apps);
+        var binding = QblPipelineOnlyBinder.Bind(ForeignFile, apps);
 
         binding.Matches.Should().BeEmpty();
-        binding.UnmatchedTables.Should().Contain(["bzzzzzzz1", "byyyyyyy1"]);
-        binding.Notes.Should().Contain(n => n.Contains("none was used"));
+        binding.SkippedPipelines.Should().ContainSingle().Which.Name.Should().Be("Foreign Flow");
+    }
+
+    [Fact]
+    public void Bind_MixedFile_KeepsMatchedPipelines_SkipsTheOthers()
+    {
+        var foreign = ForeignFile.Replace("\r\n", "\n").Split("Resources:\n")[1];
+        var file = File.Replace("\r\n", "\n").Replace("  $PipelineChannelAccount_Quickbase:", foreign.TrimEnd('\n') + "\n  $PipelineChannelAccount_Quickbase:");
+        var binding = QblPipelineOnlyBinder.Bind(file, Apps());
+
+        binding.SkippedPipelines.Select(p => p.Reason).Should().ContainSingle().Which.Should().Contain("bzzzzzzz1");
+        var pipelines = QblPipelineConverter.ConvertAll(QblSerializer.Deserialize(binding.Content), binding.Content);
+        pipelines.Select(p => p.Name).Should().Equal("Copy of All Step");
     }
 
     [Fact]
@@ -392,34 +438,5 @@ Resources:
 
         kept.Select(p => p.Name).Should().Equal("Ours");
         notImported.Select(p => p.Name).Should().Equal("Foreign", "Raw");
-    }
-
-    [Fact]
-    public void RealFile_PipelineOnly_FromDesktop()
-    {
-        var path = @"C:\Users\Administrator\Desktop\PipelineOnly.qbl";
-        if (!System.IO.File.Exists(path)) return;
-        // The YSL Dev Docs tables as the import of onlyApp.qbl created them (Fid = Quickbase field id).
-        var employee = new PipelineOnlyTable(10, "Employee", null,
-        [
-            .. Sys(), F(7, "Email", "Email"), F(20, "Name"), F(22, "Status"), F(23, "TestUser", "User"), F(24, "TestListUser", "MultiUser"),
-            F(25, "TestMutiline", "TextMultiLine"), F(26, "TPercent", "Percent"), F(27, "TRating", "Rating"), F(28, "TCurrency", "Currency"),
-            F(29, "TRichText", "RichText"), F(30, "TMutipleChoice", "SingleSelect"), F(31, "TMultiSelecttext", "MultiSelect"),
-            F(32, "TCheckbox", "Boolean"), F(34, "Turl", "Url"), F(35, "TDuration", "Duration"), F(37, "TAddress", "Address"),
-            F(45, "TFormulaCheckbox", "Formula_Bool"), F(46, "TFormulaphone", "Formula_Phone"), F(47, "TformulaEmail", "Formula_Email"),
-        ]);
-        var employee1 = new PipelineOnlyTable(11, "Employee1", null,
-        [
-            .. Sys(), F(6, "Employee Name"), F(7, "Employee Code"), F(8, "Salary", "Number"), F(9, "Experience(Year)", "Number"),
-            F(10, "Joining Date", "Date"), F(11, "Related Departmnent1", "Number"), F(13, "Related Departmnent12", "Number"), F(16, "Related Departmnent13", "Number"),
-        ]);
-        var apps = new List<PipelineOnlyApp> { new(Guid.NewGuid(), 104, "YSL Dev Docs", [employee, employee1]), Apps()[1] };
-        var binding = QblPipelineOnlyBinder.Bind(System.IO.File.ReadAllText(path), apps);
-        binding.Matches.Select(m => $"{m.QbTableId}={m.TableName}").Should().BeEquivalentTo(["bwcrtu9k5=Employee", "bwepvdwy6=Employee1"]);
-        System.IO.File.WriteAllText(Path.Combine(Path.GetTempPath(), "pipelineonly_bound.qbl"), binding.Content);
-        var pipelines = QblPipelineConverter.ConvertAll(QblSerializer.Deserialize(binding.Content), binding.Content);
-        pipelines.Should().HaveCount(8);
-        pipelines.Should().NotContain(p => p.Name == "New pipeline");
-        pipelines.SelectMany(p => p.Issues).Where(i => i.Code == "PIPELINE_TABLE_MISSING").Select(i => i.Message).Should().BeEmpty();
     }
 }
