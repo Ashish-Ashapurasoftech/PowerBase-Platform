@@ -182,7 +182,7 @@ public class CreateFieldCommandHandler
         await _refIndexer.ReindexFieldAsync(publicId, ct);
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.SchemaChanged, AuditEntityTypes.AppField, id.ToString(), $"Field added: {label} To TableName : {table.Name}", appId: table.AppId, ct: ct);
+            AuditActions.SchemaChanged, AuditEntityTypes.AppField, id.ToString(), $"Field added: {label} To TableName : {table.Name}", appId: table.AppId, ct: ct, tableId: table.Id);
 
         return new CreateFieldResult
         {

@@ -15,11 +15,13 @@ public class ListAuditLogsQueryHandler
 {
     private readonly IAuditRepository _auditRepo;
     private readonly IAppRepository _appRepo;
+    private readonly IAppTableRepository _tableRepo;
 
-    public ListAuditLogsQueryHandler(IAuditRepository auditRepo, IAppRepository appRepo)
+    public ListAuditLogsQueryHandler(IAuditRepository auditRepo, IAppRepository appRepo, IAppTableRepository tableRepo)
     {
         _auditRepo = auditRepo;
         _appRepo = appRepo;
+        _tableRepo = tableRepo;
     }
 
     public async Task<AuditLogListResult> HandleAsync(ListAuditLogsQuery query, CancellationToken ct = default)
@@ -31,6 +33,13 @@ public class ListAuditLogsQueryHandler
             appId = app.Id;
         }
 
+        long? tableId = null;
+        if (query.TablePublicId.HasValue)
+        {
+            var table = await _tableRepo.GetByPublicIdAsync(query.TablePublicId.Value, ct);
+            tableId = table.Id;
+        }
+
         var filter = new ActivityLogFilter(
             From: query.From,
             To: query.To,
@@ -40,7 +49,10 @@ public class ListAuditLogsQueryHandler
             EntityId: query.EntityId,
             Action: query.Action,
             Page: query.Page,
-            PageSize: Math.Clamp(query.PageSize, 1, 200));
+            PageSize: Math.Clamp(query.PageSize, 1, 200),
+            TableId: tableId,
+            TablePublicId: query.TablePublicId,
+            RecordNumber: query.RecordNumber);
 
         var (items, total) = await _auditRepo.QueryActivityLogsAsync(filter, ct);
 

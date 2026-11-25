@@ -10,6 +10,9 @@ public class FieldListItemResponse
     public string? Label { get; init; }
     public string? Description { get; init; }
     public string TypeCode { get; init; } = string.Empty;
+    /// <summary>Reference, Lookup and Summary only: the type the field is shown as (its settings' resultTypeCode), so the
+    /// grid can name it "Currency (Lookup)" without the settings. Null for other fields and for one that saved no type.</summary>
+    public string? ResultTypeCode { get; init; }
     public bool IsRequired { get; init; }
     public bool IsSearchable { get; init; }
     public bool IsSortable { get; init; }

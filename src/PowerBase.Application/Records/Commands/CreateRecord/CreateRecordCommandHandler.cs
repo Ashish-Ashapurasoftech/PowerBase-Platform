@@ -94,7 +94,7 @@ public class CreateRecordCommandHandler
             if (createdByField != null) effectiveValues[createdByField.Fid!.Value] = _queryContext.UserId;
 
             await _auditRepo.LogActivityAsync(
-                AuditActions.Created, AuditEntityTypes.Record, publicId.ToString(), $"Record added in {table.Name} with ID {publicId}", appId: table.AppId, ct: ct);
+                AuditActions.Created, AuditEntityTypes.Record, publicId.ToString(), $"Record added in {table.Name}", appId: table.AppId, ct: ct, tableId: table.Id, recordNumber: recordId);
 
             await _tableRepo.IncrementRecordCountAsync(table.Id, ct);
 

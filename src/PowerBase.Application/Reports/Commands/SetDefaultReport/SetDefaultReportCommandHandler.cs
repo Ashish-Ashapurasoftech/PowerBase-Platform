@@ -25,6 +25,6 @@ public class SetDefaultReportCommandHandler
         var report = await _reportRepo.GetByPublicIdAsync(command.ReportPublicId, ct);
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.Updated, AuditEntityTypes.Report, command.ReportPublicId.ToString(), $"Default report set: {report.Name} for table {table.Name}", appId: table.AppId, ct: ct);
+            AuditActions.Updated, AuditEntityTypes.Report, command.ReportPublicId.ToString(), $"Default report set: {report.Name} for table {table.Name}", appId: table.AppId, ct: ct, tableId: table.Id);
     }
 }

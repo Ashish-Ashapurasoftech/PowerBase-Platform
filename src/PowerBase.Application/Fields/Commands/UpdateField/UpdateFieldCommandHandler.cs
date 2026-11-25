@@ -310,7 +310,11 @@ public class UpdateFieldCommandHandler
 
         // Lookups of this field save the type of value they show; they follow the switch (Number → Currency …).
         if (switchedToTypeCode is not null)
+        {
             await FieldValueTypes.RefreshLookupsOfAsync(existing, switchedToTypeCode, _relRepo, _fieldRepo, ct);
+            // When this field is a parent's key, the new-field References showing it follow the switch too.
+            await ReferenceResultTypeRefresher.RefreshForParentAsync(table, _relRepo, _fieldRepo, ct);
+        }
 
         // Backfill: when an optional field becomes required and a default is supplied, fill existing
         // rows whose value is NULL/empty so they remain valid.
@@ -335,7 +339,7 @@ public class UpdateFieldCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, existing.PublicId.ToString(),
-            $"Field modified: {label} In TableName : {table.Name}", appId: table.AppId, ct: ct);
+            $"Field modified: {label} In TableName : {table.Name}", appId: table.AppId, ct: ct, tableId: table.Id);
 
         // "Initialize field for existing records": captures the snapshot for every record that already exists, as a background job.
         if (command.InitializeSnapshotForExisting && snapshotSourceFid.HasValue && _snapshotJobs is not null)

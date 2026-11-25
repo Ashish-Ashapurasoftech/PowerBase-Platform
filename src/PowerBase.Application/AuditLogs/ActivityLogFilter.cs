@@ -9,4 +9,7 @@ public record ActivityLogFilter(
     string? EntityId,
     string? Action,
     int Page = 1,
-    int PageSize = 50);
+    int PageSize = 50,
+    long? TableId = null,
+    Guid? TablePublicId = null,
+    long? RecordNumber = null);

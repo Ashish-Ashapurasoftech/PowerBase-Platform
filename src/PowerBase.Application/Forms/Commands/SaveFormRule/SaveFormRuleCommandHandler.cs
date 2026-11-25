@@ -163,7 +163,7 @@ public class SaveFormRuleCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Updated, AuditEntityTypes.FormRule, rule.Id.ToString(),
-            ct: ct);
+            ct: ct, tableId: await _formRepo.GetTableIdByFormIdAsync(rule.FormId, ct));
         await _refIndexer.ReindexFormRuleAsync(command.RulePublicId, ct);
     }
 

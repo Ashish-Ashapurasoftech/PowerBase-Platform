@@ -25,6 +25,9 @@ public class ReportColumnInfo
     public string Key { get; init; } = string.Empty;
     public string Name { get; init; } = string.Empty;
     public string TypeCode { get; init; } = string.Empty;
+    /// <summary>Reference, Lookup and Summary columns only: the type the field is shown as (its settings' resultTypeCode),
+    /// so a screen can name it "Currency (Lookup)". Null for other columns.</summary>
+    public string? ResultTypeCode { get; init; }
 }
 
 public class PagedReportRunResult
@@ -442,6 +445,7 @@ public class RunReportQueryHandler
             Key = (f.Fid.HasValue ? (long)f.Fid.Value : f.Id).ToString(),
             Name = string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label,
             TypeCode = f.TypeCode,
+            ResultTypeCode = RelationshipTypeLabel.IsTagged(f.TypeCode) ? RelationshipTypeLabel.ValueType(f.TypeCode, f.Settings) : null,
         }).ToList();
 
         // Determine which field IDs are formula (compute-on-read, no physical column)
@@ -1447,7 +1451,7 @@ public class RunReportQueryHandler
         return new FilterCondition
         {
             FieldId = cond.FieldId, Operator = cond.Operator, SubField = cond.SubField,
-            Value = resolved, ValueMode = "literal", ValueFieldId = null,
+            Value = resolved, ValueMode = "literal", ValueFieldId = null, ValueType = cond.ValueType,
         };
     }
 
@@ -1471,7 +1475,7 @@ public class RunReportQueryHandler
         FilterCondition Cond(string op, DateTime value) => new()
         {
             FieldId = cond.FieldId, SubField = cond.SubField,
-            Operator = op, Value = value.ToString(isoFormat), ValueMode = "literal",
+            Operator = op, Value = value.ToString(isoFormat), ValueMode = "literal", ValueType = cond.ValueType,
         };
 
         return isDuring
@@ -2065,12 +2069,12 @@ public class RunReportQueryHandler
         for (var i = 0; i < rowGroupSpecs.Count; i++)
         {
             var f = rowGroupSpecs[i].Field;
-            columns.Add(new ReportColumnInfo { FieldId = f.Fid ?? f.Id, Key = rowGroupKeys[i], Name = string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label, TypeCode = f.TypeCode });
+            columns.Add(new ReportColumnInfo { FieldId = f.Fid ?? f.Id, Key = rowGroupKeys[i], Name = string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label, TypeCode = f.TypeCode, ResultTypeCode = RelationshipTypeLabel.ValueType(f.TypeCode, f.Settings) });
         }
         columns.Add(new() { FieldId = 0, Key = "0", Name = "Count", TypeCode = "Number" });
         if (seriesField is not null)
         {
-            columns.Add(new ReportColumnInfo { FieldId = seriesField.Fid ?? seriesField.Id, Key = seriesKey!, Name = string.IsNullOrWhiteSpace(seriesField.Label) ? seriesField.Name : seriesField.Label, TypeCode = seriesField.TypeCode });
+            columns.Add(new ReportColumnInfo { FieldId = seriesField.Fid ?? seriesField.Id, Key = seriesKey!, Name = string.IsNullOrWhiteSpace(seriesField.Label) ? seriesField.Name : seriesField.Label, TypeCode = seriesField.TypeCode, ResultTypeCode = RelationshipTypeLabel.ValueType(seriesField.TypeCode, seriesField.Settings) });
         }
         for (var i = 0; i < displayAggregations.Count; i++)
         {

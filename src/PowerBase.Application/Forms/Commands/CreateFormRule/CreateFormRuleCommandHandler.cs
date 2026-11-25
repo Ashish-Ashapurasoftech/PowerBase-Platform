@@ -50,7 +50,7 @@ public class CreateFormRuleCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Created, AuditEntityTypes.FormRule, created.Id.ToString(),
-            ct: ct);
+            ct: ct, tableId: form.AppTableId);
 
         return MapToDetail(created);
     }

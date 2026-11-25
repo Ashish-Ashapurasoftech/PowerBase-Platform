@@ -56,7 +56,7 @@ public static class SummaryFormulaValidator
             var allowed = FieldTypeCategoryHelper.GetAllowedSummarizeByFunctions(source.TypeCode, SummaryReportConfigValidator.GetFormulaResultType(source));
             if (!allowed.Contains(v.Function, StringComparer.OrdinalIgnoreCase))
                 CommonReportValidationHelpers.AddError(errors, key,
-                    $"'{v.Function}' is not a valid Summarize-By option for field '{source.Name}' ({source.TypeCode}). Allowed: {string.Join(", ", allowed)}");
+                    $"'{v.Function}' is not a valid Summarize-By option for field '{source.Name}' ({PowerBase.Application.Relationships.RelationshipTypeLabel.Of(source)}). Allowed: {string.Join(", ", allowed)}");
         }
 
         var variableFields = SummaryFormulaFields.BuildVariableFields(variables, tableFields, tableFields.FirstOrDefault()?.AppTableId ?? 0);

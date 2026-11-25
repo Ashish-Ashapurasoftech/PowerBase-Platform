@@ -24,6 +24,38 @@ public class FieldValueTypesTests
     public void Of_StoredAndFormulaFields(string typeCode, string? settings, string? expected) =>
         FieldValueTypes.Of(Field(typeCode, settings)).Should().Be(expected);
 
+    [Fact]
+    public void ForNewReference_RecordIdKey_IsNumber()
+    {
+        FieldValueTypes.ForNewReference(null).Should().Be("Number");
+        FieldValueTypes.ForNewReference(Field("Number", fid: 3)).Should().Be("Number");
+    }
+
+    [Theory]
+    [InlineData("Text", null, "Text")]
+    [InlineData("Currency", null, "Currency")]
+    [InlineData("Date", null, "Date")]
+    [InlineData("Formula_Text", null, "Text")]                                      // what the formula key produces
+    [InlineData("Lookup", """{"resultTypeCode":"Percent"}""", "Percent")]           // a lookup key: what it shows
+    public void ForNewReference_KeyField_IsTheKeysType(string typeCode, string? settings, string expected) =>
+        FieldValueTypes.ForNewReference(Field(typeCode, settings, fid: 8)).Should().Be(expected);
+
+    [Theory]
+    [InlineData("Number", "Number")]
+    [InlineData("Currency", "Currency")]
+    [InlineData("Text", "Text")]
+    [InlineData("MultiSelect", "MultiSelect")]
+    [InlineData("DateTime", "DateTime")]
+    [InlineData("Formula_Text", "Text")]
+    [InlineData("Formula_DateTime", "DateTime")]
+    public void ForConvertedReference_IsTheFieldsOwnType(string typeCode, string expected) =>
+        FieldValueTypes.ForConvertedReference(Field(typeCode)).Should().Be(expected);
+
+    [Fact]
+    public void Of_Reference_IsUnchanged_SoLookupsOfItKeepTheirType() =>
+        // A lookup of a Reference shows the parent's Record ID#, not the Reference's own saved type.
+        FieldValueTypes.Of(Field("Reference", """{"resultTypeCode":"Text"}""")).Should().Be("Reference");
+
     [Theory]
     [InlineData("""{"function":"Count"}""", "Number")]
     [InlineData("""{"function":"DistinctCount","targetTypeCode":"Text"}""", "Number")]

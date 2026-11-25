@@ -361,7 +361,7 @@ public class UpdateDisplayKeyCommandHandlerTests
         await _auditRepo.Received(1).LogActivityAsync(
             Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
             Arg.Is<string>(title => title != null && title.Contains("Department Code") && title.Contains("lookup")),
-            Arg.Any<long?>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+            Arg.Any<long?>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<long?>(), Arg.Any<long?>());
     }
 
     [Fact]
@@ -376,7 +376,7 @@ public class UpdateDisplayKeyCommandHandlerTests
         await _auditRepo.Received(1).LogActivityAsync(
             Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
             Arg.Is<string>(title => title != null && !title.Contains("lookup")),
-            Arg.Any<long?>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+            Arg.Any<long?>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<long?>(), Arg.Any<long?>());
     }
 
     // ── Switching back to a previously-carried-over key removes the now-redundant lookup ───────
@@ -462,6 +462,6 @@ public class UpdateDisplayKeyCommandHandlerTests
         await _auditRepo.Received(1).LogActivityAsync(
             Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
             Arg.Is<string>(title => title != null && title.Contains("removed") && title.Contains("Department Code")),
-            Arg.Any<long?>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+            Arg.Any<long?>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<long?>(), Arg.Any<long?>());
     }
 }

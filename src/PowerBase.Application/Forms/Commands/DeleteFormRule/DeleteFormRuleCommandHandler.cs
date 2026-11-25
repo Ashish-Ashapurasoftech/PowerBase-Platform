@@ -10,13 +10,16 @@ public class DeleteFormRuleCommandHandler
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
     private readonly IFieldReferenceIndexer _refIndexer;
+    private readonly IFormRepository _formRepo;
 
     public DeleteFormRuleCommandHandler(
         IFormRuleRepository ruleRepo,
         IQueryContext queryContext,
         IAuditRepository auditRepo,
+        IFormRepository formRepo,
         IFieldReferenceIndexer? refIndexer = null)
     {
+        _formRepo = formRepo;
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _ruleRepo = ruleRepo;
         _queryContext = queryContext;
@@ -28,7 +31,8 @@ public class DeleteFormRuleCommandHandler
         var rule = await _ruleRepo.GetByPublicIdAsync(command.RulePublicId, ct);
         await _ruleRepo.DeleteAsync(command.RulePublicId, ct);
         await _auditRepo.LogActivityAsync(
-            AuditActions.Deleted, AuditEntityTypes.FormRule, rule.Id.ToString(), ct: ct);
+            AuditActions.Deleted, AuditEntityTypes.FormRule, rule.Id.ToString(), ct: ct,
+            tableId: await _formRepo.GetTableIdByFormIdAsync(rule.FormId, ct));
         await _refIndexer.RemoveSourceAsync(FieldReferenceSourceTypes.FormRule, command.RulePublicId, ct);
     }
 }

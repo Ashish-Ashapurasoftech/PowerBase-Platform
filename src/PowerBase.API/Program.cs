@@ -283,7 +283,9 @@ builder.Services.AddScoped<IQueryContext>(sp => sp.GetRequiredService<QueryConte
 builder.Services.AddScoped<IJwtService, JwtService>();
 builder.Services.AddScoped<IAppAccessService, AppAccessService>();
 builder.Services.AddScoped<IRolePermissionEnforcer, RolePermissionEnforcer>();
-builder.Services.AddScoped<IEmailService, EmailService>();
+builder.Services.AddScoped<EmailService>();
+builder.Services.AddScoped<PowerBase.Infrastructure.Services.OutlookInviteEmailService>();
+builder.Services.AddScoped<IEmailService, PowerBase.Infrastructure.Services.OutlookInviteEmailService>();
 builder.Services.AddScoped<IPasswordService, PasswordService>();
 builder.Services.AddScoped<ISchemaEngineService, SchemaEngineService>();
 // Field Type Conversion ("Change Type") module — PowerBase.Application/Fields/TypeConversion
@@ -572,6 +574,11 @@ builder.Services.AddScoped<PowerBase.Application.Apps.Queries.ListMyAppCopies.Li
 builder.Services.AddScoped<PowerBase.Application.Apps.Commands.DismissAppCopy.DismissAppCopyCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Import.Pbl.PblValidator>();
 builder.Services.AddScoped<PowerBase.Application.Import.FormulaTranslation.FormulaTranslator>();
+builder.Services.Configure<PowerBase.Application.Import.Quickbase.QuickbaseImportOptions>(
+    builder.Configuration.GetSection(PowerBase.Application.Import.Quickbase.QuickbaseImportOptions.SectionName));
+builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IQuickbaseCatalogRepository, PowerBase.Infrastructure.Repositories.QuickbaseCatalogRepository>();
+builder.Services.AddScoped<PowerBase.Application.Import.Quickbase.IQuickbaseTablesApi, PowerBase.Application.Import.Quickbase.QuickbaseTablesApi>();
+builder.Services.AddScoped<PowerBase.Application.Import.Quickbase.QuickbaseIdResolver>();
 builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportPreview.ImportPreviewQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblExtrasImporter>();
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblDeferredResolver>();
