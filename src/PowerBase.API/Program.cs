@@ -429,6 +429,15 @@ builder.Services.AddScoped<IUserRepository, UserRepository>();
 builder.Services.AddScoped<ITenantRepository, TenantRepository>();
 builder.Services.AddScoped<ISystemRoleRepository, SystemRoleRepository>();
 builder.Services.AddScoped<IAuditRepository, AuditRepository>();
+// Application log (App Settings > Application Audit) — its own logs database, see AppLogMiddleware / migrations/logs.
+builder.Services.AddSingleton<PowerBase.Infrastructure.Persistence.LogsConnectionFactory>();
+builder.Services.AddSingleton<PowerBase.Application.AppLogs.IAppLogRepository, PowerBase.Infrastructure.AppLogs.AppLogRepository>();
+builder.Services.AddSingleton<PowerBase.Infrastructure.AppLogs.AppLogQueue>();
+builder.Services.AddSingleton<PowerBase.Application.AppLogs.IAppLogQueue>(sp => sp.GetRequiredService<PowerBase.Infrastructure.AppLogs.AppLogQueue>());
+builder.Services.AddScoped<PowerBase.Infrastructure.AppLogs.AppLogCollector>();
+builder.Services.AddScoped<PowerBase.Application.AppLogs.IAppLogCollector>(sp => sp.GetRequiredService<PowerBase.Infrastructure.AppLogs.AppLogCollector>());
+builder.Services.AddScoped<PowerBase.Application.AppLogs.AppLogQueryHandler>();
+builder.Services.AddHostedService<PowerBase.API.Workers.AppLogWriterWorker>();
 builder.Services.AddScoped<IAppFieldRepository, AppFieldRepository>();
 builder.Services.AddScoped<IFieldVersionRepository, FieldVersionRepository>();
 builder.Services.AddScoped<IFieldTypeRepository, FieldTypeRepository>();
@@ -844,6 +853,7 @@ app.UseMiddleware<QueryContextMiddleware>();
 app.UseMiddleware<PowerBase.API.QuickbaseApi.Xml.QbXmlTokenMiddleware>();
 app.UseMiddleware<JwtMiddleware>();
 app.UseMiddleware<PowerBase.API.Middleware.RequestOriginMiddleware>();
+app.UseMiddleware<PowerBase.API.Middleware.AppLogMiddleware>();
 app.MapControllers();
 // Liveness of the search pipeline (workers, outbox backlog, search service): counts and times only, no record data. Point an uptime probe
 // or Azure Monitor availability test at it.

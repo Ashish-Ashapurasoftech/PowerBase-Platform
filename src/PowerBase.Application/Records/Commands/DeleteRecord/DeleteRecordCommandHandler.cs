@@ -1,3 +1,4 @@
+using PowerBase.Application.AppLogs;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
@@ -7,6 +8,7 @@ namespace PowerBase.Application.Records.Commands.DeleteRecord;
 
 public class DeleteRecordCommandHandler
 {
+    private readonly IAppLogCollector? _appLog;
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
@@ -27,8 +29,10 @@ public class DeleteRecordCommandHandler
         IPipelineTriggerInterceptor triggerInterceptor,
         ITenantUnitOfWork uow,
         IMessagePublisher messagePublisher,
-        RecordModifyGuard? modifyGuard = null)
+        RecordModifyGuard? modifyGuard = null,
+        IAppLogCollector? appLog = null)
     {
+        _appLog = appLog;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
@@ -89,6 +93,9 @@ public class DeleteRecordCommandHandler
 
             await _recordRepo.DeleteAsync(table, command.RecordPublicId, _uow.Transaction, ct, msg => indexMessage = msg);
             await _tableRepo.DecrementRecordCountAsync(table.Id, ct);
+            // Application log: the values the record had (every field).
+            _appLog?.AttachValues(command.RecordPublicId.ToString(),
+                AppLogValues.Snapshot(fields, f => oldRecord.TryGetValue(PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f), out var v) ? v : null), null);
             await _auditRepo.LogActivityAsync(
                 AuditActions.Deleted, AuditEntityTypes.Record, command.RecordPublicId.ToString(), $"Record deleted from {table.Name}", appId: table.AppId, ct: ct, tableId: table.Id,
                 recordNumber: Convert.ToInt64(oldRecord["Id"]));

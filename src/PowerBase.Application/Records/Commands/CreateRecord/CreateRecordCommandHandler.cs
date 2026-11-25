@@ -1,3 +1,4 @@
+using PowerBase.Application.AppLogs;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
@@ -7,6 +8,7 @@ namespace PowerBase.Application.Records.Commands.CreateRecord;
 
 public class CreateRecordCommandHandler
 {
+    private readonly IAppLogCollector? _appLog;
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
@@ -38,8 +40,10 @@ public class CreateRecordCommandHandler
         IFormRepository formRepo,
         IAppUserRepository appUserRepo,
         IReferenceRelinkService? relink = null,
-        ISnapshotCaptureService? snapshots = null)
+        ISnapshotCaptureService? snapshots = null,
+        IAppLogCollector? appLog = null)
     {
+        _appLog = appLog;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
@@ -93,6 +97,9 @@ public class CreateRecordCommandHandler
             var createdByField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedBy" && f.Fid.HasValue);
             if (createdByField != null) effectiveValues[createdByField.Fid!.Value] = _queryContext.UserId;
 
+            // Application log: the values the record was added with (every field; the Stream's log keeps none for an add).
+            _appLog?.AttachValues(publicId.ToString(), null,
+                AppLogValues.Snapshot(fields, f => effectiveValues.TryGetValue(f.Fid!.Value, out var v) ? v : null));
             await _auditRepo.LogActivityAsync(
                 AuditActions.Created, AuditEntityTypes.Record, publicId.ToString(), $"Record added in {table.Name}", appId: table.AppId, ct: ct, tableId: table.Id, recordNumber: recordId);
 

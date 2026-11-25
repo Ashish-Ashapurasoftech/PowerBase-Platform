@@ -1,4 +1,5 @@
 using System.Text.Json;
+using PowerBase.Application.AppLogs;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
@@ -51,6 +52,7 @@ public sealed class RecordWriteService : IRecordWriteService
     private readonly IFormRepository _formRepo;
     private readonly IReportRepository _reportRepo;
     private readonly IQueryContext _queryContext;
+    private readonly IAppLogCollector? _appLog;
 
     public RecordWriteService(
         IAppTableRepository tableRepo,
@@ -66,8 +68,10 @@ public sealed class RecordWriteService : IRecordWriteService
         IFormRuleRepository formRuleRepo,
         IFormRepository formRepo,
         IReportRepository reportRepo,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IAppLogCollector? appLog = null)
     {
+        _appLog = appLog;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
@@ -258,6 +262,23 @@ public sealed class RecordWriteService : IRecordWriteService
         // Separate audit logging from pipeline trigger change detection:
         // Auditing only logs detailed field diffs for fields where IsAuditable == true
         var auditableChangedFields = pipelineChangedFields.Where(f => f.IsAuditable).ToList();
+
+        // The application log (logs database) gets every changed field, old → new, whatever its "auditable" flag:
+        // the flag only decides what the record page Stream (audit.ActivityLog, below) keeps.
+        if (_appLog is not null && pipelineChangedFields.Count > 0)
+        {
+            Dictionary<string, string>? appUserNames = null;
+            if (pipelineChangedFields.Any(f => f.TypeCode == "User"))
+                appUserNames = (await _appUserRepo.ListByAppIdAsync(table.AppId, ct))
+                    .ToDictionary(u => u.PublicId.ToString(), u => u.UserName, StringComparer.OrdinalIgnoreCase);
+            object? Shown(AppField f, object? raw) =>
+                f.TypeCode == "User" && raw?.ToString() is { } key && appUserNames?.TryGetValue(key, out var name) == true ? name : raw;
+
+            var (allOld, allNew) = AppLogValues.Changes(pipelineChangedFields,
+                f => Shown(f, oldRecord.TryGetValue(PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f), out var v) ? v : null),
+                f => Shown(f, effectiveValues.TryGetValue((long)f.Fid!.Value, out var v) ? v : null));
+            _appLog.AttachValues(recordPublicId.ToString(), allOld, allNew);
+        }
 
         if (auditableChangedFields.Count == 0)
         {

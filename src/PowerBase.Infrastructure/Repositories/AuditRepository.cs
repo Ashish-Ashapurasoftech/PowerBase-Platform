@@ -2,6 +2,7 @@ using System.Data;
 using System.Text;
 using Dapper;
 using Microsoft.Extensions.Caching.Memory;
+using PowerBase.Application.AppLogs;
 using PowerBase.Application.Auth;
 using PowerBase.Application.AuditLogs;
 using PowerBase.Application.Common.Interfaces;
@@ -73,13 +74,18 @@ public class AuditRepository : IAuditRepository
         IControlConnectionFactory controlFactory,
         ITenantConnectionFactory tenantFactory,
         IQueryContext queryContext,
-        IMemoryCache cache)
+        IMemoryCache cache,
+        IAppLogCollector? appLog = null)
     {
         _controlFactory = controlFactory;
         _tenantFactory = tenantFactory;
         _queryContext = queryContext;
         _cache = cache;
+        _appLog = appLog;
     }
+
+    /// <summary>Every activity written here is also handed to the application log (logs database, Application Audit page).</summary>
+    private readonly IAppLogCollector? _appLog;
 
     public async Task RevokeSessionAsync(Guid jwtId, long userId, long? tenantId, string reason, CancellationToken ct = default)
     {
@@ -160,6 +166,7 @@ public class AuditRepository : IAuditRepository
         long? recordNumber = null)
     {
         entityTitle = WithRecordNumber(entityTitle, recordNumber);
+        _appLog?.AddEvent(new AppLogEvent(action, entityType, entityId, entityTitle, appId, tableId, recordNumber, oldValues, newValues));
         await using var connection = await _tenantFactory.CreateAsync(ct);
         await connection.ExecuteAsync(new CommandDefinition(InsertActivityLogSql, new
         {
@@ -193,6 +200,12 @@ public class AuditRepository : IAuditRepository
         if (recordNumbers is not null && recordNumbers.Count != entityIds.Count)
             throw new ArgumentException("One Record ID# is needed per entity id.", nameof(recordNumbers));
         var ids = entityIds as IReadOnlyList<string> ?? entityIds.ToList();
+        if (_appLog is not null)
+            for (var i = 0; i < ids.Count; i++)
+            {
+                var number = recordNumbers?[i];
+                _appLog.AddEvent(new AppLogEvent(action, entityType, ids[i], WithRecordNumber(entityTitle, number), appId, tableId, number, null, null));
+            }
         var connection = transaction?.Connection ?? await _tenantFactory.CreateAsync(ct);
         var ownConnection = transaction is null;
         try

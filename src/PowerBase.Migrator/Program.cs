@@ -1,6 +1,7 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
 using PowerBase.Infrastructure.Migrations;
+using PowerBase.Infrastructure.Persistence;
 using PowerBase.Migrator;
 
 var config = new ConfigurationBuilder()
@@ -16,12 +17,14 @@ var dbRoot = FindDatabaseRoot();
 var rootMigrationsPath    = Path.Combine(dbRoot, "migrations");
 var controlMigrationsPath = Path.Combine(dbRoot, "migrations", "control");
 var tenantMigrationsPath  = Path.Combine(dbRoot, "migrations", "tenant");
+var logsMigrationsPath    = Path.Combine(dbRoot, "migrations", "logs");
 
 // Usage:
 //   dotnet run                                 → root migrations (backwards-compat)
 //   dotnet run -- migrate control              → control-plane migrations
 //   dotnet run -- migrate tenant --id N        → tenant baseline against Powerbase_N
 //   dotnet run -- migrate tenants              → tenant baseline against ALL provisioned tenant DBs
+//   dotnet run -- migrate logs                 → logs database (applog.AppLog, Application Audit), created if missing
 //   dotnet run -- backfill-field-names --id N  → regenerate AppField.Name from Label for tenant N
 //   dotnet run -- backfill-field-names         → same, for ALL provisioned tenant DBs
 //   dotnet run -- inspect-exempt-encryption    → scan all tenants for exempt-but-encrypted fields
@@ -35,6 +38,8 @@ try
 {
     var exitCode = args is ["migrate", "control"]
         ? await RunControlAsync()
+        : args is ["migrate", "logs"]
+            ? await RunLogsAsync()
         : args is ["migrate", "tenant", "--id", var idStr]
             ? await RunSingleTenantAsync(idStr)
             : args is ["migrate", "tenants"]
@@ -78,6 +83,34 @@ async Task<int> RunControlAsync()
     Console.WriteLine($"Mode     : control migrations ({controlMigrationsPath})");
     Console.WriteLine();
     await MigrationRunner.RunAsync(controlConnectionString, controlMigrationsPath, "Control");
+    return 0;
+}
+
+async Task<int> RunLogsAsync()
+{
+    var logsConnectionString = LogsConnectionFactory.Resolve(config);
+    var databaseName = new SqlConnectionStringBuilder(logsConnectionString).InitialCatalog;
+    Console.WriteLine($"Mode     : logs migrations → {databaseName} ({logsMigrationsPath})");
+    Console.WriteLine();
+
+    // The logs database is created on first run (same server and login as its connection string, via master).
+    var masterConnectionString = new SqlConnectionStringBuilder(logsConnectionString) { InitialCatalog = "master" }.ConnectionString;
+    await using (var master = new SqlConnection(masterConnectionString))
+    {
+        await master.OpenAsync();
+        await using var create = new SqlCommand(
+            """
+            IF DB_ID(@name) IS NULL
+            BEGIN
+                DECLARE @sql NVARCHAR(400) = N'CREATE DATABASE ' + QUOTENAME(@name);
+                EXEC (@sql);
+            END
+            """, master) { CommandTimeout = 300 };
+        create.Parameters.AddWithValue("@name", databaseName);
+        await create.ExecuteNonQueryAsync();
+    }
+
+    await MigrationRunner.RunAsync(logsConnectionString, logsMigrationsPath, "Logs");
     return 0;
 }
 
