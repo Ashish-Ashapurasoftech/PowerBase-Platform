@@ -352,7 +352,8 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
                 work = ranges.Select(r => new BuildRange(r.After, r)).ToList();
             }
 
-            var sliced = await BuildSlicedAsync(plan, sqlType, v, model, work, options, ct, keepFree);
+            // Propagate only a REbuild (the field was Ready before, its values may change); a first build changes nothing anyone saw.
+            var sliced = await BuildSlicedAsync(plan, sqlType, v, model, work, options, ct, keepFree, propagate: field.MaterializedOn is not null);
             if (sliced is null) return Done("busy", reason: "No background compute slot was free.");
             var (result, sessions) = sliced.Value;
             result = result with { RowsWritten = result.RowsWritten + alreadyWritten };
@@ -570,7 +571,7 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
     /// Null when no slot freed up. No ranges left (everything was done before the stop) = an empty result, no slot needed.
     /// </summary>
     private async Task<(MaterializedColumnWriter.WriteResult Result, int Sessions)?> BuildSlicedAsync(MaterializePlan plan, string sqlType, int version,
-        ComputeModel model, IReadOnlyList<BuildRange> work, ComputeOptions options, CancellationToken ct, int keepFree = 0)
+        ComputeModel model, IReadOnlyList<BuildRange> work, ComputeOptions options, CancellationToken ct, int keepFree = 0, bool propagate = true)
     {
         if (work.Count == 0) return (new MaterializedColumnWriter.WriteResult(0, 0, [], false), 0);
         var sessions = Math.Max(1, Math.Min(work.Count, options.SlicesPerField));
@@ -614,7 +615,10 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
             }
 
             var result = MaterializedColumnWriter.WriteResult.Combine(results.ToList());
-            await ComputeTableProcessor.PropagateAsync(guards[0].Connection, model, plan, result, ct);
+            // A field's very first build writes the values the read code already showed (until now every reader worked it out on the fly),
+            // so its stored dependents have nothing to catch up with. Propagating it queued a table-wide change for every dependent of
+            // every first build: on UAT that sent Ready fields of the 1.1 M-row Sessions table back to a rebuild, over and over.
+            if (propagate) await ComputeTableProcessor.PropagateAsync(guards[0].Connection, model, plan, result, ct);
             return (result, guards.Count);
         }
         finally
