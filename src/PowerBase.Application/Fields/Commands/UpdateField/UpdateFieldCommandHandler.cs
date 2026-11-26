@@ -120,7 +120,11 @@ public class UpdateFieldCommandHandler
         var defaultValue = existing.IsSystem ? null : command.DefaultValue;
         var isUnique = existing.IsSystem ? false : command.IsUnique;
         var isSortable = existing.IsSystem ? false : command.IsSortable;
-        var isFilterable = existing.IsSystem ? false : command.IsFilterable;
+        // A Lookup / Summary / Formula is always Searchable and Filterable (decision Q4): an untick is ignored, so the search sync below
+        // never empties its column in the index.
+        var isFilterable = existing.IsSystem ? false
+            : ComputedFieldSearch.Apply(command.IsFilterable, existing.TypeCode, existing.IsHidden, existing.IsSystem);
+        var isSearchable = ComputedFieldSearch.Apply(command.IsSearchable, existing.TypeCode, existing.IsHidden, existing.IsSystem);
         var isAuditable = existing.IsSystem ? false : command.IsAuditable;
         var isEncrypted = existing.IsSystem || PowerBase.Domain.Constants.PhysicalNaming.IsEncryptionExemptTypeCode(existing.TypeCode)
             ? false
@@ -270,10 +274,10 @@ public class UpdateFieldCommandHandler
         bool wasSearchable = existing.IsSearchable;
         bool wasFilterable = existing.IsFilterable;
         bool wasEligible = wasSearchable || wasFilterable;
-        bool isEligible = command.IsSearchable || isFilterable;
+        bool isEligible = isSearchable || isFilterable;
 
         var after = new FieldSnapshot(
-            label, description, isRequired, defaultValue, command.IsSearchable, isSortable,
+            label, description, isRequired, defaultValue, isSearchable, isSortable,
             isFilterable, command.IsReportable, isAuditable, isUnique, isEncrypted, isAutoFill, settings,
             snapshotSourceFid, snapshotEditable, isSharedValues);
 
@@ -287,7 +291,7 @@ public class UpdateFieldCommandHandler
                 existing.PublicId, table.Id,
                 label, description,
                 isRequired, defaultValue,
-                command.IsSearchable, isSortable,
+                isSearchable, isSortable,
                 isFilterable, command.IsReportable, isAuditable,
                 isUnique, isEncrypted, isAutoFill, settings, ct, _uow.Transaction);
 
@@ -327,7 +331,7 @@ public class UpdateFieldCommandHandler
 
         // Search Index Sync: when search eligibility (IsSearchable || IsFilterable) changes, trigger a backfill or nullify. Searchable
         // alone changing on a field that stays filterable also rewrites the records: it adds or removes the field's text in quick search.
-        if ((isEligible != wasEligible || (isEligible && command.IsSearchable != wasSearchable)) && existing.Fid.HasValue)
+        if ((isEligible != wasEligible || (isEligible && isSearchable != wasSearchable)) && existing.Fid.HasValue)
         {
             await SyncSearchIndexAsync(table, existing.Fid.Value, isNullify: !isEligible, ct);
         }

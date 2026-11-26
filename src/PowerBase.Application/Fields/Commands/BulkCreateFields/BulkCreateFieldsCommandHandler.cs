@@ -203,9 +203,10 @@ public class BulkCreateFieldsCommandHandler
                 // fields created earlier in this batch, so formulas can reference them.
                 Settings = new FormulaCanonicalizer(fieldsSoFar, variables: variables).ToStoredSettings(fieldType.Code, item.Settings),
                 CreatedBy = _queryContext.UserId,
-                IsSearchable = advancedDefaults.Searchable && item.IsSearchable != false,
+                // A Lookup / Summary / Formula is always Searchable and Filterable (decision Q4), whatever an import asked.
+                IsSearchable = PowerBase.Domain.Constants.ComputedFieldSearch.Apply(advancedDefaults.Searchable && item.IsSearchable != false, fieldType.Code),
                 IsSortable = advancedDefaults.Sortable,
-                IsFilterable = advancedDefaults.Filterable,
+                IsFilterable = PowerBase.Domain.Constants.ComputedFieldSearch.Apply(advancedDefaults.Filterable, fieldType.Code),
                 IsReportable = advancedDefaults.Reportable && item.IsReportable != false,
                 HelpText = NullIfBlank(item.HelpText),
                 IsAuditable = item.IsAuditable,

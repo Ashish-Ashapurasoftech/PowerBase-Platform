@@ -437,6 +437,8 @@ builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.IComputeQu
 // Read side: which stored columns are Ready (a few seconds' cache, independent of the field metadata cache) and the 12B invalidation.
 builder.Services.AddScoped<PowerBase.Application.Compute.IMaterializedFieldState, PowerBase.Infrastructure.Compute.MaterializedFieldStateRepository>();
 builder.Services.AddScoped<ISearchFieldJobs, SearchFieldJobRepository>();
+// Stored Lookup / Summary / Formula fields: Indexing -> Indexed once their field job is done (migrations 101 / 103).
+builder.Services.AddScoped<ISearchIndexStates, PowerBase.Infrastructure.Repositories.SearchIndexStateRepository>();
 
 // Import (Table-to-Table / file) — see PowerBase.Application/Imports
 builder.Services.AddScoped<PowerBase.Application.Imports.IImportDefinitionRepository, PowerBase.Infrastructure.Imports.ImportDefinitionRepository>();

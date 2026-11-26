@@ -140,9 +140,10 @@ public class CreateFieldCommandHandler
             Fid = nextFid,
             Settings = canonicalizer.ToStoredSettings(fieldType.Code, command.Settings),
             CreatedBy = _queryContext.UserId,
-            IsSearchable = advancedDefaults.Searchable,
+            // A Lookup / Summary / Formula is always Searchable and Filterable (decision Q4: it goes to the search index).
+            IsSearchable = PowerBase.Domain.Constants.ComputedFieldSearch.Apply(advancedDefaults.Searchable, fieldType.Code),
             IsSortable = advancedDefaults.Sortable,
-            IsFilterable = advancedDefaults.Filterable,
+            IsFilterable = PowerBase.Domain.Constants.ComputedFieldSearch.Apply(advancedDefaults.Filterable, fieldType.Code),
             IsReportable = advancedDefaults.Reportable,
             IsAuditable = command.IsAuditable,
             IsEncrypted = command.IsEncrypted && !PowerBase.Domain.Constants.PhysicalNaming.IsEncryptionExemptTypeCode(fieldType.Code),

@@ -186,14 +186,25 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         ) THEN 1 ELSE 0 END AS BIT)
         """;
 
-    private const string InsertSql = """
+    // Decision Q4 (see ComputedFieldSearch): a Lookup / Summary / Formula is always Searchable and Filterable. Every write of those flags
+    // below applies it in SQL too, so a path that does not go through a handler (an import, a type change) cannot store them off.
+    // Same rule as PhysicalNaming.IsMaterializableTypeCode; lft is core.FieldType.
+    private const string ComputedFieldTypeSql = "(lft.Code IN ('Lookup', 'Summary', 'Formula') OR lft.Code LIKE 'Formula[_]%')";
+    private const string NewFieldLockedSql =
+        $"@isHidden = 0 AND @isSystem = 0 AND EXISTS (SELECT 1 FROM core.FieldType lft WHERE lft.Id = @fieldTypeId AND {ComputedFieldTypeSql})";
+    private const string RowLockedSql =
+        $"meta.AppField.IsHidden = 0 AND meta.AppField.IsSystem = 0 AND EXISTS (SELECT 1 FROM core.FieldType lft WHERE lft.Id = meta.AppField.FieldTypeId AND {ComputedFieldTypeSql})";
+
+    private const string InsertSql = $"""
         INSERT INTO meta.AppField
             (AppTableId, FieldTypeId, Name, Label, Description, HelpText, IsRequired, DefaultValue,
              IsSystem, PhysicalColumnName, IsSearchable, IsSortable, IsFilterable, IsReportable, IsAuditable, IsEncrypted, IsAutoFill, IsHidden,
              Fid, Settings, DisplayOrder, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id, INSERTED.PublicId
         VALUES (@tableId, @fieldTypeId, @name, @label, @description, @helpText, @isRequired, @defaultValue,
-                @isSystem, @physicalColumnName, @isSearchable, @isSortable, @isFilterable, @isReportable, @isAuditable, @isEncrypted, @isAutoFill, @isHidden,
+                @isSystem, @physicalColumnName,
+                CASE WHEN {NewFieldLockedSql} THEN 1 ELSE @isSearchable END, @isSortable,
+                CASE WHEN {NewFieldLockedSql} THEN 1 ELSE @isFilterable END, @isReportable, @isAuditable, @isEncrypted, @isAutoFill, @isHidden,
                 @fid, @settings, @displayOrder, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
@@ -216,15 +227,21 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         UPDATE meta.AppField SET Settings = @settings, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy WHERE Id = @id
         """;
 
-    private const string SetSearchableReportableSql = """
-        UPDATE meta.AppField SET IsSearchable = @isSearchable, IsReportable = @isReportable, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy WHERE Id = @id
+    private const string SetSearchableReportableSql = $"""
+        UPDATE meta.AppField SET IsSearchable = CASE WHEN {RowLockedSql} THEN 1 ELSE @isSearchable END, IsReportable = @isReportable,
+            ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy WHERE Id = @id
         """;
 
     // TypeCode is not a physical column on meta.AppField — it's derived via the ft.Code join in
-    // SelectColumns, so changing type is just a FieldTypeId swap.
-    private const string UpdateFieldTypeSql = """
+    // SelectColumns, so changing type is just a FieldTypeId swap. A field that becomes a Lookup / Summary / Formula is made Searchable
+    // and Filterable (decision Q4); one that stops being one keeps its flags.
+    private const string UpdateFieldTypeSql = $"""
         UPDATE meta.AppField
         SET FieldTypeId = @fieldTypeId, Settings = @settings, IsRequired = @isRequired,
+            IsSearchable = CASE WHEN meta.AppField.IsHidden = 0 AND meta.AppField.IsSystem = 0
+                AND EXISTS (SELECT 1 FROM core.FieldType lft WHERE lft.Id = @fieldTypeId AND {ComputedFieldTypeSql}) THEN 1 ELSE IsSearchable END,
+            IsFilterable = CASE WHEN meta.AppField.IsHidden = 0 AND meta.AppField.IsSystem = 0
+                AND EXISTS (SELECT 1 FROM core.FieldType lft WHERE lft.Id = @fieldTypeId AND {ComputedFieldTypeSql}) THEN 1 ELSE IsFilterable END,
             ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
         WHERE Id = @id
         """;
@@ -242,12 +259,12 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     // forced false, Settings stripped). Excluding IsSystem rows here used to be redundant
     // defense-in-depth for a save path system fields never took; now it just silently matches zero
     // rows and the handler reports a false "Field not found" for every system-field save.
-    private const string UpdateFieldSql = """
+    private const string UpdateFieldSql = $"""
         UPDATE meta.AppField
         SET Label = @label, Description = @description,
             IsRequired = @isRequired, DefaultValue = @defaultValue,
-            IsSearchable = @isSearchable, IsSortable = @isSortable,
-            IsFilterable = @isFilterable, IsReportable = @isReportable, IsAuditable = @isAuditable,
+            IsSearchable = CASE WHEN {RowLockedSql} THEN 1 ELSE @isSearchable END, IsSortable = @isSortable,
+            IsFilterable = CASE WHEN {RowLockedSql} THEN 1 ELSE @isFilterable END, IsReportable = @isReportable, IsAuditable = @isAuditable,
             IsUnique = @isUnique,
             IsEncrypted = @isEncrypted,
             IsAutoFill = @isAutoFill,

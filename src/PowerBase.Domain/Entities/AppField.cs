@@ -46,6 +46,22 @@ public class AppField
     public int MaterializeVersion { get; set; }
     /// <summary>When the last full build of c_{fid} finished.</summary>
     public DateTime? MaterializedOn { get; set; }
+    /// <summary>See <see cref="Constants.SearchIndexStates"/>: whether this stored field's values are fully in the search index.</summary>
+    public byte SearchIndexState { get; set; }
+    /// <summary>The MaterializeVersion sent to the search index. The field is read from the index only while this equals MaterializeVersion.</summary>
+    public int? SearchIndexVersion { get; set; }
+    /// <summary>When the search field job for SearchIndexVersion finished.</summary>
+    public DateTime? SearchIndexedOn { get; set; }
+    /// <summary>False when some stored value does not come back unchanged from the index (more than ~15 significant digits): sort and the
+    /// shown value then stay on SQL c_{fid}. True by default.</summary>
+    public bool SearchExact { get; set; } = true;
+
+    /// <summary>The stored field's values may be read from the search index: stored and Ready, and the index holds this very version.</summary>
+    public bool IsInSearchIndex =>
+        MaterializeMode == Constants.MaterializeModes.On
+        && MaterializeState == Constants.MaterializeStates.Ready
+        && SearchIndexState == Constants.SearchIndexStates.Indexed
+        && SearchIndexVersion == MaterializeVersion;
     /// <summary>The Azure AI Search column this field's value is stored in (e.g. "num_03"). Assigned once, never recomputed, so adding, removing or
     /// switching other fields never moves it. Null until the field is search-eligible and has been allocated one.</summary>
     public string? SearchSlot { get; set; }
