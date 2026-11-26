@@ -172,39 +172,19 @@ public class RunReportQueryHandler
         // the access rules need the fields and run as soon as those are in.
         var appTask = _appRepo != null ? Timed<App?>("app", WrapApp(_appRepo.GetByIdAsync(table.AppId, ct))) : Task.FromResult<App?>(null);
         var fieldsTask = Timed("fields", _fieldRepo.ListByTableAsync(table.Id, ct));
-        var appPermsTask = Timed("appperms", _appUserRepo.GetUserAppPermissionsAsync(table.AppId, _queryContext.UserId, ct));
         var allFields = await fieldsTask;
         var accessTask = Timed("access", _enforcer.GetTableAccessAsync(table, allFields, ct));
-        await Task.WhenAll(appTask, appPermsTask, accessTask);
+        await Task.WhenAll(appTask, accessTask);
         var app = appTask.Result;
         var isAppEncrypted = app?.IsEncrypted ?? false;
         var access = accessTask.Result;
-        var appPerms = appPermsTask.Result;
-        // Only genuine report designers (create or update capability) qualify for masked builder
-        // preview. ReportsRead is a viewer-level permission — those users have no design intent
-        // and must be blocked entirely when they lack table data access, not shown masked rows.
-        bool isReportBuilder = appPerms.Contains(Domain.Constants.PermissionCodes.ReportsCreate) ||
-                               appPerms.Contains(Domain.Constants.PermissionCodes.ReportsUpdate);
+        // Data Permissions alone decide what a report returns: with View records = None on the table the user gets nothing —
+        // no rows, no counts, no totals — whatever builder permissions (Create / Update Reports) they hold. The former
+        // "masked builder preview" exception (aggregates of records the user may not see) was removed on purpose.
+        const bool isMaskedPreview = false;
 
-        bool isMaskedPreview = !access.CanView && isReportBuilder;
-
-        if (!access.CanView && !isReportBuilder)
+        if (!access.CanView)
             return new PagedReportRunResult { Page = page, PageSize = pageSize };
-
-        if (isMaskedPreview)
-        {
-            // Report Builder Masked Mode: allow analyzing structure & aggregates without exposing raw records
-            access = new TableAccessContext
-            {
-                Unrestricted = false,
-                CanAdd = false,
-                CanDelete = false,
-                ViewScope = Domain.Constants.RecordScopes.AllRecords,
-                ModifyScope = Domain.Constants.RecordScopes.None,
-                VisibleFields = allFields,
-                EditableFieldIds = new HashSet<long>()
-            };
-        }
 
         var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
         // Totals/grouping that no longer fit a field whose type was changed are skipped (Change Type).

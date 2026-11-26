@@ -300,7 +300,7 @@ public class FieldsController : ControllerBase
 
     /// <summary>Soft-delete a field (does not run DROP COLUMN).</summary>
     [HttpDelete("tables/{tableId:guid}/fields/{publicId:guid}")]
-    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
+    [RequireAppPermission(PermissionCodes.FieldsDelete, AppAccessResolver.ByTableId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -312,7 +312,7 @@ public class FieldsController : ControllerBase
 
     /// <summary>Soft-delete multiple fields.</summary>
     [HttpDelete("tables/{tableId:guid}/fields")]
-    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
+    [RequireAppPermission(PermissionCodes.FieldsDelete, AppAccessResolver.ByTableId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> BulkDelete(

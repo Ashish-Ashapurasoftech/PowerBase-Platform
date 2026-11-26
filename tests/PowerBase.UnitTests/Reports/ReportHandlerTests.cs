@@ -347,7 +347,7 @@ public class ReportHandlerTests
     }
 
     [Fact]
-    public async Task RunReport_ReportBuilderWithoutTableAccess_MasksDataAndReturnsCountAndColumns()
+    public async Task RunReport_ReportBuilderWithoutTableAccess_GetsEmptyResult()
     {
         var table = MakeTable();
         var field1 = MakeField(1);
@@ -386,11 +386,11 @@ public class ReportHandlerTests
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
 
-        result.IsDataMasked.Should().BeTrue();
-        result.TotalCount.Should().Be(1);
-        result.Columns.Should().ContainSingle(c => c.FieldId == 1L);
-        // After fix: Table-type masked preview must return EMPTY Items — requirement says
-        // "row counts and aggregate outputs only — never raw record data".
+        // Data Permissions alone decide: View records = None means nothing at all, even for a report builder
+        // (the former masked builder preview was removed).
+        result.IsDataMasked.Should().BeFalse();
+        result.TotalCount.Should().Be(0);
+        result.Columns.Should().BeEmpty();
         result.Items.Should().BeEmpty();
     }
 
@@ -434,7 +434,7 @@ public class ReportHandlerTests
     }
 
     [Fact]
-    public async Task RunReport_TableType_MaskedPreview_ReturnsOnlyCountAndColumns_NoRows()
+    public async Task RunReport_ReportBuilder_WithoutTableAccess_GetsNothing_NoCountNoColumns()
     {
         // Arrange: genuine report builder (has reports:create) with NO table data access.
         // Must receive count + column structure ONLY — zero individual rows.
@@ -473,10 +473,11 @@ public class ReportHandlerTests
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
 
-        result.IsDataMasked.Should().BeTrue();
-        result.TotalCount.Should().Be(42);            // count is exposed so builder can see scale
-        result.Columns.Should().ContainSingle(c => c.FieldId == 1L); // structure visible
-        result.Items.Should().BeEmpty();              // ZERO individual rows — no raw data at all
+        // No masked preview any more: no count, no structure, no rows for a table the user may not view.
+        result.IsDataMasked.Should().BeFalse();
+        result.TotalCount.Should().Be(0);
+        result.Columns.Should().BeEmpty();
+        result.Items.Should().BeEmpty();
     }
 
     // --- What a table report reads and projects ---
