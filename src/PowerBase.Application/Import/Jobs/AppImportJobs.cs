@@ -148,25 +148,13 @@ public sealed record AppImportJobRequest(
     Guid JobPublicId, long TenantId, long UserId, bool IsSuperAdmin, string UserName, string UserEmail,
     IReadOnlySet<string> Permissions, string TenantRole);
 
-/// <summary>In-process queue between the upload endpoint and <c>AppImportJobWorker</c>.</summary>
-public sealed class AppImportJobQueue
-{
-    private readonly Channel<AppImportJobRequest> _channel = Channel.CreateUnbounded<AppImportJobRequest>();
-
-    /// <summary>When this server process started; jobs older than this that never finished were lost with the previous process.</summary>
-    public DateTime ProcessStartedUtc { get; } = DateTime.UtcNow;
-
-    public ValueTask EnqueueAsync(AppImportJobRequest request, CancellationToken ct = default) => _channel.Writer.WriteAsync(request, ct);
-    public IAsyncEnumerable<AppImportJobRequest> ReadAllAsync(CancellationToken ct) => _channel.Reader.ReadAllAsync(ct);
-}
-
 public sealed record AppImportJobDto(
     Guid Id, string FileName, long FileSizeBytes, string Status, string? Stage, int PercentComplete,
     Guid? AppId, string? AppName, string? ErrorMessage, DateTime CreatedOn, DateTime? StartedOn, DateTime? CompletedOn, bool EmailSent,
     int AppCount = 1, int AppsCreated = 0);
 
 /// <summary>Starts, lists and dismisses the caller's background imports.</summary>
-public sealed class AppImportJobService(IAppImportJobRepository jobs, IQueryContext context, AppImportJobQueue queue)
+public sealed class AppImportJobService(IAppImportJobRepository jobs, IQueryContext context, IAppImportDispatchQueue queue)
 {
     public async Task<AppImportJobDto> StartAsync(string fileName, byte[] content, string? mapping, string? frontendBaseUrl, CancellationToken ct)
     {
@@ -183,21 +171,28 @@ public sealed class AppImportJobService(IAppImportJobRepository jobs, IQueryCont
             FrontendBaseUrl = frontendBaseUrl,
         }, ct);
 
-        await queue.EnqueueAsync(new AppImportJobRequest(
-            job.PublicId, context.TenantId, context.UserId, context.IsSuperAdmin, context.UserName, context.UserEmail,
-            new HashSet<string>(context.Permissions), context.TenantRole), ct);
+        // Durable queue (control DB): whichever API instance is free runs it, and it survives a restart of this one.
+        try
+        {
+            await queue.EnqueueAsync(context.TenantId, job.PublicId, new AppImportIdentity(
+                context.UserId, context.IsSuperAdmin, context.UserName, context.UserEmail, context.Permissions.ToList(), context.TenantRole), ct);
+        }
+        catch
+        {
+            // Never leave a job "Queued" that no worker will ever see.
+            await jobs.FailAsync(job.Id, "The import could not be queued. Please upload the file again.", CancellationToken.None);
+            throw;
+        }
         return ToDto(job);
     }
 
-    public async Task<IReadOnlyList<AppImportJobDto>> ListMineAsync(CancellationToken ct)
-    {
-        await jobs.FailInterruptedAsync(context.UserId, queue.ProcessStartedUtc, ct);
-        return (await jobs.ListForUserAsync(context.UserId, ct)).Select(ToDto).ToList();
-    }
+    // A job interrupted by a stopped instance is marked failed by the worker that finds its expired lease — not by "older than
+    // this process" (with several instances that failed jobs another instance was still running).
+    public async Task<IReadOnlyList<AppImportJobDto>> ListMineAsync(CancellationToken ct) =>
+        (await jobs.ListForUserAsync(context.UserId, ct)).Select(ToDto).ToList();
 
     public async Task<AppImportJobDto> GetAsync(Guid id, CancellationToken ct)
     {
-        await jobs.FailInterruptedAsync(context.UserId, queue.ProcessStartedUtc, ct);
         var job = await jobs.GetByPublicIdAsync(id, ct);
         // Another person's job looks exactly like one that does not exist.
         if (job is null || job.UserId != context.UserId) throw new NotFoundException("AppImportJob", id.ToString());

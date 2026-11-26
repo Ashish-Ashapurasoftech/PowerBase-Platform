@@ -16,4 +16,15 @@ public class MetadataCacheOptions
 
     /// <summary>Same, for a write inside a database transaction, which becomes visible only when the caller commits.</summary>
     public int TransactionQuarantineSeconds { get; set; } = 30;
+
+    /// <summary>Shared versions in SQL (meta.CacheVersion) so a write on one API instance invalidates every instance (ARC-01). Required
+    /// before running more than one instance. Off = the old process-local behaviour.</summary>
+    public bool SharedVersions { get; set; } = true;
+
+    /// <summary>Outside a request (background loops), how often the shared versions are re-read. Requests read them once each.</summary>
+    public int VersionCheckIntervalMs { get; set; } = 1000;
+
+    /// <summary>Most entries kept in memory (each list of fields / tables / permissions is one entry); 0 = unbounded. Least recently used
+    /// entries are compacted away first.</summary>
+    public long SizeLimitEntries { get; set; } = 100_000;
 }

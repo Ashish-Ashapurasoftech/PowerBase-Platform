@@ -199,6 +199,8 @@ builder.Services.AddSwaggerGen(c =>
 // Infrastructure
 builder.Services.AddMemoryCache();
 builder.Services.Configure<PowerBase.Application.Common.Configurations.MetadataCacheOptions>(builder.Configuration.GetSection(PowerBase.Application.Common.Configurations.MetadataCacheOptions.SectionName));
+// ARC-01: the shared versions (meta.CacheVersion) that carry every cache invalidation to every API instance.
+builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.ICacheVersionStore, PowerBase.Infrastructure.Services.SqlCacheVersionStore>();
 builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.IMetadataCache, PowerBase.Infrastructure.Services.MetadataCache>();
 builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.IRequestOriginRegistry, PowerBase.Infrastructure.Services.RequestOriginRegistry>();
 builder.Services.Configure<PowerBase.API.Middleware.ServerTimingOptions>(builder.Configuration.GetSection(PowerBase.API.Middleware.ServerTimingOptions.SectionName));
@@ -409,7 +411,8 @@ builder.Services.AddScoped<IImportSourceRefRepository, ImportSourceRefRepository
 builder.Services.AddScoped<IAppFieldImportNoteRepository, AppFieldImportNoteRepository>();
 builder.Services.AddScoped<IAppImportJobRepository, AppImportJobRepository>();
 builder.Services.AddScoped<IEmailTemplateRepository, EmailTemplateRepository>();
-builder.Services.AddSingleton<PowerBase.Application.Import.Jobs.AppImportJobQueue>();
+// Durable control-DB queue for background app imports (any instance runs any queued job; survives restarts).
+builder.Services.AddScoped<PowerBase.Application.Import.Jobs.IAppImportDispatchQueue, PowerBase.Infrastructure.Imports.AppImportDispatchQueue>();
 PowerBase.Application.Import.Jobs.ImportRuntime.ConfiguredCommandTimeoutSeconds =
     builder.Configuration.GetValue("Import:SqlCommandTimeoutSeconds", PowerBase.Application.Import.Jobs.ImportRuntime.DEFAULT_COMMAND_TIMEOUT_SECONDS);
 builder.Services.AddScoped<PowerBase.Application.Import.Jobs.AppImportJobService>();
@@ -802,7 +805,10 @@ if (builder.Configuration.GetValue<bool>("Search:Indexer:Enabled", true))
 // Makes sure no record change is lost on the way to the search index: re-publishes changes the indexer has not confirmed, and checks daily.
 builder.Services.AddSingleton<PowerBase.Infrastructure.Services.SearchPipelineState>();
 builder.Services.AddHostedService<PowerBase.API.Workers.SearchOutboxRelay>();
-builder.Services.AddHealthChecks().AddCheck<PowerBase.API.Services.SearchPipelineHealthCheck>("search-pipeline");
+builder.Services.AddHealthChecks()
+    .AddCheck<PowerBase.API.Services.SearchPipelineHealthCheck>("search-pipeline")
+    // Load balancer readiness (/health/ready): started + control database reachable. /health/live has no checks (process is up).
+    .AddCheck<PowerBase.API.Services.ReadinessHealthCheck>("ready", tags: ["ready"]);
 
 // Connected Tables: a standalone module (its own services, read-only write filter and workers).
 PowerBase.API.ConnectedTables.ConnectedTablesApiExtensions.AddConnectedTablesModule(builder.Services, builder.Configuration);
@@ -838,6 +844,7 @@ app.UseStaticFiles(new StaticFileOptions
 });
 
 app.UseMiddleware<QueryContextMiddleware>();
+app.UseMiddleware<PowerBase.API.Middleware.CacheVersionScopeMiddleware>();
 // Quickbase XML API (/db/*): copies a usertoken/ticket request parameter into the Authorization header. Other paths untouched.
 app.UseMiddleware<PowerBase.API.QuickbaseApi.Xml.QbXmlTokenMiddleware>();
 app.UseMiddleware<JwtMiddleware>();
@@ -845,6 +852,8 @@ app.UseMiddleware<PowerBase.API.Middleware.RequestOriginMiddleware>();
 app.MapControllers();
 // Liveness of the search pipeline (workers, outbox backlog, search service): counts and times only, no record data. Point an uptime probe
 // or Azure Monitor availability test at it.
+app.MapHealthChecks("/health/live", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions { Predicate = _ => false });
+app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions { Predicate = check => check.Tags.Contains("ready") });
 app.MapHealthChecks("/health/search", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
 {
     Predicate = check => check.Name == "search-pipeline",

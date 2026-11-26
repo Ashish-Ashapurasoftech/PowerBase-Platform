@@ -18,6 +18,14 @@ public static class MetadataCacheGroups
     /// there does not say which tenants it reaches.</summary>
     public const string UserPermissions = "userperms";
 
+    /// <summary>"This session is not revoked" answers (control database), so a logout on any instance is honoured by every instance on
+    /// its next request. Cached under <see cref="GlobalTenant"/>.</summary>
+    public const string Sessions = "sessions";
+
+    /// <summary>Groups that decide what a user may do or see: never served from the cache unless their shared version was confirmed
+    /// (fail closed — see <see cref="ICacheVersionStore"/>).</summary>
+    public static bool IsSecurityRelevant(string group) => group is Access or UserPermissions or Sessions;
+
     /// <summary>The tenant id for entries that are not tenant-bound.</summary>
     public const long GlobalTenant = 0;
 }

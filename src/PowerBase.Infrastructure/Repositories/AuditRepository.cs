@@ -73,16 +73,23 @@ public class AuditRepository : IAuditRepository
         IControlConnectionFactory controlFactory,
         ITenantConnectionFactory tenantFactory,
         IQueryContext queryContext,
-        IMemoryCache cache)
+        IMemoryCache cache,
+        IMetadataCache? metadataCache = null)
     {
         _controlFactory = controlFactory;
         _tenantFactory = tenantFactory;
         _queryContext = queryContext;
         _cache = cache;
+        _metadataCache = metadataCache;
     }
+
+    private readonly IMetadataCache? _metadataCache;
 
     public async Task RevokeSessionAsync(Guid jwtId, long userId, long? tenantId, string reason, CancellationToken ct = default)
     {
+        // Every instance's "not revoked" answers are dropped (shared version) before the revocation is written: the very next request
+        // with this token, on any instance, asks SQL again.
+        _metadataCache?.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.Sessions);
         await using var connection = _controlFactory.Create();
         await connection.ExecuteAsync(
             new CommandDefinition(RevokeSessionSql, new { jwtId, userId, tenantId, reason }, cancellationToken: ct));
@@ -91,15 +98,31 @@ public class AuditRepository : IAuditRepository
 
     public async Task<bool> IsSessionRevokedAsync(Guid jwtId, CancellationToken ct = default)
     {
-        if (_cache.TryGetValue(RevokedKey(jwtId), out bool cached))
-            return cached;
+        // Revoked is final: cached long, locally.
+        if (_cache.TryGetValue(RevokedKey(jwtId), out bool cachedRevoked) && cachedRevoked)
+            return true;
 
-        await using var connection = _controlFactory.Create();
-        var revoked = await connection.ExecuteScalarAsync<int>(
-            new CommandDefinition(IsSessionRevokedSql, new { jwtId }, cancellationToken: ct)) == 1;
-        // Revoked is cached long; "not revoked" only briefly so a logout on another instance lands within seconds.
-        _cache.Set(RevokedKey(jwtId), revoked, revoked ? RevokedCacheTtl : NotRevokedCacheTtl);
-        return revoked;
+        async Task<bool> ReadAsync()
+        {
+            await using var connection = _controlFactory.Create();
+            return await connection.ExecuteScalarAsync<int>(
+                new CommandDefinition(IsSessionRevokedSql, new { jwtId }, cancellationToken: ct)) == 1;
+        }
+
+        if (_metadataCache is null)
+        {
+            var revoked = await ReadAsync();
+            // Without the shared cache: "not revoked" only briefly so a logout on another instance lands within seconds.
+            _cache.Set(RevokedKey(jwtId), revoked, revoked ? RevokedCacheTtl : NotRevokedCacheTtl);
+            return revoked;
+        }
+
+        // "Not revoked" lives in the shared-versioned cache (group Sessions): valid only while no instance has revoked a session since —
+        // checked on every request, fail closed (unreadable versions = ask SQL).
+        var answer = await _metadataCache.GetOrAddAsync(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.Sessions, jwtId.ToString("N"),
+            async () => (await ReadAsync()) ? "1" : "0");
+        if (answer == "1") _cache.Set(RevokedKey(jwtId), true, RevokedCacheTtl);
+        return answer == "1";
     }
 
     // ── control-scoped: auth audit ───────────────────────────────────────────
