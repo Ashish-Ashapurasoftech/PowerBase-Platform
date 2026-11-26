@@ -1400,6 +1400,8 @@ public partial class PipelineEngine : IPipelineEngine
                 return await ExecuteCopyRecordsAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, accountScopeHandle.Services, ct);
             if (step.Subtype == "import-with-csv")
                 return await ExecuteImportWithCsvAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, accountScopeHandle.Services, ct);
+            if (step.Subtype == CsvImportSubtype)
+                return await ExecuteCsvImportAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, accountScopeHandle.Services, ct);
 
             if (step.Subtype == "make-request")
                 return await ExecuteMakeRequestAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, accountScopeHandle.Services, ct);
@@ -1448,6 +1450,8 @@ public partial class PipelineEngine : IPipelineEngine
                 return await ExecuteCopyRecordsAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, scope.ServiceProvider, ct);
                 if (step.Subtype == "import-with-csv")
                     return await ExecuteImportWithCsvAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, scope.ServiceProvider, ct);
+                if (step.Subtype == CsvImportSubtype)
+                    return await ExecuteCsvImportAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, scope.ServiceProvider, ct);
 
                 if (step.Subtype == "make-request")
                     return await ExecuteMakeRequestAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, scope.ServiceProvider, ct);
@@ -1473,6 +1477,8 @@ public partial class PipelineEngine : IPipelineEngine
                 return await ExecuteCopyRecordsAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, _serviceProvider, ct);
             if (step.Subtype == "import-with-csv")
                 return await ExecuteImportWithCsvAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, _serviceProvider, ct);
+            if (step.Subtype == CsvImportSubtype)
+                return await ExecuteCsvImportAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, _serviceProvider, ct);
             await EnforceStepAccessAsync(step, _serviceProvider, ct);
             return await RunInStepScopeAsync(_serviceProvider, null, () =>
                 ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,

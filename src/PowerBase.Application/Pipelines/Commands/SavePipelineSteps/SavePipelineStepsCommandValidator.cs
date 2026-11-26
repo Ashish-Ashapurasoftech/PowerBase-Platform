@@ -30,7 +30,7 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
         bool isValidFirstStep = firstStep.Type == "trigger" ||
             (firstStep.Type == "query" && (firstStep.Subtype == "search-records" || firstStep.Subtype == "look-up-record")) ||
             firstStep.Subtype == "handle-errors" ||
-            (firstStep.Type == "action" && (firstStep.Subtype == "prepare-bulk-upsert" || firstStep.Subtype == "copy-records" || firstStep.Subtype == "make-request" || firstStep.Subtype == "pause" || firstStep.Subtype == "import-with-csv")) ||
+            (firstStep.Type == "action" && (firstStep.Subtype == "prepare-bulk-upsert" || firstStep.Subtype == "copy-records" || firstStep.Subtype == "make-request" || firstStep.Subtype == "pause" || firstStep.Subtype == "import-with-csv" || firstStep.Subtype == "csv-import")) ||
             (firstStep.Type == "email" && (firstStep.Subtype == "send-email" || firstStep.Subtype == "send-email-outlook")) ||
             // As in Quickbase: these actions can start a PowerFlow that is run by hand or on a schedule.
             (firstStep.Type == "action" && firstStep.Subtype is "create-record" or "update-record" or "delete-record" or "call-another-pipeline") ||
