@@ -19,7 +19,7 @@ public static class SummaryFormulaFields
     /// <summary>The Function an aggregation carries when it shows a summary formula instead of an aggregate of a field.</summary>
     public const string AggregationFunction = "Formula";
 
-    /// <summary>Reserved ids for the formulas: far above any real Fid and clear of the report-formula range (2,000,000,001..003).</summary>
+    /// <summary>Reserved ids for the formulas: far above any real Fid and clear of the report-formula range (2,000,000,001 .. 2,000,000,001 + ReportFormulaFields.MaxFormulas - 1, so up to 2,000,000,100).</summary>
     public const long FirstId = 2_000_000_101;
 
     /// <summary>Reserved ids for the variables when they are exposed to the formula engine as fields.</summary>

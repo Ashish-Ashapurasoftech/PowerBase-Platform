@@ -72,7 +72,7 @@ public class SortGroupLevelRequest
 
 public class ReportFormulaRequest
 {
-    /// <summary>Reserved id (2000000001 to 2000000003) that columns, filters, sorts, group-bys and aggregations use to refer to this formula.</summary>
+    /// <summary>Reserved id (2000000001 up to 2000000010, see ReportFormulaFields.MaxFormulas) that columns, filters, sorts, group-bys and aggregations use to refer to this formula.</summary>
     public long Id { get; set; }
     public string Name { get; set; } = string.Empty;
     public string TypeCode { get; set; } = "Formula_Text";

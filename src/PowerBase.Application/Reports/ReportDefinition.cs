@@ -91,7 +91,7 @@ public class ReportDefinition
 
 public class ReportFormula
 {
-    /// <summary>Reserved id (<see cref="ReportFormulaFields.FirstId"/> + 0..2) other parts of the definition (columns, filters, sorts, group-by, aggregations)
+    /// <summary>Reserved id (<see cref="ReportFormulaFields.FirstId"/> + 0..<see cref="ReportFormulaFields.MaxFormulas"/> - 1) other parts of the definition (columns, filters, sorts, group-by, aggregations)
     /// use to refer to this formula; it can never collide with a real field's Fid.</summary>
     public long Id { get; set; }
     public string Name { get; set; } = string.Empty;
