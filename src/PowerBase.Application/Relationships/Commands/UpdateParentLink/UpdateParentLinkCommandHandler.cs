@@ -64,7 +64,7 @@ public class UpdateParentLinkCommandHandler
                 command.DisplayAsLinkToParent
                     ? $"Field '{label}' on {child.Name} now links to the parent record"
                     : $"Field '{label}' on {child.Name} no longer links to the parent record",
-                appId: child.AppId, ct: ct);
+                appId: child.AppId, ct: ct, tableId: child.Id);
         }
 
         return await _queries.GetAsync(rel.PublicId, ct);

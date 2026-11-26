@@ -197,7 +197,7 @@ public sealed class ReferenceRelinkService(
 
         await audit.LogActivitiesAsync(
             AuditActions.Updated, AuditEntityTypes.Record, changed.Select(c => c.PublicId.ToString()).ToList(),
-            $"Record linked to {parent.Name} through its unmatched {Label(target.Reference)} value", target.Child.AppId, transaction: null, ct);
+            $"Record linked to {parent.Name} through its unmatched {Label(target.Reference)} value", target.Child.AppId, transaction: null, ct, tableId: target.Child.Id);
         await PublishIndexUpdatesAsync(target, changed, ct);
         return changed.Count;
     }

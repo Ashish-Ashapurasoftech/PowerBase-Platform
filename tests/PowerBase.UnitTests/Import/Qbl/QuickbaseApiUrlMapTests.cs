@@ -36,6 +36,13 @@ public class QuickbaseApiUrlMapTests
     // XML API: same action, credentials dropped.
     [InlineData("GET", "https://ysl.quickbase.com/db/bwcrtu9k5?a=API_AddRecord&_fid_6=x&usertoken=abc", null, "GET", "/db/{db:bwcrtu9k5}?a=API_AddRecord&_fid_6=x", false)]
     [InlineData("POST", "https://ysl.quickbase.com/db/main?a=API_GetUserInfo&ticket=t", null, "POST", "/db/main?a=API_GetUserInfo", false)]
+    // API_DoQuery / API_DoQueryCount (code-page style URL): ticket, apptoken and usertoken dropped, the rest kept as is.
+    [InlineData("GET", "https://ysl.quickbase.com/db/bwcrtu9k5?a=API_DoQuery&ticket=auth_ticket&apptoken=abc&qid=1&fmt=structured", null,
+        "GET", "/db/{db:bwcrtu9k5}?a=API_DoQuery&qid=1&fmt=structured", false)]
+    [InlineData("GET", "https://ysl.quickbase.com/db/bwcrtu9k5?a=API_DoQuery&usertoken=u&qname=List%20All&clist=3.6&options=num-10", null,
+        "GET", "/db/{db:bwcrtu9k5}?a=API_DoQuery&qname=List%20All&clist=3.6&options=num-10", false)]
+    [InlineData("POST", "https://ysl.quickbase.com/db/bwcrtu9k5?a=API_DoQueryCount&query={6.EX.'x'}", null,
+        "POST", "/db/{db:bwcrtu9k5}?a=API_DoQueryCount&query=%7B6.EX.%27x%27%7D", false)]
     public void Map_KnownEndpoints(string method, string url, string? body, string newMethod, string path, bool responseDiffers)
     {
         var mapped = QuickbaseApiUrlMap.Map(method, new Uri(url), body, out _);
@@ -50,7 +57,7 @@ public class QuickbaseApiUrlMapTests
     [InlineData("POST", "https://api.quickbase.com/v1/formula/run", "{}", "no endpoint")]
     [InlineData("GET", "https://api.quickbase.com/v1/fields", null, "which table")]
     [InlineData("GET", "https://api.quickbase.com/v1/tables", null, "which app")]
-    [InlineData("GET", "https://ysl.quickbase.com/db/bt2kqxkqk?a=API_DoQuery", null, "no XML API action 'API_DoQuery'")]
+    [InlineData("GET", "https://ysl.quickbase.com/db/bt2kqxkqk?a=API_GetSchema", null, "no XML API action 'API_GetSchema'")]
     [InlineData("GET", "https://api.quickbase.com/v2/records", null, "not a Quickbase JSON API")]
     public void Map_NoEquivalent_KeepsUrlWithReason(string method, string url, string? body, string reason)
     {
@@ -118,4 +125,18 @@ public class QuickbaseApiUrlMapTests
     [InlineData("https://httpbin.org/get", false)]
     public void IsQuickbaseApi(string url, bool expected) =>
         QuickbaseApiUrlMap.IsQuickbaseApi(new Uri(url)).Should().Be(expected);
+
+    [Theory]
+    [InlineData("https://ysl.quickbase.com/db/bwcrtu9k5?a=API_DoQuery&qid=5", true)]
+    [InlineData("https://ysl.quickbase.com/db/bwcrtu9k5?a=API_DoQueryCount&qid=7", true)]
+    [InlineData("https://ysl.quickbase.com/db/bwcrtu9k5?a=API_DoQuery&qid=1", false)]   // List All is 1 in both
+    [InlineData("https://ysl.quickbase.com/db/bwcrtu9k5?a=API_DoQuery&qid=2", false)]   // List Changes is 2 in both
+    [InlineData("https://ysl.quickbase.com/db/bwcrtu9k5?a=API_DoQuery&qname=Open", false)]
+    public void Map_DoQuery_NumericQid_NeedsReview(string url, bool review)
+    {
+        var mapped = QuickbaseApiUrlMap.Map("GET", new Uri(url), null, out _);
+        mapped.Should().NotBeNull();
+        (mapped!.Review is not null).Should().Be(review);
+        if (review) mapped.Review.Should().Contain("qname");
+    }
 }

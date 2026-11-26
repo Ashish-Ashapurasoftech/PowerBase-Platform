@@ -31,6 +31,8 @@ public static class QblPipelineStepCatalog
         [(WEBHOOKS_STEP, "webhooks", "request", "make")] = new("action", "make-request"),
         [(QUICKBASE_STEP, "quickbase", "record", "on_create")] = new("trigger", "new-event"),
         [(QUICKBASE_STEP, "quickbase", "record", "on_update")] = new("trigger", "new-event"),
+        // 2026-11-19: "Record Deleted" = On New Event for the delete event only (the engine dispatches Deleted record events).
+        [(QUICKBASE_STEP, "quickbase", "record", "on_delete")] = new("trigger", "new-event"),
         [(QUICKBASE_STEP, "quickbase", "record", "search")] = new("query", "search-records"),
         [(QUICKBASE_STEP, "quickbase", "record", "look_up")] = new("query", "look-up-record"),
         [(QUICKBASE_STEP, "quickbase", "record", "create")] = new("action", "create-record"),

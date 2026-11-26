@@ -90,7 +90,8 @@ public class DeleteRecordCommandHandler
             await _recordRepo.DeleteAsync(table, command.RecordPublicId, _uow.Transaction, ct, msg => indexMessage = msg);
             await _tableRepo.DecrementRecordCountAsync(table.Id, ct);
             await _auditRepo.LogActivityAsync(
-                AuditActions.Deleted, AuditEntityTypes.Record, command.RecordPublicId.ToString(), $"Record deleted from {table.Name} with ID {command.RecordPublicId}", appId: table.AppId, ct: ct);
+                AuditActions.Deleted, AuditEntityTypes.Record, command.RecordPublicId.ToString(), $"Record deleted from {table.Name}", appId: table.AppId, ct: ct, tableId: table.Id,
+                recordNumber: Convert.ToInt64(oldRecord["Id"]));
 
             await _uow.CommitAsync(ct);
         }

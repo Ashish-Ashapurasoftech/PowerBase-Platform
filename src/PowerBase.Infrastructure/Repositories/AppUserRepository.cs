@@ -129,8 +129,17 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         """;
 
     private const string InsertSql = """
-        INSERT INTO meta.AppUser (PublicId, AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ShowInUserPickers, AddedBy, CreatedOn, IsFromGroup, GroupId)
-        VALUES (COALESCE(@publicId, NEWID()), @appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, @status, 1, @addedBy, SYSUTCDATETIME(), @isFromGroup, @groupId);
+        IF @isFromGroup = 0 AND EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId AND AppRoleId = @appRoleId AND IsFromGroup = 0)
+        BEGIN
+            UPDATE meta.AppUser
+            SET IsDeleted = 0, Status = @status, UserName = @userName, UserEmail = @userEmail, UpdatedOn = SYSUTCDATETIME()
+            WHERE AppId = @appId AND UserId = @userId AND AppRoleId = @appRoleId AND IsFromGroup = 0;
+        END
+        ELSE
+        BEGIN
+            INSERT INTO meta.AppUser (PublicId, AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ShowInUserPickers, AddedBy, CreatedOn, IsFromGroup, GroupId)
+            VALUES (COALESCE(@publicId, NEWID()), @appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, @status, 1, @addedBy, SYSUTCDATETIME(), @isFromGroup, @groupId);
+        END
         """;
 
     private const string UpdateRoleSql = """

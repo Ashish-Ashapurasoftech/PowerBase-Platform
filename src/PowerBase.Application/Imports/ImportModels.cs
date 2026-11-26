@@ -35,18 +35,48 @@ public static class ImportMappingSource
     public const string Formula = "formula";
 }
 
-/// <summary>What happens when rows break a unique constraint (a duplicate value in the file or in the destination).
-/// Rows with other problems (bad value, missing required value) are always reported and never block the rest.</summary>
+/// <summary>What an import does with rows of the source that repeat a value a unique field (or the field records are matched on) can hold only once.
+/// It is decided apart from the other problems rows can have (<see cref="ImportErrorPolicy"/>), and a repeated value never stops an import, whatever the
+/// error setting is: the setting here already says what happens to those rows.</summary>
+public static class ImportDuplicatePolicy
+{
+    /// <summary>Of the rows that share a value, the first in the source is imported and the later ones are reported.</summary>
+    public const string KeepFirst = "keepFirst";
+    /// <summary>Every row of a group that shares a value is reported and none is imported, the first one too.</summary>
+    public const string ExcludeAll = "excludeAll";
+
+    public static bool IsValid(string? policy) => policy is KeepFirst or ExcludeAll;
+}
+
+/// <summary>What an import does with rows that have any other problem: a bad value, a missing required value, a value that already belongs to another
+/// record, a rule of the table that refuses it. A value repeated inside the source is not one of these (see <see cref="ImportDuplicatePolicy"/>).</summary>
+public static class ImportErrorPolicy
+{
+    /// <summary>Rows with a problem are reported and left out; every other row is imported.</summary>
+    public const string ImportValid = "importValid";
+    /// <summary>The table gets nothing if any of its rows has a problem; the rows with a problem are reported.</summary>
+    public const string AllOrNothing = "allOrNothing";
+
+    public static bool IsValid(string? policy) => policy is ImportValid or AllOrNothing;
+}
+
+/// <summary>The one combined choice imports had before the duplicate setting and the error setting were separated. Definitions saved with it still
+/// load: <see cref="Split"/> turns it into the two settings.</summary>
 public static class ImportConstraintPolicy
 {
-    /// <summary>Import every row that is valid. Of rows sharing a unique value, the first is imported and the rest are reported.</summary>
     public const string ImportValid = "importValid";
-    /// <summary>Import only rows without a duplicate problem: every row in a duplicate group is reported, none imported.</summary>
     public const string ExcludeDuplicateGroups = "excludeDuplicateGroups";
-    /// <summary>Do not import anything if any row would be rejected; the rejected rows are reported.</summary>
     public const string AbortIfAnyIssue = "abortIfAnyIssue";
 
     public static bool IsValid(string? policy) => policy is ImportValid or ExcludeDuplicateGroups or AbortIfAnyIssue;
+
+    /// <summary>The two settings a saved combined choice stands for; an unknown or missing one is the default (keep the first, import valid rows).</summary>
+    public static (string Duplicate, string Error) Split(string? policy) => policy switch
+    {
+        ExcludeDuplicateGroups => (ImportDuplicatePolicy.ExcludeAll, ImportErrorPolicy.ImportValid),
+        AbortIfAnyIssue => (ImportDuplicatePolicy.KeepFirst, ImportErrorPolicy.AllOrNothing),
+        _ => (ImportDuplicatePolicy.KeepFirst, ImportErrorPolicy.ImportValid)
+    };
 }
 
 public static class ImportOutcome
@@ -115,7 +145,7 @@ public sealed class ImportColumnRule
 }
 
 /// <summary>One more table an import fills from the same source rows in the same run: its own import type, merge key, mappings and column
-/// rules. The source, its conditions, the duplicate policy, the people to tell and the schedule are the import's, shared by every table.</summary>
+/// rules, and its duplicate and error settings. The source, its conditions, the people to tell and the schedule are the import's, shared by every table.</summary>
 public sealed class ImportTargetConfig
 {
     public Guid DestinationTableId { get; set; }
@@ -129,6 +159,11 @@ public sealed class ImportTargetConfig
     /// <summary>Only the source rows that match go into this table. A row must first pass the import's own conditions (which decide what is read
     /// at all); these then decide whether this table gets it. None means every row that was read.</summary>
     public FilterGroup? Conditions { get; set; }
+    /// <summary>What happens to this table's rows that repeat a unique value (<see cref="ImportDuplicatePolicy"/>). None, as saved before tables had settings
+    /// of their own, means the import's own setting.</summary>
+    public string? DuplicatePolicy { get; set; }
+    /// <summary>What happens when this table's rows have any other problem (<see cref="ImportErrorPolicy"/>). None means the import's own setting.</summary>
+    public string? ErrorPolicy { get; set; }
     /// <summary>A workbook read sheet by sheet: the sheets that fill this table, each with its own mapping. When there are any, they replace this
     /// table's own mappings and rules (see <see cref="ImportSheetMapping"/>).</summary>
     public List<ImportSheetMapping> SheetMappings { get => _sheetMappings; set => _sheetMappings = value ?? new(); }
@@ -173,7 +208,17 @@ public sealed class ImportDefinitionConfig
     public FilterGroup? Conditions { get; set; }
     public List<ImportFieldMapping> Mappings { get; set; } = new();
     public List<ImportColumnRule> ColumnRules { get; set; } = new();
-    public string ConstraintPolicy { get; set; } = ImportConstraintPolicy.ImportValid;
+    /// <summary>What happens to source rows that repeat a unique value: one of <see cref="ImportDuplicatePolicy"/>. For the import's own table; each extra
+    /// table has its own (see <see cref="ImportTargetConfig.DuplicatePolicy"/>).</summary>
+    public string DuplicatePolicy { get; set; } = ImportDuplicatePolicy.KeepFirst;
+    /// <summary>What happens when rows have any other problem: one of <see cref="ImportErrorPolicy"/>. For the import's own table; each extra table has its own.</summary>
+    public string ErrorPolicy { get; set; } = ImportErrorPolicy.ImportValid;
+    /// <summary>Only for reading what was saved or sent before the two settings above existed: the combined choice sets both. It is never written, and reads as none.</summary>
+    public string? ConstraintPolicy
+    {
+        get => null;
+        set { if (value is not null) (DuplicatePolicy, ErrorPolicy) = ImportConstraintPolicy.Split(value); }
+    }
     /// <summary>People to email when a run finishes, besides whoever started it.</summary>
     public List<string> NotifyEmails { get; set; } = new();
     /// <summary>When the import runs by itself; none means it only runs when someone starts it. Saved with the definition, not part of a run.</summary>
@@ -233,7 +278,7 @@ public sealed record ImportDefinitionListItem(
 public sealed record ImportDefinitionDetail(
     Guid PublicId, string Name, Guid DestinationTableId, Guid SourceTableId, string ImportType, int? MergeKeyFid,
     FilterGroup? Conditions, IReadOnlyList<ImportFieldMapping> Mappings, IReadOnlyList<ImportColumnRule> ColumnRules,
-    string ConstraintPolicy, IReadOnlyList<string> NotifyEmails, bool NeedsAttention, string? AttentionReason,
+    string DuplicatePolicy, string ErrorPolicy, IReadOnlyList<string> NotifyEmails, bool NeedsAttention, string? AttentionReason,
     ImportSchedule? Schedule, DateTime? NextRunOn, string SourceKind = ImportSourceKinds.Table, ImportFileOptions? File = null,
     IReadOnlyList<ImportTargetConfig>? AdditionalTargets = null, IReadOnlyList<ImportVirtualColumn>? VirtualColumns = null, FilterGroup? TableConditions = null,
     IReadOnlyList<ImportSheetMapping>? SheetMappings = null, bool OnlyChangedSinceLastRun = false, IReadOnlyList<ImportVariable>? Variables = null);

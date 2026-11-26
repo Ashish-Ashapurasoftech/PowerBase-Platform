@@ -98,14 +98,18 @@ public static class QblPipelineOnlyBinder
     {
         var previous = _commonKeys;
         var previousMemo = _evidenceMemo;
+        var previousPrepared = _prepared;
         _evidenceMemo = null;
+        _prepared = new Dictionary<TableUse, PreparedUse>(ReferenceEqualityComparer.Instance);
         try { return BindCore(content, candidates); }
-        finally { _commonKeys = previous; _evidenceMemo = previousMemo; }
+        finally { _commonKeys = previous; _evidenceMemo = previousMemo; _prepared = previousPrepared; }
     }
 
     /// <summary>Evidence(table, use) of the current Bind: every use is collected before matching starts, so a pair's fit never
     /// changes while apps, tables and rivals are compared again and again.</summary>
     [ThreadStatic] private static Dictionary<(PipelineOnlyTable, TableUse), Fit>? _evidenceMemo;
+    /// <summary>Diagnostics only (tests): receives one line per Quickbase app / app pair considered.</summary>
+    [ThreadStatic] public static Action<string>? Trace;
 
     private sealed class PairComparer : IEqualityComparer<(PipelineOnlyTable, TableUse)>
     {
@@ -180,8 +184,13 @@ public static class QblPipelineOnlyBinder
             {
                 var (fit, assigned) = AssignTables(app, group);
                 var idsOnly = fit.Miss == 0 && fit.Hit >= 2 && group.All(u => u.Keys.All(BuiltInKeys.Contains));
-                if (assigned.Count == 0 || !(fit.IsStrong || fit.Score >= 10 && fit.KeyHits >= 3 || idsOnly)) continue;
+                if (assigned.Count == 0 || !(fit.IsStrong || fit.Score >= 10 && fit.KeyHits >= 3 || idsOnly))
+                {
+                    if (Trace is not null && assigned.Count > 0) Trace($"WEAK {qbApp}	{app.Name}	hit={fit.Hit}	miss={fit.Miss}	key={fit.KeyHits}	hint={hintPipelines.Count(h => h.Any(x => NamesApp(x, app.Name)))}");
+                    continue;
+                }
                 var hint = hintPipelines.Count(h => h.Any(x => NamesApp(x, app.Name)));
+                Trace?.Invoke($"PAIR {qbApp}	{app.Name}	hit={fit.Hit}	miss={fit.Miss}	key={fit.KeyHits}	score={fit.Score}	hint={hint}	tables={assigned.Count}/{group.Count}	pipes={hintPipelines.Count}");
                 var ratio = Math.Round((double)fit.Hit / Math.Max(1, fit.Hit + fit.Miss), 3);
                 // Field ids and common labels (Name, Email, Status…) are shared by unrelated apps: without the app's name in any of
                 // the Quickbase app's pipeline names / tags, only near-complete evidence makes it that app.
@@ -249,7 +258,9 @@ public static class QblPipelineOnlyBinder
         // also uses a table of that app.
         var claimed = tableOf.Values.Select(v => v.Table.Id).ToHashSet();
         var appless = new List<(TableUse Use, PipelineOnlyApp App, PipelineOnlyTable Table, Fit Fit)>();
-        foreach (var use in uses.Values)
+        var globalPicks = new Dictionary<string, long>(StringComparer.Ordinal);
+        // Richest evidence first, so clear matches are known when a clone tie is broken by the pipeline's other tables.
+        foreach (var use in uses.Values.OrderByDescending(u => u.Fids.Count + u.Keys.Count).ThenBy(u => u.Table, StringComparer.Ordinal))
         {
             if (use.App is not null)
             {
@@ -274,6 +285,21 @@ public static class QblPipelineOnlyBinder
                     .SelectMany(a => a.Tables.Where(t => !claimed.Contains(t.Id)).Select(t => (App: a, Table: t, Fit: Evidence(t, use))))
                     .Where(x => Fits(x.Fit))
                     .OrderByDescending(x => x.Fit.Score).ThenByDescending(x => x.App.Id).ToList();
+            // 2026-11-19: most steps name only their table, never its Quickbase app. With many apps imported (every app of the
+            // realm), such a table is matched among ALL apps — but only with the app named by the pipelines that use it (their
+            // name / tags, "... (Destiny Financial)"), or, with no name at all, when one table of all apps clearly fits best
+            // (clones fit equally and then match nothing).
+            if (options.Count == 0)
+            {
+                var mates = pipelineFacts.Where(p => p.Tables.Contains(use.Table)).SelectMany(p => p.Tables).Where(t => t != use.Table).ToHashSet();
+                var nearApps = mates.Where(tableOf.ContainsKey).Select(t => tableOf[t].App.Id)
+                    .Concat(mates.Where(globalPicks.ContainsKey).Select(t => globalPicks[t])).ToHashSet();
+                options = GlobalOptions(use, candidates, claimed, pipelineFacts.Where(p => p.Tables.Contains(use.Table)).SelectMany(p => p.Hints).ToList(), nearApps, Fits,
+                    binding.UnmatchedApps, appId => chosenApps.Where(kv => kv.Value.Id == appId).Select(kv => kv.Key)
+                        .Concat(tableOf.Where(kv => kv.Value.App.Id == appId).Select(kv => kv.Key))
+                        .Concat(globalPicks.Where(kv => kv.Value == appId).Select(kv => kv.Key)).ToList());
+                if (options.Count == 1) globalPicks[use.Table] = options[0].App.Id;
+            }
             if (options.Count == 0 || (options.Count > 1 && options[1].Fit.Score == options[0].Fit.Score && !SameShape(options[0].Table, options[1].Table)))
             {
                 if (options.Count > 1)
@@ -343,13 +369,22 @@ public static class QblPipelineOnlyBinder
             if (node is YamlMappingNode resource && Scalar(resource, "Type") == "QB::Pipeline")
                 RewriteDataSources(resource, tableOf, appByQbId, appRefs, binding);
 
+        // Only the tables the rewritten pipelines name (or that a Quickbase table was matched to) go into the file: adding every
+        // table of every matched app made the file 2-3 times larger and every later read of it that much slower.
+        var named = new HashSet<long>();
+        foreach (var (_, node) in resources.Children)
+            if (node is YamlMappingNode resource && Scalar(resource, "Type") == "QB::Pipeline")
+                foreach (var scalar in AllScalars(resource))
+                    foreach (Match m in PbTableRef.Matches(scalar))
+                        if (long.TryParse(m.Groups[1].Value, out var id)) named.Add(id);
+
         foreach (var app in candidates.Where(a => appRefs.ContainsKey(a.Id)))
         {
             var appRef = appRefs[app.Id];
             var qbTables = tableOf.Where(kv => kv.Value.App.Id == app.Id)
                 .GroupBy(kv => kv.Value.Table.Id).ToDictionary(g => g.Key, g => string.Join(",", g.Select(kv => kv.Key)));
             var qbApps = string.Join(",", appByQbId.Where(kv => kv.Value.Id == app.Id).Select(kv => kv.Key));
-            resources.Children[new YamlScalarNode(appRef)] = AppNode(app, qbApps, qbTables);
+            resources.Children[new YamlScalarNode(appRef)] = AppNode(app with { Tables = app.Tables.Where(t => named.Contains(t.Id) || qbTables.ContainsKey(t.Id)).ToList() }, qbApps, qbTables);
             binding.Apps.Add((appRef, app));
         }
 
@@ -431,6 +466,52 @@ public static class QblPipelineOnlyBinder
         return (total, result);
     }
 
+    /// <summary>App-less table, matched among all apps (2026-11-19). The best table of all apps is taken when its fit is strong
+    /// and it clearly beats every other table. On a tie (clones of one app: same tables, same field ids) the tie is broken only
+    /// by the apps the pipelines name (their name / tags) and then by the apps their other tables were matched to; if that still
+    /// leaves more than one, nothing is matched.</summary>
+    private static List<(PipelineOnlyApp App, PipelineOnlyTable Table, Fit Fit)> GlobalOptions(TableUse use, IReadOnlyList<PipelineOnlyApp> candidates,
+        HashSet<long> claimed, List<string> hints, HashSet<long> nearApps, Func<Fit, bool> fits,
+        IReadOnlyCollection<string> unmatchedQbApps, Func<long, List<string>> idsOf)
+    {
+        var named = candidates.Where(a => hints.Any(h => NamesApp(h, a.Name))).ToList();
+        named = named.Where(a => !named.Any(b => b.Id != a.Id && b.Name.Length > a.Name.Length && b.Name.Contains(a.Name, StringComparison.OrdinalIgnoreCase))).ToList();
+        var ranked = candidates.SelectMany(a => a.Tables.Where(t => !claimed.Contains(t.Id)).Select(t => (App: a, Table: t, Fit: Evidence(t, use))))
+            .Where(x => fits(x.Fit) && x.Fit.IsStrong)
+            .OrderByDescending(x => x.Fit.Score).ThenByDescending(x => x.Fit.Hit).ToList();
+        Trace?.Invoke($"APPLESS {use.Table}	named={string.Join("/", named.Select(a => a.Name))}	" + string.Join(" ; ", ranked.Take(3).Select(x => $"{x.App.Name}.{x.Table.Name} h{x.Fit.Hit} m{x.Fit.Miss} k{x.Fit.KeyHits}")));
+        if (ranked.Count == 0) return [];
+        var top = ranked.Where(x => x.Fit.Score == ranked[0].Fit.Score).ToList();
+        if (top.Count == 1)
+        {
+            var w = top[0];
+            var supported = named.Any(n => n.Id == w.App.Id) || nearApps.Contains(w.App.Id);
+            // Without the app's name or a sibling table in that app, a clone of the table in another app (whose own app was not
+            // imported) would fit just as well: only a complete fit that no other table comes close to is taken.
+            var runnerUp = ranked.Count > 1 ? ranked[1].Fit.Score : 0;
+            var unique = w.Fit.Miss == 0 && w.Fit.KeyHits >= 3 && w.Fit.Hit >= 20 && runnerUp * 10 < w.Fit.Score * 7;
+            if (!(supported || unique)) return [];
+            // Some evidence missing (fields changed since the export): then it must win clearly, or a close clone in another app
+            // could be the real one (its app may simply not have been imported).
+            if (w.Fit.Miss > 0 && ranked.Count > 1 && (w.Fit.Score - runnerUp) * 5 < w.Fit.Score) return [];
+            // ...and when the pipelines name several apps, a fit with missing evidence may belong to another named app that was not
+            // imported: only a complete fit is taken then.
+            if (w.Fit.Miss > 0 && named.Count > 1) return [];
+            // Quickbase numbers an app's tables after the app: a table whose id is closer to a Quickbase app that matched nothing
+            // (an app that was not imported) than to every Quickbase id already placed in this app belongs to that other app.
+            var own = idsOf(w.App.Id);
+            var ownPrefix = own.Count == 0 ? 0 : own.Max(id => CommonPrefix(id, use.Table));
+            if (unmatchedQbApps.Any(id => CommonPrefix(id, use.Table) >= 5 && CommonPrefix(id, use.Table) > ownPrefix)) return [];
+            return [w];
+        }
+        var byName = top.Where(x => named.Any(n => n.Id == x.App.Id)).ToList();
+        if (byName.Count == 1) return [byName[0]];
+        var pool = byName.Count > 1 ? byName : top;
+        var byNear = pool.Where(x => nearApps.Contains(x.App.Id)).ToList();
+        if (byNear.Count == 1) return [byNear[0]];
+        return [];
+    }
+
     /// <summary>Enough found evidence for a table: every listed id/key found, or at least one specific field key and more found
     /// than missing (Quickbase apps keep changing after their export, so some fields are always missing).</summary>
     internal static bool Usable(Fit fit) =>
@@ -460,8 +541,12 @@ public static class QblPipelineOnlyBinder
     internal static bool NamesApp(string text, string appName)
     {
         if (string.IsNullOrWhiteSpace(appName)) return false;
-        return Regex.IsMatch(text, @"(?<![A-Za-z0-9])" + Regex.Escape(appName.Trim()) + @"(?![A-Za-z0-9])", RegexOptions.IgnoreCase);
+        var regex = NameRegexes.GetOrAdd(appName.Trim(), n => new Regex(@"(?<![A-Za-z0-9])" + Regex.Escape(n) + @"(?![A-Za-z0-9])", RegexOptions.IgnoreCase | RegexOptions.Compiled));
+        return regex.IsMatch(text);
     }
+
+    /// <summary>One regex per app name: Regex.IsMatch's own cache holds 15 patterns, so with many apps every call rebuilt it.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Regex> NameRegexes = new(StringComparer.Ordinal);
 
     private static int CommonPrefix(string a, string b)
     {
@@ -503,19 +588,41 @@ public static class QblPipelineOnlyBinder
         var memo = _evidenceMemo;
         if (memo is not null && memo.TryGetValue((table, use), out var cached)) return cached;
         var index = IndexOf(table);
+        var prepared = PreparedOf(use);
         int hit = 0, miss = 0, keys = 0;
-        foreach (var fid in use.Fids.Where(f => f > 5))
+        foreach (var fid in prepared.Fids)
             if (index.Fids.Contains(fid)) hit += 1; else miss += 2;
-        foreach (var key in use.Keys.Where(k => !BuiltInKeys.Contains(k)))
-            if (index.HasKey(key))
+        foreach (var (wanted, compact, common) in prepared.Keys)
+            if (index.HasNormalized(wanted, compact))
             {
-                if (_commonKeys?.IsCommon(key) == true) hit += 1;
+                if (common) hit += 1;
                 else { hit += 3; keys++; }
             }
             else miss += 3;
         var fit = new Fit(hit, miss, keys);
         memo?.TryAdd((table, use), fit);
         return fit;
+    }
+
+    /// <summary>A use's field ids and keys, normalized once per Bind (normalizing them for every table made a file of many
+    /// apps take minutes to match). The same values Evidence used to work out on every call.</summary>
+    private sealed record PreparedUse(int[] Fids, (string Wanted, string Compact, bool Common)[] Keys);
+
+    [ThreadStatic] private static Dictionary<TableUse, PreparedUse>? _prepared;
+
+    private static PreparedUse PreparedOf(TableUse use)
+    {
+        if (_prepared is not null && _prepared.TryGetValue(use, out var p)) return p;
+        p = new PreparedUse(
+            use.Fids.Where(f => f > 5).ToArray(),
+            use.Keys.Where(k => !BuiltInKeys.Contains(k)).Select(k =>
+            {
+                var wanted = QblPipelineConverter.NormalizeKey(k);
+                return (wanted, wanted.Replace("_", "", StringComparison.Ordinal), _commonKeys?.IsCommon(k) == true);
+            }).ToArray());
+        // Cached only while a Bind runs (_commonKeys is set for it): outside one the common keys may differ.
+        if (_prepared is not null && _commonKeys is not null) _prepared[use] = p;
+        return p;
     }
 
     internal static int Score(PipelineOnlyTable table, TableUse use) => Evidence(table, use).Score;
@@ -571,6 +678,9 @@ public static class QblPipelineOnlyBinder
             lock (_keys) _keys[key] = has;
             return has;
         }
+
+        public bool HasNormalized(string wanted, string compact) =>
+            ByLabel.ContainsKey(wanted) || ByCompact.ContainsKey(compact) || AddressParts.Contains(compact);
     }
 
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<PipelineOnlyTable, TableIndex> Indexes = new();
@@ -800,6 +910,8 @@ public static class QblPipelineOnlyBinder
     // ------------------------------------------------------------------------------------------------------------ synthetic app
 
     private static string TableRef(PipelineOnlyTable table) => $"$Table_PB_{table.Id}";
+
+    private static readonly Regex PbTableRef = new(@"\$Table_PB_(\d+)", RegexOptions.Compiled);
 
     /// <summary>The Quickbase ids of address parts. Quickbase gives an Address field's six parts the next six field ids
     /// (Address 37 → Street 1 38, Street 2 39, City 40, State 41, Postal Code 42, Country 43); PowerBase keeps them inside the

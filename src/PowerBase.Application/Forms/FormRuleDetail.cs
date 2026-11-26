@@ -50,6 +50,7 @@ public class FormRuleActionDetail
     public Guid? TargetSectionPublicId { get; init; }
     public Guid? TargetBlockPublicId { get; init; }
     public Guid? TargetPagePublicId { get; init; }
+    public long? TargetFieldId { get; init; }
     public string? ActionValue { get; init; }
     public bool RunOnceOnActivation { get; init; }
     public string? ValueSource { get; init; }

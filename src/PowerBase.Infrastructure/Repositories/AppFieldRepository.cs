@@ -39,6 +39,19 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     // Same list, plus the stored Azure AI Search slot(s). Which variant runs depends on which columns exist (see GetSlotColumnsAsync),
     // so the application keeps working, with search answered from SQL, if it is deployed before migrations 084/085 have run.
+    // Every live field of every live table of one app, in one round trip (a table at a time made matching a file against
+    // dozens of apps with thousands of tables send thousands of queries).
+    private const string ListByAppSql = $"""
+        SELECT {SelectColumns}
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        JOIN meta.AppTable t ON t.Id = af.AppTableId
+        WHERE t.AppId     = @appId
+          AND t.IsDeleted = 0
+          AND af.IsDeleted = 0
+        ORDER BY af.AppTableId, af.Id
+        """;
+
     private const string ListByTableWithSlotSql = $"""
         SELECT {SelectColumns}, af.SearchSlot
         FROM meta.AppField af
@@ -133,7 +146,10 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     private const string ListByTablePagedSqlTemplate = """
         SELECT af.Id, af.PublicId, af.Name, af.Label, af.Description, ft.Code AS TypeCode,
                af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable, af.IsAuditable,
-               af.IsUnique, af.IsSystem, af.IsAutoFill, af.SnapshotSourceFid, af.SnapshotEditable, af.IsSharedValues, af.Fid, af.CreatedOn
+               af.IsUnique, af.IsSystem, af.IsAutoFill, af.SnapshotSourceFid, af.SnapshotEditable, af.IsSharedValues, af.Fid, af.CreatedOn,
+               -- The type a Reference / Lookup / Summary is shown as (its settings' resultTypeCode, see RelationshipTypeLabel).
+               CASE WHEN ft.Code IN ('Reference', 'Lookup', 'Summary') AND ISJSON(af.Settings) = 1
+                    THEN JSON_VALUE(af.Settings, '$.resultTypeCode') END AS ResultTypeCode
         FROM meta.AppField af
         JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
         WHERE af.AppTableId = @tableId
@@ -149,7 +165,10 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     private const string ListByTableFilteredSqlTemplate = """
         SELECT af.Id, af.PublicId, af.Name, af.Label, af.Description, ft.Code AS TypeCode,
                af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable, af.IsAuditable,
-               af.IsUnique, af.IsSystem, af.IsAutoFill, af.SnapshotSourceFid, af.SnapshotEditable, af.IsSharedValues, af.Fid, af.CreatedOn
+               af.IsUnique, af.IsSystem, af.IsAutoFill, af.SnapshotSourceFid, af.SnapshotEditable, af.IsSharedValues, af.Fid, af.CreatedOn,
+               -- The type a Reference / Lookup / Summary is shown as (its settings' resultTypeCode, see RelationshipTypeLabel).
+               CASE WHEN ft.Code IN ('Reference', 'Lookup', 'Summary') AND ISJSON(af.Settings) = 1
+                    THEN JSON_VALUE(af.Settings, '$.resultTypeCode') END AS ResultTypeCode
         FROM meta.AppField af
         JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
         WHERE af.AppTableId = @tableId
@@ -368,6 +387,14 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         var cached = await _cache.GetOrAddAsync<IReadOnlyList<AppField>>(QueryContext.TenantId, FieldsCacheGroup, $"table:{tableId}",
             () => LoadFieldsByTableAsync(tableId, ct));
         return cached.Select(f => f.Clone()).ToList();
+    }
+
+    public async Task<IReadOnlyList<AppField>> ListByAppAsync(long appId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var results = await connection.QueryAsync<AppField>(
+            new CommandDefinition(ListByAppSql, new { appId }, cancellationToken: ct));
+        return results.AsList();
     }
 
     private async Task<IReadOnlyList<AppField>> LoadFieldsByTableAsync(long tableId, CancellationToken ct)

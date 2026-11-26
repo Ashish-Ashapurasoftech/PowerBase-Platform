@@ -145,7 +145,8 @@ public class BulkCreateRecordsCommandHandler
 
             await _auditRepo.LogActivitiesAsync(
                 AuditActions.Created, AuditEntityTypes.Record, publicIds.Select(id => id.ToString()).ToList(),
-                $"Record added in {table.Name} from Grid Edit", table.AppId, _uow.Transaction, ct);
+                $"Record added in {table.Name} from Grid Edit", table.AppId, _uow.Transaction, ct, tableId: table.Id,
+                recordNumbers: publicIds.Select(id => recordIds[id]).ToList());
 
             await _tableRepo.IncrementRecordCountByAsync(table.Id, rows.Count, _uow.Transaction, ct);
 

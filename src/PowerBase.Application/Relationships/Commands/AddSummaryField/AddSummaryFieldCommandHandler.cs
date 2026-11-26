@@ -59,7 +59,7 @@ public class AddSummaryFieldCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, rel.Id.ToString(),
-            $"Summary field '{summary.Name}' added to {parent.Name}", appId: parent.AppId, ct: ct);
+            $"Summary field '{summary.Name}' added to {parent.Name}", appId: parent.AppId, ct: ct, tableId: parent.Id);
 
         return await _queries.GetAsync(rel.PublicId, ct);
     }

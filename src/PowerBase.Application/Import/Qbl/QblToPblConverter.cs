@@ -64,7 +64,8 @@ public static class QblToPblConverter
             }];
         }
 
-        return apps.Select(a => ConvertApplication(a.Key, a.Value, qbl.ExternalResources)).ToList();
+        var allApps = apps.ToDictionary(a => a.Key, a => a.Value, StringComparer.Ordinal);
+        return apps.Select(a => ConvertApplication(a.Key, a.Value, qbl.ExternalResources, allApps)).ToList();
     }
 
     /// <summary>The applications in a document as (ref, name), in file order.</summary>
@@ -72,7 +73,8 @@ public static class QblToPblConverter
         qbl.Resources.Where(kv => kv.Value.Type == "QB::Application")
             .Select(kv => (kv.Key, ResolveScalar(kv.Value, "Name") ?? kv.Key)).ToList();
 
-    private static QblConversionResult ConvertApplication(string appRef, QblResourceNode appNode, IReadOnlyDictionary<string, QblResourceNode>? externalResources = null)
+    private static QblConversionResult ConvertApplication(string appRef, QblResourceNode appNode, IReadOnlyDictionary<string, QblResourceNode>? externalResources = null,
+        IReadOnlyDictionary<string, QblResourceNode>? allApps = null)
     {
         var issues = new List<PblIssue>();
 
@@ -104,6 +106,8 @@ public static class QblToPblConverter
         // Quickbase itself never enforces this, so treat it the same as the
         // QBL_DUPLICATE_REPORT_NAME case below: first wins, later ones flagged and skipped.
         var seenFieldNamesByTableRef = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        // Per table: a field's full Quickbase label -> the shortened name it was imported under (labels over FIELD_NAME_MAX).
+        var shortenedFieldNamesByTableRef = new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
         var addressSubComponentOwnerByTableRef = new Dictionary<string, Dictionary<string, (string CompositeFieldRef, string SubFieldKey)>>(StringComparer.Ordinal);
 
         foreach (var (tableRef, tableNode) in appNode.ChildMap("Tables"))
@@ -182,6 +186,13 @@ public static class QblToPblConverter
                 if (field is null)
                     continue;
 
+                // Quickbase allows very long labels (a whole survey question); meta.AppField.Name/Label hold FIELD_NAME_MAX characters.
+                // InferFieldName already shortened the name; shorten the label the same way and keep the full text in the import report.
+                var fullLabel = NullIfBlank(ResolveScalar(fieldNode, "Label"))?.Trim();
+                var wasShortened = fullLabel is not null && fullLabel.Length > FIELD_NAME_MAX;
+                if (field.Label is { Length: > FIELD_NAME_MAX })
+                    field.Label = FitFieldText(field.Label);
+
                 // Two fields of one table can share a name in a real export; PowerBase needs unique names, so the later one is kept
                 // under a numbered name (and label) instead of being dropped with its data, form elements and report columns.
                 var uniqueFieldName = NumberedName(seenFieldNames, field.Name);
@@ -204,6 +215,12 @@ public static class QblToPblConverter
                     issues.Add(Warning("QBL_DUPLICATE_FIELD_LABEL", $"Field label '{wantedLabel}' is already used on table '{table.Name}'; imported as '{uniqueLabel}'.", fieldRef));
                 }
 
+                if (wasShortened)
+                {
+                    (shortenedFieldNamesByTableRef.TryGetValue(tableRef, out var shortened) ? shortened : shortenedFieldNamesByTableRef[tableRef] = new(StringComparer.Ordinal))[fullLabel!] = field.Name;
+                    issues.Add(Warning("QBL_FIELD_LABEL_SHORTENED", $"Field label on table '{table.Name}' is longer than {FIELD_NAME_MAX} characters, so it was imported as '{field.Name}'. Full label: {fullLabel}", fieldRef));
+                }
+
                 table.Fields.Add(field);
                 fieldNameByRef[fieldRef] = field.Name;
             }
@@ -212,6 +229,12 @@ public static class QblToPblConverter
             tableNodeByRef[tableRef] = tableNode;
             fieldNameByRefPerTable[tableRef] = fieldNameByRef;
             relFieldsPerTable[tableRef] = relFields;
+            // PblValidator reserves PowerBase's five system field names ("Record ID#", "Date Created", …) on every table for
+            // references / lookups / summaries. A Summary or Lookup that a Quickbase app labelled exactly like a built-in field
+            // (M Kohn and Co: a Summary named "Record ID#" next to the built-in one) must therefore be numbered here like any other
+            // duplicate — otherwise DUPLICATE_FIELD_NAME blocks the whole application.
+            foreach (var systemName in QblFieldTypeMap.SystemFieldNames.Values)
+                seenFieldNames.Add(systemName);
             seenFieldNamesByTableRef[tableRef] = seenFieldNames;
         }
 
@@ -256,7 +279,7 @@ public static class QblToPblConverter
         var tableNameByRef = tables.ToDictionary(t => t.LogicalRef, t => t.Name, StringComparer.Ordinal);
         ResolveRelationshipLookupsAndSummaries(relationships, relFieldsPerTable, fieldNameByRefPerTable, seenFieldNamesByTableRef, tableNameByRef, addressSubComponentOwnerByTableRef, issues);
 
-        AttachReportLinks(tables, relationships, tableNodeByRef, relFieldsPerTable, fieldNameByRefPerTable, seenFieldNamesByTableRef, issues);
+        AttachReportLinks(tables, relationships, tableNodeByRef, relFieldsPerTable, fieldNameByRefPerTable, seenFieldNamesByTableRef, issues, appRef, allApps);
         // Whatever Reference/Lookup/Summary field never became part of a relationship keeps its place as a plain field.
         EmitRelationshipPlaceholders(tables, relationships, relFieldsPerTable, fieldNameByRefPerTable, seenFieldNamesByTableRef, issues);
         ApplyTableDefaultReportSettings(tables, relationships, tableNodeByRef, fieldNameByRefPerTable, issues);
@@ -314,6 +337,9 @@ public static class QblToPblConverter
         // A bracketed number can also be an app variable that happens to be named with digits (Quickbase files have variables "1202", "1226"…).
         // The formula engine binds a variable before a field, so such a token must stay as written and is not a field id at all.
         var variableNames = ConvertVariables(appNode, []).Select(v => v.Name).ToHashSet(StringComparer.Ordinal);
+        RewriteShortenedFieldRefs(tables.Where(t => t.Fields.Count > 0).SelectMany(t => t.Fields
+            .Where(f => string.Equals(f.TypeCode, "Formula", StringComparison.OrdinalIgnoreCase))
+            .Select(f => (t.LogicalRef, (Func<string?>)(() => f.FormulaExpression), (Action<string>)(v => f.FormulaExpression = v)))), shortenedFieldNamesByTableRef);
         RewriteNumericFieldRefs(tables, fieldNameBySourceId, variableNames, issues);
 
         foreach (var table in tables)
@@ -433,6 +459,8 @@ public static class QblToPblConverter
                 connectedTables.Add(connected);
         }
 
+        RewriteShortenedFieldRefs(forms.SelectMany(form => form.Rules
+            .Select(r => (form.TableRef, (Func<string?>)(() => r.ExpressionText), (Action<string>)(v => r.ExpressionText = v)))), shortenedFieldNamesByTableRef);
         RewriteRuleFormulas(forms, fieldNameBySourceId, variableNames, issues);
 
         // Pass D.
@@ -515,6 +543,20 @@ public static class QblToPblConverter
         var variables = ConvertVariables(appNode, issues);
         var pages = ConvertCodePages(appNode, issues);
         var dashboards = ConvertDashboards(appNode, issues);
+
+        // Reference / lookup / summary / report-link labels: same column limit as any field label (their names were fitted by InferFieldName).
+        foreach (var rel in relationships)
+        {
+            if (rel.ReferenceFieldLabel is { Length: > FIELD_NAME_MAX }) rel.ReferenceFieldLabel = FitFieldText(rel.ReferenceFieldLabel);
+            foreach (var lookup in rel.Lookups)
+                if (lookup.Label is { Length: > FIELD_NAME_MAX }) lookup.Label = FitFieldText(lookup.Label);
+            foreach (var summary in rel.Summaries)
+                if (summary.Label is { Length: > FIELD_NAME_MAX }) summary.Label = FitFieldText(summary.Label);
+            if (rel.ReportLink?.Label is { Length: > FIELD_NAME_MAX }) rel.ReportLink.Label = FitFieldText(rel.ReportLink.Label);
+        }
+        foreach (var table in tables)
+            foreach (var field in table.Fields)
+                if (field.Label is { Length: > FIELD_NAME_MAX }) field.Label = FitFieldText(field.Label);
 
         var document = new PblDocument { App = pblApp, Tables = tables, Relationships = relationships, Forms = forms, Roles = roles, Variables = variables, Pages = pages, FormRoleDefaults = formRoleDefaults, ConnectedTables = connectedTables, Dashboards = dashboards };
         return new QblConversionResult { AppRef = appRef, Document = document, Issues = issues };
@@ -1504,7 +1546,9 @@ public static class QblToPblConverter
         Dictionary<string, RelationshipFieldCollector> relFieldsPerTable,
         Dictionary<string, Dictionary<string, string>> fieldNameByRefPerTable,
         Dictionary<string, HashSet<string>> seenFieldNamesByTableRef,
-        List<PblIssue> issues)
+        List<PblIssue> issues,
+        string appRef,
+        IReadOnlyDictionary<string, QblResourceNode>? allApps)
     {
         foreach (var rel in relationships)
             rel.ExplicitLinks = true;
@@ -1523,9 +1567,63 @@ public static class QblToPblConverter
                 if (target?["Table"] is not { } targetTableRef || target["Field"] is not { } targetFieldRef
                     || !fieldNameByRefPerTable.TryGetValue(targetTableRef, out var targetNames) || !targetNames.TryGetValue(targetFieldRef, out var targetFieldName))
                 {
-                    var reason = target?["Field"] is null
-                        ? $"Report link '{name}' on '{table.Name}' has no target: the field it opened no longer exists in the source"
-                        : $"Report link '{name}' on '{table.Name}' opens a field that was not converted";
+                    // PowerBase links across apps of one tenant: a target in another app of this file is kept as such, resolved by app name
+                    // when the link is created (that app has to be in the tenant by then).
+                    if (target?["App"] is { } otherAppRef && otherAppRef != appRef && target["Table"] is { } otherTableRef && target["Field"] is { } otherFieldRef
+                        && allApps is not null && allApps.TryGetValue(otherAppRef, out var otherApp)
+                        && otherApp.ChildMap("Tables").TryGetValue(otherTableRef, out var otherTableNode)
+                        && otherTableNode.ChildMap("Fields").TryGetValue(otherFieldRef, out var otherFieldNode))
+                    {
+                        var otherSourceRef = NestedRef(linkNode, "FieldRelationship", "Source")?["Field"];
+                        var otherOnRecordId = otherSourceRef is null || (ownerFields.TryGetValue(otherSourceRef, out var otherSourceNode) && otherSourceNode.Type == "QB::Field::RecordID");
+                        string? otherSourceName = null;
+                        if (otherOnRecordId || (fieldNameByRefPerTable.TryGetValue(table.LogicalRef, out var ownFieldNames) && ownFieldNames.TryGetValue(otherSourceRef!, out otherSourceName)))
+                        {
+                            table.ReportLinks.Add(new PblStandaloneReportLink
+                            {
+                                LogicalRef = Qualify(table.LogicalRef, linkRef),
+                                Name = name,
+                                Label = label,
+                                LinkText = NullIfBlank(ResolveScalar(linkNode, "LinkText")),
+                                SourceId = linkNode.SourceId,
+                                Description = NullIfBlank(ResolveScalar(linkNode, "Comments")),
+                                Flags = FlagsOf(linkNode),
+                                TargetAppName = ResolveScalar(otherApp, "Name"),
+                                TargetTableName = ResolveScalar(otherTableNode, "Name"),
+                                TargetFieldName = InferFieldName(otherFieldRef, NullIfBlank(ResolveScalar(otherFieldNode, "Label"))),
+                                SourceFieldName = otherOnRecordId ? null : otherSourceName,
+                            });
+                            continue;
+                        }
+                    }
+
+                    // "Target: Default" names no table at all: the export does not say where the link opens.
+                    var targetIsDefault = linkNode.Properties.TryGetValue("FieldRelationship", out var relRaw) && relRaw is Dictionary<string, object?> relMap
+                        && relMap.TryGetValue("Target", out var targetRaw) && targetRaw is string targetText && targetText == "Default";
+                    if (targetIsDefault)
+                    {
+                        // PowerBase saves a Report link with no table chosen yet (it is picked in the field settings), so the field keeps its type and its
+                        // place on forms and reports instead of becoming a Text field.
+                        table.ReportLinks.Add(new PblStandaloneReportLink
+                        {
+                            LogicalRef = Qualify(table.LogicalRef, linkRef),
+                            Name = name,
+                            Label = label,
+                            LinkText = NullIfBlank(ResolveScalar(linkNode, "LinkText")),
+                            SourceId = linkNode.SourceId,
+                            Description = NullIfBlank(ResolveScalar(linkNode, "Comments")),
+                            Flags = FlagsOf(linkNode),
+                            NoTarget = true,
+                        });
+                        issues.Add(Warning("QBL_REPORT_LINK_TARGET_UNAVAILABLE", $"Report link '{name}' on '{table.Name}' has no stored target: the Quickbase export says only 'Default' and names no table; created as a Report link with no target - choose its table and field in the field settings.", Qualify(table.LogicalRef, linkRef)));
+                        continue;
+                    }
+
+                    var reason = targetIsDefault
+                        ? $"Report link '{name}' on '{table.Name}' has no stored target: the Quickbase export says only 'Default' and names no table"
+                        : target?["Field"] is null
+                            ? $"Report link '{name}' on '{table.Name}' has no target: the field it opened no longer exists in the source"
+                            : $"Report link '{name}' on '{table.Name}' opens a field that was not converted";
                     AddReportLinkPlaceholder(table, relationships, seenFieldNamesByTableRef, fieldNameByRefPerTable, linkRef, linkNode, name, label,
                         "QBL_REPORT_LINK_TARGET_UNAVAILABLE", reason, target, NestedRef(linkNode, "FieldRelationship", "Source"), issues);
                     continue;
@@ -2708,9 +2806,12 @@ public static class QblToPblConverter
             }
         }
 
+        // Every element on the form (fields, static text, embedded reports), for rule actions that name one element.
+        var formElementRefs = form.Sections.SelectMany(sec => sec.Blocks).SelectMany(b => b.Elements).Select(e => e.LogicalRef).ToHashSet(StringComparer.Ordinal);
+
         foreach (var (ruleRef, ruleNode) in formNode.ChildMap("Rules"))
         {
-            var rule = ConvertFormRule(ruleRef, ruleNode, qualifiedFormRef, fieldNameByRef, roleNameByRef, fieldTypeByName, elementRefByFieldName, qualifiedSectionRefByRaw, qualifiedBlockRefByRaw, pageTargetByRaw, issues);
+            var rule = ConvertFormRule(ruleRef, ruleNode, qualifiedFormRef, fieldNameByRef, roleNameByRef, fieldTypeByName, elementRefByFieldName, qualifiedSectionRefByRaw, qualifiedBlockRefByRaw, pageTargetByRaw, formElementRefs, issues);
             if (rule is not null)
                 form.Rules.Add(rule);
         }
@@ -2752,6 +2853,8 @@ public static class QblToPblConverter
             var block = ConvertFormBlock(columnRef, columnNode, qualifiedSectionRef, fieldNameByRef, issues);
             section.Blocks.Add(block);
             qualifiedBlockRefByRaw[columnRef] = block.LogicalRef;
+            // Column keys repeat in every section ("FormV2Column_1"), so the bare key only reaches the last section's column.
+            qualifiedBlockRefByRaw[ScopedColumnKey(sectionRef, columnRef)] = block.LogicalRef;
         }
 
         if (section.Blocks.Count == 0)
@@ -2768,6 +2871,8 @@ public static class QblToPblConverter
 
         return section;
     }
+
+    private static string ScopedColumnKey(string sectionRef, string columnRef) => $"{sectionRef}/{columnRef}";
 
     private static PblFormBlock ConvertFormBlock(string columnRef, QblResourceNode columnNode, string qualifiedSectionRef, Dictionary<string, string> fieldNameByRef, List<PblIssue> issues)
     {
@@ -2822,6 +2927,7 @@ public static class QblToPblConverter
                 }
 
                 var (widthMode, widthValue) = ParseElementWidth(elementNode);
+                var (contentWidthMode, contentWidthValue, contentWidthUnit) = ParseContentWidth(elementNode);
                 var (showOnAdd, showOnEdit, showOnView) = ParseModesToShowIn(elementNode);
 
                 result.Add(new PblFormElement
@@ -2836,6 +2942,9 @@ public static class QblToPblConverter
                     ShowOnView = showOnView,
                     WidthMode = widthMode,
                     WidthValue = widthValue,
+                    ContentWidthMode = contentWidthMode,
+                    ContentWidthValue = contentWidthValue,
+                    ContentWidthUnit = contentWidthUnit,
                     HelpTextOverride = NullIfBlank(ResolveScalar(elementNode, "HelpText")),
                     IsReadOnly = elementNode.PropertyBool("ForceReadOnlyOnForm"),
                     IsRequired = elementNode.PropertyBool("ForceRequireOnForm"),
@@ -2846,13 +2955,26 @@ public static class QblToPblConverter
             }
             case "QB::FormV2::Element::RichText":
             {
-                // Not observed in the real sample, but documented for FormV2 — direct match to
-                // PowerBase's StaticText element type.
+                // Direct match to PowerBase's StaticText element type. Inside a Quickbase group (a field next to a rich text block or an
+                // empty "Spacer") it must stay in the group like every other member: left out, the field it sat with was left alone in a
+                // group of one and the rich text became a separate element below it.
+                var (textShowOnAdd, textShowOnEdit, textShowOnView) = ParseModesToShowIn(elementNode);
+                var (textContentWidthMode, textContentWidthValue, textContentWidthUnit) = ParseContentWidth(elementNode);
                 result.Add(new PblFormElement
                 {
                     LogicalRef = qualifiedElementRef,
                     ElementType = "StaticText",
                     ElementContent = ResolveScalar(elementNode, "Content"),
+                    // Quickbase names a rich text block through its label override ("Spacer", "Instructions"...); without it the block would be
+                    // numbered "Text 5" in the designer.
+                    Name = NullIfBlank(ResolveScalar(elementNode, "LabelOverride")),
+                    ShowOnAdd = textShowOnAdd,
+                    ShowOnEdit = textShowOnEdit,
+                    ShowOnView = textShowOnView,
+                    ContentWidthMode = textContentWidthMode,
+                    ContentWidthValue = textContentWidthValue,
+                    ContentWidthUnit = textContentWidthUnit,
+                    GroupRef = groupRef,
                 });
                 return result;
             }
@@ -2917,6 +3039,20 @@ public static class QblToPblConverter
         return mapped.Count == 0 ? null : string.Join(",", mapped);
     }
 
+    /// <summary>A Quickbase element width like "28%" (of the row) or "400px" becomes a custom width, which is what lets a group's members
+    /// keep their different widths ("Default" stays automatic and shares the row equally with its neighbours).</summary>
+    private static (string? Mode, int? Value, string? Unit) ParseContentWidth(QblResourceNode elementNode)
+    {
+        var raw = ResolveScalar(elementNode, "Width")?.Trim();
+        if (string.IsNullOrEmpty(raw)) return (null, null, null);
+
+        string? unit = raw.EndsWith('%') ? "%" : raw.EndsWith("px", StringComparison.OrdinalIgnoreCase) ? "px" : null;
+        if (unit is null) return (null, null, null);
+
+        var number = raw[..^unit.Length].Trim();
+        return int.TryParse(number, out var value) && value > 0 ? ("custom", value, unit) : (null, null, null);
+    }
+
     private static (string WidthMode, int? WidthValue) ParseElementWidth(QblResourceNode elementNode)
     {
         var raw = ResolveScalar(elementNode, "Width");
@@ -2962,6 +3098,7 @@ public static class QblToPblConverter
         Dictionary<string, string> qualifiedSectionRefByRaw,
         Dictionary<string, string> qualifiedBlockRefByRaw,
         IReadOnlyDictionary<string, PageTarget> pageTargetByRaw,
+        IReadOnlySet<string> formElementRefs,
         List<PblIssue> issues)
     {
         var name = ResolveScalar(ruleNode, "Name") ?? ruleRef;
@@ -3095,7 +3232,7 @@ public static class QblToPblConverter
                 continue;
             }
 
-            var action = ConvertFormRuleAction(actionNode, fieldNameByRef, fieldTypeByName, elementRefByFieldName, qualifiedSectionRefByRaw, qualifiedBlockRefByRaw, actionOrder, name, ruleRef, issues);
+            var action = ConvertFormRuleAction(actionNode, fieldNameByRef, fieldTypeByName, elementRefByFieldName, qualifiedSectionRefByRaw, qualifiedBlockRefByRaw, formElementRefs, actionOrder, name, ruleRef, issues);
             if (action is null)
                 continue;
 
@@ -3657,6 +3794,7 @@ public static class QblToPblConverter
         Dictionary<string, string> elementRefByFieldName,
         Dictionary<string, string> qualifiedSectionRefByRaw,
         Dictionary<string, string> qualifiedBlockRefByRaw,
+        IReadOnlySet<string> formElementRefs,
         int order,
         string ruleName,
         string ruleRef,
@@ -3723,13 +3861,45 @@ public static class QblToPblConverter
         if (target["Field"] is { } fieldRef)
         {
             // elementRefByFieldName is keyed by resolved field Name, not the raw QBL ref.
-            if (!fieldNameByRef.TryGetValue(fieldRef, out var fieldName) || !elementRefByFieldName.TryGetValue(fieldName, out targetElementRef))
+            if (!fieldNameByRef.TryGetValue(fieldRef, out var fieldName))
             {
-                issues.Add(Warning("QBL_FORM_RULE_ACTION_TARGET_UNAVAILABLE", $"Form rule '{ruleName}' action targets a field with no form element on this form; skipped.", ruleRef));
+                issues.Add(Warning("QBL_FORM_RULE_ACTION_TARGET_UNAVAILABLE", $"Form rule '{ruleName}' action targets a field that does not exist; skipped.", ruleRef));
                 return null;
+            }
+            if (!elementRefByFieldName.TryGetValue(fieldName, out targetElementRef))
+            {
+                // The field exists but is not on this form. Quickbase keeps the rule and flags "Missing field"; so do we, rather than
+                // dropping the action (and with it, often, the whole rule).
+                issues.Add(Warning("QBL_FORM_RULE_TARGET_FIELD_NOT_ON_FORM", $"Form rule '{ruleName}' action targets the field '{fieldName}', which is not on this form; kept, shown as a missing target.", ruleRef));
             }
             targetFieldName = fieldName;
             targetType = "Field";
+        }
+        // Quickbase lists a target's whole address: an element comes with its column and section, a column with its section. The narrowest
+        // reference is the target; the wider ones only say where it sits. Reading the wider one would show/lock/require the whole section.
+        else if (target["FormV2Element"] is { } elementKey)
+        {
+            if (target["FormV2Section"] is not { } elSection || target["FormV2Column"] is not { } elColumn
+                || !qualifiedBlockRefByRaw.TryGetValue(ScopedColumnKey(elSection, elColumn), out var elBlockRef)
+                || Qualify(elBlockRef, elementKey) is not { } candidate || !formElementRefs.Contains(candidate))
+            {
+                issues.Add(Warning("QBL_FORM_RULE_ACTION_TARGET_UNAVAILABLE", $"Form rule '{ruleName}' action targets a form element that was not imported (for example an unsupported element type); skipped.", ruleRef));
+                return null;
+            }
+            targetElementRef = candidate;
+            targetType = "Field";
+        }
+        else if (target["FormV2Column"] is { } columnRef)
+        {
+            var found = target["FormV2Section"] is { } colSection
+                ? qualifiedBlockRefByRaw.TryGetValue(ScopedColumnKey(colSection, columnRef), out targetBlockRef)
+                : qualifiedBlockRefByRaw.TryGetValue(columnRef, out targetBlockRef);
+            if (!found)
+            {
+                issues.Add(Warning("QBL_FORM_RULE_ACTION_TARGET_UNAVAILABLE", $"Form rule '{ruleName}' action targets a column not on this form; skipped.", ruleRef));
+                return null;
+            }
+            targetType = "Block";
         }
         else if (target["FormV2Section"] is { } sectionRef)
         {
@@ -3739,15 +3909,6 @@ public static class QblToPblConverter
                 return null;
             }
             targetType = "Section";
-        }
-        else if (target["FormV2Column"] is { } columnRef)
-        {
-            if (!qualifiedBlockRefByRaw.TryGetValue(columnRef, out targetBlockRef))
-            {
-                issues.Add(Warning("QBL_FORM_RULE_ACTION_TARGET_UNAVAILABLE", $"Form rule '{ruleName}' action targets a column not on this form; skipped.", ruleRef));
-                return null;
-            }
-            targetType = "Block";
         }
         else
         {
@@ -3765,6 +3926,7 @@ public static class QblToPblConverter
             ActionType = actionType,
             TargetType = targetType,
             TargetElementRef = targetElementRef,
+            TargetFieldName = targetType == "Field" ? targetFieldName : null,
             TargetSectionRef = targetSectionRef,
             TargetBlockRef = targetBlockRef,
             ActionValue = sourceFieldName is null ? literalValue : null,
@@ -3776,10 +3938,35 @@ public static class QblToPblConverter
 
     // ── Shared helpers ────────────────────────────────────────────────────
 
+    /// <summary>meta.AppField.Name / Label are NVARCHAR(200).</summary>
+    private const int FIELD_NAME_MAX = 200;
+
+    /// <summary>A shortened name stops here, leaving room for the " (n)" a duplicate gets from <see cref="NumberedName"/>.</summary>
+    private const int FIELD_NAME_FIT = 190;
+
+    /// <summary><paramref name="text"/> unchanged when it fits a field name/label column, otherwise cut to <see cref="FIELD_NAME_FIT"/> characters ending in "...".</summary>
+    private static string FitFieldText(string text) =>
+        text.Length <= FIELD_NAME_MAX ? text : text[..(FIELD_NAME_FIT - 3)].TrimEnd() + "...";
+
+    /// <summary>A Quickbase formula can name a field by its full label (<c>[label]</c>); when that label was too long and the field got a
+    /// shortened name, the reference is rewritten to the new name so the formula still resolves.</summary>
+    private static void RewriteShortenedFieldRefs(IEnumerable<(string TableRef, Func<string?> Get, Action<string> Set)> expressions, Dictionary<string, Dictionary<string, string>> shortenedByTableRef)
+    {
+        if (shortenedByTableRef.Count == 0) return;
+        foreach (var (tableRef, get, set) in expressions)
+        {
+            if (!shortenedByTableRef.TryGetValue(tableRef, out var map) || get() is not { Length: > 0 } text) continue;
+            var updated = text;
+            foreach (var (fullLabel, shortName) in map)
+                updated = updated.Replace($"[{fullLabel}]", $"[{shortName}]", StringComparison.Ordinal);
+            if (!ReferenceEquals(updated, text) && updated != text) set(updated);
+        }
+    }
+
     private static string InferFieldName(string logicalRef, string? label)
     {
         if (!string.IsNullOrWhiteSpace(label))
-            return label;
+            return FitFieldText(label);
 
         var stripped = logicalRef.StartsWith("$Field_", StringComparison.Ordinal) ? logicalRef["$Field_".Length..] : logicalRef.TrimStart('$');
         return stripped.Replace('_', ' ');

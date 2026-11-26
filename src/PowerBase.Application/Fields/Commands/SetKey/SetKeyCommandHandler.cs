@@ -129,6 +129,11 @@ public class SetKeyCommandHandler
             }
         }
 
+        // A Reference made as a new field is shown as the type of the key it shows: Department Name (Text) now, not
+        // Record ID# (Number). One converted from an existing field keeps its own type (see ReferenceResultTypeRefresher).
+        table.KeyFieldId = newKeyField?.Id;   // as saved by SetKeyFieldAsync above
+        await ReferenceResultTypeRefresher.RefreshForParentAsync(table, _relRepo, _fieldRepo, ct);
+
         // Usage tab: a relationship without a display key of its own matches on this table's key, so its key-field row moved.
         foreach (var parentRel in await _relRepo.ListByParentTableAsync(table.Id, ct))
             await _refIndexer.ReindexRelationshipAsync(parentRel.PublicId, ct);
@@ -140,6 +145,6 @@ public class SetKeyCommandHandler
             auditMessage += $" ({updatedRelationshipCount} relationship{(updatedRelationshipCount == 1 ? "" : "s")} updated)";
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, table.PublicId.ToString(),
-            auditMessage, appId: table.AppId, ct: ct);
+            auditMessage, appId: table.AppId, ct: ct, tableId: table.Id);
     }
 }

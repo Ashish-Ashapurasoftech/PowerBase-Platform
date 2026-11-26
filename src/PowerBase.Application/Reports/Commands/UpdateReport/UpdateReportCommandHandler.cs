@@ -221,7 +221,7 @@ public class UpdateReportCommandHandler
         }
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.Updated, AuditEntityTypes.Report, command.ReportPublicId.ToString(), $"Report name changed to {command.Name}", appId: appId, ct: ct);
+            AuditActions.Updated, AuditEntityTypes.Report, command.ReportPublicId.ToString(), $"Report name changed to {command.Name}", appId: appId, ct: ct, tableId: existingReport.AppTableId);
         await _refIndexer.ReindexReportAsync(command.ReportPublicId, ct);
     }
 }

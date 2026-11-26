@@ -8,11 +8,13 @@ public class ExportAuditLogsCsvQueryHandler
 {
     private readonly IAuditRepository _auditRepo;
     private readonly IAppRepository _appRepo;
+    private readonly IAppTableRepository _tableRepo;
 
-    public ExportAuditLogsCsvQueryHandler(IAuditRepository auditRepo, IAppRepository appRepo)
+    public ExportAuditLogsCsvQueryHandler(IAuditRepository auditRepo, IAppRepository appRepo, IAppTableRepository tableRepo)
     {
         _auditRepo = auditRepo;
         _appRepo = appRepo;
+        _tableRepo = tableRepo;
     }
 
     public async Task<byte[]> HandleAsync(ExportAuditLogsCsvQuery query, CancellationToken ct = default)
@@ -24,6 +26,13 @@ public class ExportAuditLogsCsvQueryHandler
             appId = app.Id;
         }
 
+        long? tableId = null;
+        if (query.TablePublicId.HasValue)
+        {
+            var table = await _tableRepo.GetByPublicIdAsync(query.TablePublicId.Value, ct);
+            tableId = table.Id;
+        }
+
         var filter = new ActivityLogFilter(
             From: query.From,
             To: query.To,
@@ -31,7 +40,10 @@ public class ExportAuditLogsCsvQueryHandler
             Email: query.Email,
             EntityType: query.EntityType,
             EntityId: query.EntityId,
-            Action: query.Action);
+            Action: query.Action,
+            TableId: tableId,
+            TablePublicId: query.TablePublicId,
+            RecordNumber: query.RecordNumber);
 
         var rows = await _auditRepo.ExportActivityLogsAsync(filter, ct);
         return BuildCsv(rows);

@@ -211,7 +211,7 @@ public class ReferenceRelinkServiceTests
         _linkedArg.Should().BeEquivalentTo(new Dictionary<long, long> { [100] = 500, [101] = 500 });
         await _audit.Received(1).LogActivitiesAsync(
             Arg.Any<string>(), Arg.Any<string>(), Arg.Is<IReadOnlyCollection<string>>(ids => ids.Count == 2),
-            Arg.Any<string?>(), 1, Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>());
+            Arg.Any<string?>(), 1, Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>(), Arg.Any<long?>(), Arg.Any<IReadOnlyList<long>?>());
     }
 
     [Fact]

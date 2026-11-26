@@ -26,8 +26,11 @@ public interface IAuditRepository
         long? appId = null,
         string? oldValues = null,
         string? newValues = null,
-        CancellationToken ct = default);
+        CancellationToken ct = default,
+        long? tableId = null,
+        long? recordNumber = null);
 
+    /// <summary>recordNumber (a record's Record ID#) is stored on the row and appended to its description as " (Record ID# n)".</summary>
     /// <summary>Writes one activity-log row per entity id (same action, type, title and app) with multi-row inserts. When a
     /// transaction is supplied the rows are written inside it, so they commit or roll back with the records they describe.</summary>
     Task LogActivitiesAsync(
@@ -37,7 +40,9 @@ public interface IAuditRepository
         string? entityTitle = null,
         long? appId = null,
         System.Data.IDbTransaction? transaction = null,
-        CancellationToken ct = default);
+        CancellationToken ct = default,
+        long? tableId = null,
+        IReadOnlyList<long>? recordNumbers = null);
 
     Task<(IReadOnlyList<ActivityLog> Items, int Total)> QueryActivityLogsAsync(
         ActivityLogFilter filter,

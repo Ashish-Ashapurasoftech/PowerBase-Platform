@@ -112,6 +112,6 @@ public class DeleteTableCommandHandler
             }
         }
 
-        await _auditRepo.LogActivityAsync(AuditActions.Deleted, AuditEntityTypes.AppTable, command.PublicId.ToString(), $"Table deleted: {table.Name}", appId: table.AppId, ct: ct);
+        await _auditRepo.LogActivityAsync(AuditActions.Deleted, AuditEntityTypes.AppTable, command.PublicId.ToString(), $"Table deleted: {table.Name}", appId: table.AppId, ct: ct, tableId: table.Id);
     }
 }

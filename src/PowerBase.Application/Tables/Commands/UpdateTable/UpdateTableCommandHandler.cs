@@ -121,7 +121,7 @@ public class UpdateTableCommandHandler
         {
             var logMessage = $"Table updated: {string.Join(", ", changes)}";
             await _auditRepo.LogActivityAsync(
-                AuditActions.Updated, AuditEntityTypes.AppTable, command.TablePublicId.ToString(), logMessage, appId: table.AppId, ct: ct);
+                AuditActions.Updated, AuditEntityTypes.AppTable, command.TablePublicId.ToString(), logMessage, appId: table.AppId, ct: ct, tableId: table.Id);
         }
 
         return new UpdateTableResult

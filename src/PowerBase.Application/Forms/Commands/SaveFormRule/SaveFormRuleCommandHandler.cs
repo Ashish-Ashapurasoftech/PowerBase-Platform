@@ -135,6 +135,7 @@ public class SaveFormRuleCommandHandler
             TargetSectionPublicId = a.TargetSectionPublicId,
             TargetBlockPublicId   = a.TargetBlockPublicId,
             TargetPagePublicId    = a.TargetPagePublicId,
+            TargetFieldId         = a.TargetFieldId,
             ActionValue         = a.ActionValue,
             RunOnceOnActivation = a.RunOnceOnActivation,
             IsExpressionValue   = a.IsExpressionValue,
@@ -162,7 +163,7 @@ public class SaveFormRuleCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Updated, AuditEntityTypes.FormRule, rule.Id.ToString(),
-            ct: ct);
+            ct: ct, tableId: await _formRepo.GetTableIdByFormIdAsync(rule.FormId, ct));
         await _refIndexer.ReindexFormRuleAsync(command.RulePublicId, ct);
     }
 

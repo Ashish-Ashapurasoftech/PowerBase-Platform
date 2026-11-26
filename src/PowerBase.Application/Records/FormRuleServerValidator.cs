@@ -882,8 +882,11 @@ public static class FormRuleServerValidator
                         .SelectMany(p => _sections.Where(sec => !sec.IsPinned && sec.FormPageId == p.Id))
                         .SelectMany(sec => sec.Blocks).SelectMany(b => b.Elements)
                     : Enumerable.Empty<FormElement>(),
+                // A field target is the field itself (TargetFieldId): the rule follows it to whichever element shows it on this form,
+                // so taking the field off the form and putting it back leaves the rule working.
                 _ => _sections.SelectMany(sec => sec.Blocks).SelectMany(b => b.Elements)
-                    .Where(e => a.TargetElementPublicId is { } eg ? e.PublicId == eg : e.Id == a.TargetElementId),
+                    .Where(e => a.TargetFieldId is { } tf ? e.ElementType == "Field" && e.AppFieldId == tf
+                        : a.TargetElementPublicId is { } eg ? e.PublicId == eg : e.Id == a.TargetElementId),
             };
             return elements
                 .Where(e => e.AppFieldId.HasValue && e.ElementType == "Field")

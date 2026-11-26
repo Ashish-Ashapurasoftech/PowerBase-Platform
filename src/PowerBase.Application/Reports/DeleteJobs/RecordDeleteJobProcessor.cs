@@ -104,6 +104,6 @@ public class RecordDeleteJobProcessor
             job.TablePublicId.ToString(),
             $"{deleted:N0} record(s) deleted from {table.Name} via \"Delete these records\" ({status})",
             appId: table.AppId,
-            ct: ct);
+            ct: ct, tableId: table.Id);
     }
 }

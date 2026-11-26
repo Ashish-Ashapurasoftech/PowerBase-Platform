@@ -66,15 +66,15 @@ public partial class EmailService
                 if (string.IsNullOrWhiteSpace(path)) continue;
                 if (!File.Exists(path)) throw new InvalidOperationException("An email attachment could not be found.");
                 attachmentSize += new FileInfo(path).Length;
-                if (attachmentSize > EmailAttachmentDownloader.MaxBytes)
-                    throw new InvalidOperationException("Email attachments exceed the 25 MB total size limit.");
+                if (attachmentSize > email.MaxAttachmentBytes)
+                    throw new InvalidOperationException(PipelineEmailLimits.TooLargeMessage(email.MaxAttachmentBytes));
                 message.Attachments.Add(new Attachment(path));
             }
             foreach (var attachment in email.ContentAttachments ?? [])
             {
                 attachmentSize += attachment.Content.LongLength;
-                if (attachmentSize > EmailAttachmentDownloader.MaxBytes)
-                    throw new InvalidOperationException("Email attachments exceed the 25 MB total size limit.");
+                if (attachmentSize > email.MaxAttachmentBytes)
+                    throw new InvalidOperationException(PipelineEmailLimits.TooLargeMessage(email.MaxAttachmentBytes));
                 var stream = new MemoryStream(attachment.Content, writable: false);
                 try
                 {

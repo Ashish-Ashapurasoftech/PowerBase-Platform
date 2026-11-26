@@ -61,7 +61,7 @@ public static class FieldSnapshotCapability
         if (!SnapshotTypeCompatibility.IsCompatible(sourceType, destination.TypeCode))
         {
             errors["SnapshotSourceFid"] =
-                [$"'{ImportTypeCompatibility.DisplayName(source)}' ({sourceType ?? source.TypeCode}) cannot be captured into '{label}' ({destination.TypeCode})."];
+                [$"'{ImportTypeCompatibility.DisplayName(source)}' ({(RelationshipTypeLabel.IsTagged(source.TypeCode) ? RelationshipTypeLabel.Of(source) : sourceType ?? source.TypeCode)}) cannot be captured into '{label}' ({RelationshipTypeLabel.Of(destination)})."];
             return errors;
         }
 

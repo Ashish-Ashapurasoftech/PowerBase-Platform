@@ -10,6 +10,7 @@ using PowerBase.Application.Import.Diff;
 using PowerBase.Application.Import.Mapping;
 using PowerBase.Application.Import.Queries.ImportDiff;
 using PowerBase.Application.Import.Queries.ImportPreview;
+using PowerBase.Application.Import.Quickbase;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
@@ -32,8 +33,10 @@ public class ImportController : ControllerBase
     private readonly UpdateAppFromPblCommandHandler _updateHandler;
     private readonly AppImportJobService _jobs;
     private readonly IConfiguration _configuration;
+    private readonly QuickbaseIdResolver _qbResolver;
 
     public ImportController(
+        QuickbaseIdResolver qbResolver,
         AppImportJobService jobs,
         IConfiguration configuration,
         ImportPreviewQueryHandler previewHandler,
@@ -47,6 +50,7 @@ public class ImportController : ControllerBase
         _updateHandler = updateHandler;
         _jobs = jobs;
         _configuration = configuration;
+        _qbResolver = qbResolver;
     }
 
     /// <summary>Parse and validate a QBL/PBL document, returning a preview of the tables/fields
@@ -64,6 +68,23 @@ public class ImportController : ControllerBase
         var content = await ReadFileAsync(file, ct);
         var result = await _previewHandler.HandleAsync(new ImportPreviewQuery(content, mode), ct);
         return Ok(new ApiResponse<ImportPreviewResult>(result));
+    }
+
+    /// <summary>Re-reads one application's Quickbase table ids with an app id and/or user token typed in the import wizard
+    /// (used when the app is not in the fixed catalog, or no configured token has access). A typed token is used for this
+    /// call only and is never stored. Tables are matched on their alias (file AliasHint ⇔ Quickbase alias).</summary>
+    [HttpPost("qb-tables")]
+    [RequirePermission(PermissionCodes.AppsCreate)]
+    [ProducesResponseType(typeof(ApiResponse<QuickbaseAppIds>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> QuickbaseTables([FromBody] QuickbaseTablesRequest request, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request.QbAppLogicalId))
+            throw new ValidationException(new Dictionary<string, string[]> { ["QbAppLogicalId"] = ["The app's logical id is required."] });
+        var tables = (request.Tables ?? []).Select(t => new QuickbaseFileTable(t.LogicalRef, t.Name, t.AliasHint)).ToList();
+        var result = await _qbResolver.ResolveAsync(request.QbAppLogicalId, tables, request.QbAppId, request.UserToken, ct);
+        return Ok(new ApiResponse<QuickbaseAppIds>(result));
     }
 
     /// <summary>Import a QBL/PBL document as brand-new apps — one app per application in the file. Optional
@@ -176,4 +197,20 @@ public class ImportController : ControllerBase
         using var reader = new StreamReader(file.OpenReadStream());
         return await reader.ReadToEndAsync(ct);
     }
+}
+
+/// <summary>Body of <c>POST apps/import/qb-tables</c>.</summary>
+public sealed class QuickbaseTablesRequest
+{
+    public string QbAppLogicalId { get; set; } = string.Empty;
+    public string? QbAppId { get; set; }
+    public string? UserToken { get; set; }
+    public List<QuickbaseTablesRequestTable>? Tables { get; set; }
+}
+
+public sealed class QuickbaseTablesRequestTable
+{
+    public string LogicalRef { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string? AliasHint { get; set; }
 }

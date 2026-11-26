@@ -55,7 +55,7 @@ public sealed class ChartReportConfigValidator : IReportConfigValidator
             var allowed = GroupByModeCategoryHelper.GetAllowedGroupByModes(groupByField.TypeCode);
             if (!allowed.Contains(input.GroupByMode, StringComparer.OrdinalIgnoreCase))
                 CommonReportValidationHelpers.AddError(errors, "groupByMode",
-                    $"groupByMode must be one of: {string.Join(", ", allowed)} for field type '{groupByField.TypeCode}'.");
+                    $"groupByMode must be one of: {string.Join(", ", allowed)} for field type '{PowerBase.Application.Relationships.RelationshipTypeLabel.Of(groupByField)}'.");
         }
 
         CommonReportValidationHelpers.ForbidIfPopulated(input.Columns.Count > 0, "columns", "Chart", errors);
@@ -106,7 +106,7 @@ public sealed class ChartReportConfigValidator : IReportConfigValidator
             var allowed = GroupByModeCategoryHelper.GetAllowedGroupByModes(seriesField.TypeCode);
             if (!allowed.Contains(chart.SeriesMode, StringComparer.OrdinalIgnoreCase))
                 CommonReportValidationHelpers.AddError(errors, "chart.seriesMode",
-                    $"seriesMode must be one of: {string.Join(", ", allowed)} for field type '{seriesField.TypeCode}'.");
+                    $"seriesMode must be one of: {string.Join(", ", allowed)} for field type '{PowerBase.Application.Relationships.RelationshipTypeLabel.Of(seriesField)}'.");
         }
 
         if (!string.IsNullOrWhiteSpace(chart.SortBy) && !AllowedSortBy.Contains(chart.SortBy))
