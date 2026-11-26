@@ -367,7 +367,7 @@ public class PipelineTriggersAndExternalActionsTests
     }
 
     [Fact]
-    public async Task ExecuteStepAsync_SearchRecords_AdvancedFilter_InvalidSyntax_ThrowsInvalidOperationException()
+    public async Task ExecuteStepAsync_SearchRecords_AdvancedFilter_InvalidSyntax_FindsNoRecords_AsQuickbase()
     {
         var step = new PipelineStep
         {
@@ -397,7 +397,8 @@ public class PipelineTriggersAndExternalActionsTests
             }
         };
 
-        await act.Should().ThrowAsync<InvalidOperationException>();
+        // As in Quickbase, the query that cannot be read is not an error: the search finds nothing.
+        await act.Should().NotThrowAsync();
     }
 
     [Fact]

@@ -289,16 +289,9 @@ public class PipelineStepValidator
 
         async Task Validate(TargetTenantRepos repos)
         {
-            var table = await repos.TableRepo.GetByPublicIdAsync(tableGuid, ct);
-            var fields = await repos.FieldRepo.ListByTableAsync(table.Id, ct);
-            try
-            {
-                CopyRecordsDefinition.ParseQuery(config.AdvancedQuery, fields);
-            }
-            catch (ValidationException vex)
-            {
-                throw new ValidationException(new Dictionary<string, string[]> { ["AdvancedQuery"] = new[] { vex.Message } });
-            }
+            // The table must still be reachable. As in Quickbase, an Advanced Query that cannot be read (bad syntax, a field
+            // the table does not have) still saves; the search then finds no records when it runs.
+            await repos.TableRepo.GetByPublicIdAsync(tableGuid, ct);
         }
 
         if (!string.IsNullOrEmpty(config.ConnectionPublicId) && Guid.TryParse(config.ConnectionPublicId, out var connectionId) && !SystemConnectionIds.Contains(connectionId))

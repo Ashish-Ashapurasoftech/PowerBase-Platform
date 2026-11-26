@@ -3129,7 +3129,8 @@ public class PipelineEngineTests
         var error = Assert.Throws<TargetInvocationException>(() => method.Invoke(_engine,
             new object?[] { "private-invalid-text", field, "{{steps.ref_request.number}}" }));
         var format = Assert.IsType<PipelineMappingException>(error.InnerException);
-        format.Message.Should().Contain("Field 'Number'").And.Contain("steps.ref_request.number");
+        // Worded as Quickbase does, by the field's name in snake case, without the mapped value.
+        format.Message.Should().Be("Validation error: in field **number**: not a valid number");
         format.Message.Should().NotContain("c_number").And.NotContain("private-invalid-text");
         PipelineEngine.IsCatchablePipelineStepError(format).Should().BeTrue();
     }
@@ -3164,12 +3165,7 @@ public class PipelineEngineTests
         var error = Assert.Throws<TargetInvocationException>(() => method.Invoke(_engine,
             new object?[] { "1-770-736", field, "{{steps.ref_request.phone}}" }));
         var format = Assert.IsType<PipelineMappingException>(error.InnerException);
-        format.Message.Should().Contain("Field 'Number'")
-            .And.Contain("steps.ref_request.phone")
-            .And.Contain("phone-formatted text")
-            .And.Contain("Phone or Text field")
-            .And.NotContain("1-770-736")
-            .And.NotContain("c_number");
+        format.Message.Should().Be("Validation error: in field **number**: not a valid number");
     }
 
     [Fact]

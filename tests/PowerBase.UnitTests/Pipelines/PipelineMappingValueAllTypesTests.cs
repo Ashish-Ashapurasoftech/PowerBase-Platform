@@ -79,7 +79,6 @@ public class PipelineMappingValueAllTypesTests
 
     [Theory]
     [InlineData("Number", "abc")]
-    [InlineData("Boolean", "maybe")]
     [InlineData("Date", "not a date")]
     public void AWrongValue_StillFailsWithAMappingError(string typeCode, string mapped)
     {

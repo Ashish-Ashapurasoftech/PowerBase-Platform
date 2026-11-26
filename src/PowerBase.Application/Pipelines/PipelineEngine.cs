@@ -1786,7 +1786,7 @@ public partial class PipelineEngine : IPipelineEngine
             var evaluatedRecordIdVal = EvaluateTokens(config.RecordIdValue, payloadJson, executionPath, allSteps);
             if (string.IsNullOrWhiteSpace(evaluatedRecordIdVal))
             {
-                throw new InvalidOperationException("Evaluated Record ID lookup value is empty.");
+                throw new InvalidOperationException("Validation error: Can't lookup resource without lookup key value");
             }
 
             // By Record ID# (the default) or by the table's key field, which is resolved to the record's Id first.
@@ -1796,7 +1796,7 @@ public partial class PipelineEngine : IPipelineEngine
             {
                 if (!long.TryParse(evaluatedRecordIdVal, out recordId))
                 {
-                    throw new InvalidOperationException($"Evaluated Record ID value '{evaluatedRecordIdVal}' is not a valid numeric identifier.");
+                    throw new InvalidOperationException("Validation error: in field **id**: field 'id' could not be coerced; must be of integer type");
                 }
             }
             else
@@ -1814,8 +1814,9 @@ public partial class PipelineEngine : IPipelineEngine
                 var typedKey = PowerBase.Application.Relationships.KeyFieldResolver.ConvertToColumnType(lookupKeyField, evaluatedRecordIdVal)
                     ?? throw new InvalidOperationException($"Evaluated {keyLabel} value '{evaluatedRecordIdVal}' is not a valid {lookupKeyField.TypeCode} value.");
                 var matches = await recordRepo.GetIdsByColumnValuesAsync(table, PowerBase.Application.Relationships.KeyFieldResolver.ColumnName(lookupKeyField), [typedKey], ct);
+                // As in Quickbase: no record found is not an error; the step's output is empty, and a step that acts on it fails.
                 if (matches.Count == 0)
-                    throw new InvalidOperationException($"Record with {keyLabel} '{evaluatedRecordIdVal}' was not found in Table '{table.Name}'.");
+                    return "{}";
                 recordId = matches.Values.First();
             }
 
@@ -1834,7 +1835,8 @@ public partial class PipelineEngine : IPipelineEngine
             var recordsDict = await recordRepo.GetRowsByIdsAsync(table, queryFields, new[] { recordId }, ct);
             if (recordsDict == null || !recordsDict.TryGetValue(recordId, out var record))
             {
-                throw new InvalidOperationException($"Record with ID {recordId} was not found in Table '{table.Name}'.");
+                _logger.LogInformation("Look Up a Record step {StepId} found no record with ID {RecordId}.", step.Id, recordId);
+                return "{}";
             }
 
             _logger.LogInformation("Look Up a Record step {StepId} found record ID {RecordId}.", step.Id, recordId);
@@ -1917,7 +1919,10 @@ public partial class PipelineEngine : IPipelineEngine
                 }
                 catch (PowerBase.Domain.Exceptions.ValidationException vex)
                 {
-                    throw new InvalidOperationException($"Search Records step {step.Id} has an invalid Advanced Query: {vex.Message}");
+                    // As in Quickbase: a query it cannot read (bad syntax, a field the table does not have) finds no records.
+                    _logger.LogInformation("Search Records step {StepId} has an Advanced Query that cannot be read ({Reason}); it finds no records.", step.Id, vex.Message);
+                    var recordIdFid = fields.FirstOrDefault(LookUpRecordKey.IsRecordId)?.Fid ?? 3;
+                    filterTree = new FilterGroup { Logic = "and", Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = recordIdFid, Operator = "lt", Value = "0" } }] };
                 }
             }
             else if (config.FilterGroups != null && config.FilterGroups.Any(g => !PipelineFilterEvaluator.IsGroupCompletelyBlank(g)))
@@ -2492,6 +2497,8 @@ public partial class PipelineEngine : IPipelineEngine
                 // The record broke a Required / Unique / format rule: its own data is at fault, not the system.
                 _logger.LogWarning("Create Record step {StepId} rejected the record: {Message}", step.Id, ex.Message);
                 await uow.RollbackAsync(CancellationToken.None);
+                var asQuickbase = QuickbaseRecordValue.AsQuickbaseUnique(ex, fields);
+                if (asQuickbase != null) throw asQuickbase;
                 throw;
             }
             catch (Exception ex)
@@ -2508,6 +2515,9 @@ public partial class PipelineEngine : IPipelineEngine
                 throw new InvalidOperationException("Update record step configuration is invalid or missing tableId.");
 
             var resolvedRecordIdStr = EvaluateTokens(config.TargetRecordId, payloadJson, executionPath, allSteps);
+            // As in Quickbase: the step it acts on found no record (a Look Up with nothing found), so there is no target.
+            if (string.IsNullOrWhiteSpace(resolvedRecordIdStr) && !PipelineRecordSource.IsRecordId(step.ConfigJson))
+                throw new InvalidOperationException("Validation error: This step requires a target, but the supplied one is an empty object");
             Guid recordPublicId;
             if (PipelineRecordSource.IsRecordId(step.ConfigJson))
             {
@@ -2637,6 +2647,11 @@ public partial class PipelineEngine : IPipelineEngine
                 if (winningOutput != null) return winningOutput;
                 throw;
             }
+            catch (ValidationException ex) when (QuickbaseRecordValue.AsQuickbaseUnique(ex, fields) is { } asQuickbase)
+            {
+                await uow.RollbackAsync(CancellationToken.None);
+                throw asQuickbase;
+            }
             catch
             {
                 await uow.RollbackAsync(CancellationToken.None);
@@ -2650,6 +2665,9 @@ public partial class PipelineEngine : IPipelineEngine
                 throw new InvalidOperationException("Delete record step configuration is invalid or missing tableId/targetRecordId.");
 
             var resolvedRecordIdStr = EvaluateTokens(config.TargetRecordId, payloadJson, executionPath, allSteps);
+            // As in Quickbase: the step it acts on found no record (a Look Up with nothing found), so there is no target.
+            if (string.IsNullOrWhiteSpace(resolvedRecordIdStr) && !PipelineRecordSource.IsRecordId(step.ConfigJson))
+                throw new InvalidOperationException("Validation error: This step requires a target, but the supplied one is an empty object");
             Guid recordPublicId;
             if (PipelineRecordSource.IsRecordId(step.ConfigJson))
             {
@@ -5980,7 +5998,13 @@ public partial class PipelineEngine : IPipelineEngine
         // A Multi-select Text field stores a JSON array of its choices, as the record form saves it.
         if (string.Equals(field.TypeCode, "MultiSelect", StringComparison.OrdinalIgnoreCase))
             return PipelineChoiceValues.ToStoredMultiSelect(value, field.Settings);
+        var quickbase = QuickbaseRecordValue.Read(value, field, label);
+        if (quickbase.Handled) return quickbase.Value;
         try { return ParseValueTypeWithFormat(value, field.TypeCode, label, dateFormat); }
+        catch (FormatException ex) when (QuickbaseRecordValue.IsDateType(field.TypeCode))
+        {
+            throw new PipelineMappingException(QuickbaseRecordValue.InvalidDate(label, value), ex);
+        }
         catch (FormatException ex)
         {
             // Refer to a dynamic source without recording its possibly sensitive value.

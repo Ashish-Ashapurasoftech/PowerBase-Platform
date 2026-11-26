@@ -187,12 +187,10 @@ public class PipelineChoiceValuesTests
     }
 
     [Fact]
-    public void RecordMapping_CheckboxWithAnyOtherText_StillFailsWithAClearMessage()
+    public void RecordMapping_CheckboxWithAnyOtherText_IsUnchecked_AsQuickbase()
     {
         var field = new AppField { Id = 110, Fid = 10, Name = "Isactive", TypeCode = "Boolean" };
-        var error = Assert.Throws<TargetInvocationException>(() => ParseRecordMapping("maybe", field));
-        var mapping = Assert.IsType<PipelineMappingException>(error.InnerException);
-        Assert.Contains("Isactive", mapping.Message);
+        Assert.Equal(false, ParseRecordMapping("maybe", field));
     }
 
     [Theory]

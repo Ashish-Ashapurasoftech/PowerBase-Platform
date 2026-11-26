@@ -264,7 +264,7 @@ public class PipelineStepValidatorTests
     }
 
     [Fact]
-    public async Task ValidateSearchRecordsStep_AdvancedFilter_InvalidQuery_ThrowsValidationException()
+    public async Task ValidateSearchRecordsStep_AdvancedFilter_InvalidQuery_StillSaves_AsQuickbase()
     {
         var tableGuid = Guid.NewGuid();
         _tableRepo.GetByPublicIdAsync(tableGuid, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 5, PublicId = tableGuid });
@@ -281,8 +281,7 @@ public class PipelineStepValidatorTests
         });
 
         var act = () => _validator.ValidateSearchRecordsStepAsync(config, CancellationToken.None);
-        await act.Should().ThrowAsync<ValidationException>()
-            .Where(e => e.Errors.ContainsKey("AdvancedQuery"));
+        await act.Should().NotThrowAsync();
     }
 
     [Fact]

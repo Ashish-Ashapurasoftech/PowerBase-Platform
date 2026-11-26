@@ -331,10 +331,7 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
                     {
                         context.AddFailure("Steps", $"Look Up a Record step '{step.RefId}' requires a valid table selection.");
                     }
-                    if (string.IsNullOrEmpty(recordIdValue))
-                    {
-                        context.AddFailure("Steps", $"Look Up a Record step '{step.RefId}' requires a valid lookup value.");
-                    }
+                    // As in Quickbase, a blank Record ID / look up value saves; the step fails when it runs.
                 }
             }
 

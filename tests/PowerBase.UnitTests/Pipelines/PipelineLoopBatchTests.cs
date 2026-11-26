@@ -383,7 +383,7 @@ public class PipelineLoopBatchTests(ITestOutputHelper output)
         Assert.Equal(999, h.Written.Count);
         Assert.Equal((byte)3, h.Status[205]);        // rejected: failed and skipped, the loop went on
         Assert.Equal(999, h.Status.Count(kv => kv.Value == 1));
-        Assert.Contains(h.Errors, error => error.Contains("must be unique"));
+        Assert.Contains(h.Errors, error => error.Contains("requires a unique value.; Error Code: 51"));
     }
 
     [Fact]
@@ -497,7 +497,7 @@ public class PipelineLoopBatchTests(ITestOutputHelper output)
         Assert.Equal(999, h.Written.Count);
         Assert.Equal((byte)3, h.Status[205]);
         Assert.Equal(9, h.BulkInserts);     // the batch holding 204 is rejected before its insert and redone record by record
-        Assert.Contains(h.Errors, error => error.Contains("must be unique"));
+        Assert.Contains(h.Errors, error => error.Contains("requires a unique value.; Error Code: 51"));
     }
 
     [Fact]
