@@ -15,6 +15,8 @@ public sealed class ReadinessHealthCheck(IControlConnectionFactory control, IHos
     {
         if (!lifetime.ApplicationStarted.IsCancellationRequested)
             return HealthCheckResult.Unhealthy("starting");
+        if (!StartupWarmup.Completed)
+            return HealthCheckResult.Unhealthy("warming up");   // pools, DI graph and JIT first (StartupWarmup, at most 30 s)
         if (lifetime.ApplicationStopping.IsCancellationRequested)
             return HealthCheckResult.Unhealthy("stopping");   // drain: the load balancer stops sending new requests
         try

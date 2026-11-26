@@ -831,6 +831,22 @@ builder.Services.AddHealthChecks()
 // Connected Tables: a standalone module (its own services, read-only write filter and workers).
 PowerBase.API.ConnectedTables.ConnectedTablesApiExtensions.AddConnectedTablesModule(builder.Services, builder.Configuration);
 
+// Startup warm-up: /health/ready answers Healthy only after it (pools, DI graph, JIT), so a new instance gets traffic warm.
+builder.Services.AddHostedService<PowerBase.API.Services.StartupWarmup>();
+
+// BackgroundWorkers:Enabled=false: this instance serves requests only — every background loop registered above (pipelines, imports,
+// search indexing, jobs, schedulers, connected tables) is left out. For a separate worker host or a request-only slot; all of them are
+// safe to run on several instances at once (SQL leases / locks), so the default stays true.
+if (!builder.Configuration.GetValue("BackgroundWorkers:Enabled", true))
+{
+    var background = builder.Services
+        .Where(d => d.ServiceType == typeof(Microsoft.Extensions.Hosting.IHostedService)
+                    && d.ImplementationType?.Namespace is { } ns && ns.StartsWith("PowerBase.", StringComparison.Ordinal)
+                    && d.ImplementationType != typeof(PowerBase.API.Services.StartupWarmup))
+        .ToList();
+    foreach (var d in background) builder.Services.Remove(d);
+}
+
 var app = builder.Build();
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
