@@ -509,11 +509,13 @@ public class ReportsController : ControllerBase
         [FromQuery] string? quickSearch = null,
         [FromQuery] List<long>? searchFieldIds = null,
         [FromQuery] bool exactMatch = false,
+        [FromQuery] bool pageSummary = false,
         CancellationToken ct = default)
     {
         var runtimeFilters = ParseDynamicFilters(dynamicFilters);
+        // pageSummary: a Summary report returns just this page of groups (opt-in, see RunReportQuery.PageSummary).
         var result = await _runHandler.HandleAsync(
-            new RunReportQuery(publicId, page, pageSize, runtimeFilters, quickSearch, searchFieldIds, exactMatch), ct);
+            new RunReportQuery(publicId, page, pageSize, runtimeFilters, quickSearch, searchFieldIds, exactMatch, PageSummary: pageSummary), ct);
         return Ok(new ApiResponse<ReportRunResponse>(ToRunResponse(result)));
     }
 
@@ -650,6 +652,7 @@ public class ReportsController : ControllerBase
         InMemoryRowLimit = result.InMemoryRowLimit,
         TotalsIncomplete = result.TotalsIncomplete,
         SummaryTotals = result.SummaryTotals,
+        CrosstabSummary = result.CrosstabSummary,
     };
 
     /// <summary>Export report results as CSV. Optional dynamicFilters=fieldId:value (repeatable), same as run.</summary>

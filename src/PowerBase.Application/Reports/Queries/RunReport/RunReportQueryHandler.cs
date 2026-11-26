@@ -56,6 +56,34 @@ public class PagedReportRunResult
     /// <summary>Paged Summary reports only (<see cref="RunReportQuery.PageSummary"/>): grand totals over every group,
     /// keyed by column Key — see ReportRunResponse.SummaryTotals. Null when the summary isn't paged.</summary>
     public IReadOnlyDictionary<string, decimal?>? SummaryTotals { get; init; }
+    /// <summary>Paged crosstab Summary only (a Summary with "Group columns"): every column value and its totals over
+    /// every group, plus each pivot row's totals on this page. SummaryTotals then holds the bottom-right grand totals.
+    /// Null otherwise.</summary>
+    public CrosstabSummaryResult? CrosstabSummary { get; init; }
+}
+
+/// <summary>See <see cref="PagedReportRunResult.CrosstabSummary"/>. Values are the same (already resolved) values the
+/// rows carry in their series / Rows-level fields, so the viewer can match them the way it reads the rows.</summary>
+public sealed class CrosstabSummaryResult
+{
+    /// <summary>Every distinct crosstab column value across ALL groups (not just this page), each with its column's
+    /// totals keyed by sub-column Key ("0" = Count, "agg{i}_{fid}"). Null total = can't be recombined.</summary>
+    public List<CrosstabColumnTotals> Columns { get; init; } = [];
+    /// <summary>One entry per pivot row on this page: its Rows-level values (in level order) and its totals across every
+    /// crosstab column.</summary>
+    public List<CrosstabRowTotals> Rows { get; init; } = [];
+}
+
+public sealed class CrosstabColumnTotals
+{
+    public object? Value { get; init; }
+    public Dictionary<string, decimal?> Totals { get; init; } = new();
+}
+
+public sealed class CrosstabRowTotals
+{
+    public List<object?> Values { get; init; } = [];
+    public Dictionary<string, decimal?> Totals { get; init; } = new();
 }
 
 /// <summary>See <see cref="RunReportQueryHandler.ResolveDeleteScopeAsync"/>.</summary>
@@ -2114,6 +2142,74 @@ public class RunReportQueryHandler
         // Paged Summary (the report viewer, like a Table report): sort every group, work out the grand totals over every
         // group, then hand back just the requested page. Not for a crosstab ("Group columns"): its pivot rows are built from
         // several flat rows each, so a page of flat rows would split them.
+        // Paged crosstab Summary: a pivot row is one combination of Rows-level values, built from several flat rows (one per
+        // column value). Page by pivot row — every flat row of a pivot row on the page is returned, so no row is split —
+        // and work out every column's totals, each pivot row's totals and the grand totals here, over ALL groups.
+        if (pageGroups && seriesField is not null)
+        {
+            static string KeyOf(object? v) => v is null ? "\u0000" : v.ToString() ?? "\u0000";
+            string RowKeyOf(RecordResult r) => string.Join("\u0001", rowGroupKeys.Select(k => KeyOf(r.Fields.GetValueOrDefault(k))));
+
+            var pivotOrder = new List<string>();
+            var pivotItems = new Dictionary<string, List<RecordResult>>();
+            var columnItems = new Dictionary<string, (object? Value, List<RecordResult> Items)>();
+            foreach (var item in items)
+            {
+                var rowKey = RowKeyOf(item);
+                if (!pivotItems.TryGetValue(rowKey, out var list))
+                {
+                    pivotItems[rowKey] = list = [];
+                    pivotOrder.Add(rowKey);
+                }
+                list.Add(item);
+
+                var seriesValue = item.Fields.GetValueOrDefault(seriesKey!);
+                var colKey = KeyOf(seriesValue);
+                if (!columnItems.TryGetValue(colKey, out var col))
+                    columnItems[colKey] = col = (seriesValue, []);
+                col.Items.Add(item);
+            }
+
+            var pagePivotKeys = pivotOrder.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+            CrosstabSummaryResult? crosstab = null;
+            if (!definition.HideTotals)
+            {
+                crosstab = new CrosstabSummaryResult
+                {
+                    Columns = columnItems.Values
+                        .Select(c => new CrosstabColumnTotals { Value = c.Value, Totals = SummaryGrandTotals(c.Items, displayAggregations, summaryFormulaPlan.Has) })
+                        .ToList(),
+                    Rows = pagePivotKeys
+                        .Select(k => new CrosstabRowTotals
+                        {
+                            Values = rowGroupKeys.Select(rk => pivotItems[k][0].Fields.GetValueOrDefault(rk)).ToList(),
+                            Totals = SummaryGrandTotals(pivotItems[k], displayAggregations, summaryFormulaPlan.Has),
+                        })
+                        .ToList(),
+                };
+            }
+            else
+            {
+                // Totals hidden: the column list is still needed so every page shows the same column headers.
+                crosstab = new CrosstabSummaryResult
+                {
+                    Columns = columnItems.Values.Select(c => new CrosstabColumnTotals { Value = c.Value }).ToList(),
+                };
+            }
+
+            return new PagedReportRunResult
+            {
+                Items = pagePivotKeys.SelectMany(k => pivotItems[k]).ToList(),
+                Columns = columns,
+                TotalCount = pivotOrder.Count,
+                Page = page,
+                PageSize = pageSize,
+                IsDataMasked = isMaskedPreview,
+                SummaryTotals = definition.HideTotals ? new Dictionary<string, decimal?>() : SummaryGrandTotals(items, displayAggregations, summaryFormulaPlan.Has),
+                CrosstabSummary = crosstab,
+            };
+        }
+
         if (pageGroups && seriesField is null)
         {
             if (!string.IsNullOrEmpty(sortKey))
