@@ -61,6 +61,41 @@ public sealed class MaterializedFieldStateRepository : TenantRepositoryBase, IMa
         return ready;
     }
 
+    private string InSearchKey => $"materialized_insearch_{QueryContext.TenantId}";
+
+    public async Task<IReadOnlyDictionary<long, bool>> SearchIndexedFieldsAsync(CancellationToken ct = default)
+    {
+        var none = new Dictionary<long, bool>();
+        if (!await _settings.IsComputeEnabledAsync(QueryContext.TenantId, ct)) return none;
+        if (_cache.TryGetValue(InSearchKey, out IReadOnlyDictionary<long, bool>? cached)) return cached!;
+
+        IReadOnlyDictionary<long, bool> inSearch;
+        try
+        {
+            await using var connection = await OpenConnectionAsync(ct);
+            // The same rule as AppField.IsInSearchIndex: a rebuild bumps MaterializeVersion, so an older indexed version never counts.
+            inSearch = (await connection.QueryAsync<(long Id, bool SearchExact)>(new CommandDefinition("""
+                    SELECT Id, SearchExact FROM meta.AppField
+                    WHERE MaterializeMode = @on AND MaterializeState = @ready AND SearchIndexState = @indexed
+                      AND SearchIndexVersion = MaterializeVersion AND IsDeleted = 0
+                    """,
+                new { on = MaterializeModes.On, ready = MaterializeStates.Ready, indexed = SearchIndexStates.Indexed }, cancellationToken: ct)))
+                .ToDictionary(r => r.Id, r => r.SearchExact);
+        }
+        catch (SqlException ex) when (ex.Number == InvalidColumnName)
+        {
+            inSearch = none;   // migrations 101/103 not applied yet: nothing is known to be in the index
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Cannot tell: nothing is read from the index for a stored field (SQL c_ is always correct). Not cached.
+            _logger?.LogWarning(ex, "Stored columns: could not read which fields are in the search index; reads use SQL.");
+            return none;
+        }
+        _cache.Set(InSearchKey, inSearch, ReadyCacheTtl);
+        return inSearch;
+    }
+
     public async Task<bool> HasPendingWorkAsync(IReadOnlyCollection<long> tableIds, CancellationToken ct = default)
     {
         if (tableIds.Count == 0) return false;
@@ -185,6 +220,7 @@ public sealed class MaterializedFieldStateRepository : TenantRepositoryBase, IMa
                     WHERE Id IN @reopen AND MaterializeMode = 2
                     """, new { reopen }, transaction, cancellationToken: ct));
             _cache.Remove(ReadyKey);
+            _cache.Remove(InSearchKey);
             _logger?.LogInformation("Stored columns: {Stale} field(s) stop using their stored column until rebuilt and {Reopened} refused field(s) are decided again (a field they read changed).",
                 stale.Count, reopen.Count);
         }

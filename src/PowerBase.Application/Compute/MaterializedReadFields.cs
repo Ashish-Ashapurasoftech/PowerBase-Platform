@@ -21,6 +21,14 @@ public interface IMaterializedFieldState
     /// switch and the tenant's flag). Empty when any of that is off, so turning a flag off restores today's reads at once. Cached a few seconds.</summary>
     Task<IReadOnlySet<long>> ReadyFieldIdsAsync(CancellationToken ct = default);
 
+    /// <summary>
+    /// The stored fields whose values are fully in the search index right now ("in AI", plan D1): Ready, and the index holds this very
+    /// version (<see cref="AppField.IsInSearchIndex"/>). AppField.Id → SearchExact (false: some value has more than ~15 significant digits,
+    /// so the index may filter on it but not sort it). Empty when compute is off for the tenant. Cached a few seconds, like Ready.
+    /// </summary>
+    Task<IReadOnlyDictionary<long, bool>> SearchIndexedFieldsAsync(CancellationToken ct = default) =>
+        Task.FromResult<IReadOnlyDictionary<long, bool>>(new Dictionary<long, bool>());
+
     /// <summary>True when stored-column work is still waiting for any of these tables (the report then says "Values are updating").</summary>
     Task<bool> HasPendingWorkAsync(IReadOnlyCollection<long> tableIds, CancellationToken ct = default);
 

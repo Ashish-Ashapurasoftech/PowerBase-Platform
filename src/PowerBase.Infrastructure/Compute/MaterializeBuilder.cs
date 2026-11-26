@@ -164,6 +164,29 @@ public sealed class MaterializeBuilder : TenantRepositoryBase
         return changed;
     }
 
+    /// <summary>
+    /// Plan item 6 (catch-up): sends Ready stored fields that were never sent to the search index (built before migration 101) — each one
+    /// Indexing, then its field job, the same two steps as a new build — so they can become "in AI" and be filtered / sorted there. A few
+    /// at a time: never more than <paramref name="maxOpenJobs"/> field jobs open for the tenant, so the index is not flooded. Does nothing
+    /// without a publisher (the job could not be sent, and the field would wait for it forever).
+    /// </summary>
+    public async Task<int> SendReadyFieldsToSearchAsync(int maxOpenJobs, CancellationToken ct)
+    {
+        if (_search is null || !_search.CanSend || maxOpenJobs <= 0) return 0;
+        var repo = Repo;
+        int open;
+        try { open = await repo.CountOpenSearchFieldJobsAsync(ct); }
+        catch (Microsoft.Data.SqlClient.SqlException ex) when (ex.Number == 208) { return 0; }   // no search field jobs table yet
+        var sent = 0;
+        foreach (var field in await repo.ListReadyNotInSearchAsync(maxOpenJobs - open, ct))
+        {
+            if (!await repo.MarkIndexingAsync(field.Id, field.MaterializeVersion, ct)) continue;
+            await _search.ValuesChangedAsync(field, [], tooMany: true, ct);
+            sent++;
+        }
+        return sent;
+    }
+
     /// <summary>Builds every switched-on field of the current tenant that is not built yet (None or a Building that stopped half way).</summary>
     public async Task<IReadOnlyList<FieldOutcome>> BuildPendingAsync(ComputeOptions options, CancellationToken ct)
     {

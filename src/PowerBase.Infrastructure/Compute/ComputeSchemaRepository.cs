@@ -124,6 +124,57 @@ public sealed class ComputeSchemaRepository : TenantRepositoryBase
         return ready;
     }
 
+    /// <summary>
+    /// Plan item 6 (catch-up): Ready, Searchable / Filterable stored fields that were never sent to the search index — built before
+    /// migration 101, so MarkReady never set them Indexing. Oldest build first, at most <paramref name="max"/>.
+    /// </summary>
+    public async Task<IReadOnlyList<AppField>> ListReadyNotInSearchAsync(int max, CancellationToken ct = default)
+    {
+        if (max <= 0) return [];
+        await using var connection = await OpenConnectionAsync(ct);
+        return (await connection.QueryAsync<AppField>(new CommandDefinition("""
+            SELECT TOP (@max) af.Id, af.AppTableId, ft.Code AS TypeCode, af.Fid, af.Name, af.Label, af.Settings, af.IsEncrypted, af.IsSystem,
+                   af.PhysicalColumnName, af.IsUnique, af.IsSearchable, af.IsFilterable,
+                   af.MaterializeMode, af.MaterializeState, af.MaterializeVersion, af.MaterializedOn,
+                   af.SearchIndexState, af.SearchIndexVersion, af.SearchIndexedOn, af.SearchExact
+            FROM meta.AppField af
+            JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+            JOIN meta.AppTable t ON t.Id = af.AppTableId AND t.IsDeleted = 0
+            JOIN meta.App a ON a.Id = t.AppId AND a.IsDeleted = 0
+            WHERE af.IsDeleted = 0 AND af.MaterializeMode = @on AND af.MaterializeState = @ready AND af.SearchIndexState = @none
+              AND (af.IsSearchable = 1 OR af.IsFilterable = 1)
+            ORDER BY af.MaterializedOn, af.Id
+            """, new { max, on = MaterializeModes.On, ready = MaterializeStates.Ready, none = SearchIndexStates.None },
+            cancellationToken: ct))).AsList();
+    }
+
+    /// <summary>The search field jobs still open for this tenant (each one rewrites a field across a whole table in the index).</summary>
+    public async Task<int> CountOpenSearchFieldJobsAsync(CancellationToken ct = default)
+    {
+        await using var connection = await OpenConnectionAsync(ct);
+        return await connection.ExecuteScalarAsync<int>(new CommandDefinition("SELECT COUNT(*) FROM meta.SearchFieldJob", cancellationToken: ct));
+    }
+
+    /// <summary>
+    /// Catch-up: a Ready field never sent to the index starts Indexing its current version, exactly as MarkReady does for a new build, so the
+    /// field job sent next may mark it Indexed. Guarded: only if it is still Ready, at that version, and still not in the index.
+    /// </summary>
+    public async Task<bool> MarkIndexingAsync(long fieldId, int version, CancellationToken ct = default)
+    {
+        await using var connection = await OpenConnectionAsync(ct);
+        return await connection.ExecuteAsync(new CommandDefinition("""
+            UPDATE meta.AppField
+            SET SearchIndexState = @indexing, SearchIndexVersion = MaterializeVersion, SearchIndexRequestedOn = SYSUTCDATETIME(),
+                SearchIndexedOn = NULL, SearchExact = 1
+            WHERE Id = @fieldId AND MaterializeVersion = @version AND MaterializeMode = @on AND MaterializeState = @ready
+              AND SearchIndexState = @none AND (IsSearchable = 1 OR IsFilterable = 1) AND IsDeleted = 0
+            """, new
+            {
+                fieldId, version, on = MaterializeModes.On, ready = MaterializeStates.Ready,
+                indexing = SearchIndexStates.Indexing, none = SearchIndexStates.None
+            }, cancellationToken: ct)) == 1;
+    }
+
     /// <summary>The nightly check just made the field's values current (a Ready field is not checked again within ReconcileMinAgeHours).</summary>
     public async Task TouchMaterializedAsync(long fieldId, int version, CancellationToken ct = default)
     {
