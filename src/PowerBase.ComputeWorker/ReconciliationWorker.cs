@@ -14,6 +14,11 @@ public sealed class ReconciliationWorker : BackgroundService
     private readonly ComputeTenantDirectory _tenants;
     private readonly ILogger<ReconciliationWorker> _logger;
     private DateOnly? _lastRunDay;
+    private DateTime _lastSearchCatchUp = DateTime.MinValue;
+
+    /// <summary>Plan item 6: how often Ready fields never sent to the search index are looked for, and how many field jobs may be open.</summary>
+    internal static readonly TimeSpan SearchCatchUpInterval = TimeSpan.FromMinutes(5);
+    internal const int SearchCatchUpMaxOpenJobs = 5;
 
     public ReconciliationWorker(IServiceProvider services, IConfiguration configuration, ComputeTenantDirectory tenants, ILogger<ReconciliationWorker> logger)
     {
@@ -33,6 +38,11 @@ public sealed class ReconciliationWorker : BackgroundService
         {
             var options = ComputeConfig.ReadCompute(_configuration);
             var now = DateTime.UtcNow;
+            if (options.Enabled && now - _lastSearchCatchUp >= SearchCatchUpInterval)
+            {
+                _lastSearchCatchUp = now;
+                await SendReadyFieldsToSearchAsync(stoppingToken);
+            }
             if (options.Enabled && IsDue(now, options.ReconcileHourUtc, _lastRunDay) && ComputeConfig.IsOffPeak(options, now))
             {
                 _lastRunDay = DateOnly.FromDateTime(now);
@@ -65,5 +75,28 @@ public sealed class ReconciliationWorker : BackgroundService
             try { await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken); }
             catch (OperationCanceledException) { break; }
         }
+    }
+
+    /// <summary>Per tenant, sends a few Ready stored fields that were never in the search index (see MaterializeBuilder.SendReadyFieldsToSearchAsync).</summary>
+    private async Task SendReadyFieldsToSearchAsync(CancellationToken ct)
+    {
+        try
+        {
+            foreach (var tenantId in await _tenants.ListComputeTenantsAsync(ct))
+            {
+                try
+                {
+                    using var scope = _services.CreateScope();
+                    scope.ServiceProvider.GetRequiredService<IQueryContext>().SetTenantId(tenantId);
+                    var sent = await scope.ServiceProvider.GetRequiredService<MaterializeBuilder>().SendReadyFieldsToSearchAsync(SearchCatchUpMaxOpenJobs, ct);
+                    if (sent > 0)
+                        _logger.LogInformation("Compute: tenant {TenantId}: {Count} Ready stored field(s) sent to the search index (catch-up).", tenantId, sent);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch (Exception ex) { _logger.LogWarning(ex, "Compute search catch-up: tenant {TenantId} failed.", tenantId); }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex) { _logger.LogWarning(ex, "Compute search catch-up round failed."); }
     }
 }

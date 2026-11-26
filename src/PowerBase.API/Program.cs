@@ -199,6 +199,11 @@ builder.Services.AddSwaggerGen(c =>
 // Infrastructure
 builder.Services.AddMemoryCache();
 builder.Services.Configure<PowerBase.Application.Common.Configurations.MetadataCacheOptions>(builder.Configuration.GetSection(PowerBase.Application.Common.Configurations.MetadataCacheOptions.SectionName));
+// Per-tenant rate limit (API-01): RateLimiting:Enabled (off by default).
+PowerBase.API.Middleware.TenantRateLimiting.AddTenantRateLimiting(builder.Services, builder.Configuration);
+// SQL protection for the heaviest reads (whole-table scans): a few at a time per tenant DB, slowed under high Azure SQL load (doc 21).
+builder.Services.Configure<PowerBase.Application.Common.Configurations.SqlWorkloadOptions>(builder.Configuration.GetSection(PowerBase.Application.Common.Configurations.SqlWorkloadOptions.SectionName));
+builder.Services.AddSingleton<PowerBase.Infrastructure.Services.HeavyReadGovernor>();
 // ARC-01: the shared versions (meta.CacheVersion) that carry every cache invalidation to every API instance.
 builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.ICacheVersionStore, PowerBase.Infrastructure.Services.SqlCacheVersionStore>();
 builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.IMetadataCache, PowerBase.Infrastructure.Services.MetadataCache>();
@@ -831,6 +836,22 @@ builder.Services.AddHealthChecks()
 // Connected Tables: a standalone module (its own services, read-only write filter and workers).
 PowerBase.API.ConnectedTables.ConnectedTablesApiExtensions.AddConnectedTablesModule(builder.Services, builder.Configuration);
 
+// Startup warm-up: /health/ready answers Healthy only after it (pools, DI graph, JIT), so a new instance gets traffic warm.
+builder.Services.AddHostedService<PowerBase.API.Services.StartupWarmup>();
+
+// BackgroundWorkers:Enabled=false: this instance serves requests only — every background loop registered above (pipelines, imports,
+// search indexing, jobs, schedulers, connected tables) is left out. For a separate worker host or a request-only slot; all of them are
+// safe to run on several instances at once (SQL leases / locks), so the default stays true.
+if (!builder.Configuration.GetValue("BackgroundWorkers:Enabled", true))
+{
+    var background = builder.Services
+        .Where(d => d.ServiceType == typeof(Microsoft.Extensions.Hosting.IHostedService)
+                    && d.ImplementationType?.Namespace is { } ns && ns.StartsWith("PowerBase.", StringComparison.Ordinal)
+                    && d.ImplementationType != typeof(PowerBase.API.Services.StartupWarmup))
+        .ToList();
+    foreach (var d in background) builder.Services.Remove(d);
+}
+
 var app = builder.Build();
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
@@ -867,6 +888,7 @@ app.UseMiddleware<PowerBase.API.Middleware.CacheVersionScopeMiddleware>();
 app.UseMiddleware<PowerBase.API.QuickbaseApi.Xml.QbXmlTokenMiddleware>();
 app.UseMiddleware<JwtMiddleware>();
 app.UseMiddleware<PowerBase.API.Middleware.RequestOriginMiddleware>();
+PowerBase.API.Middleware.TenantRateLimiting.UseTenantRateLimiting(app);   // after JwtMiddleware: the tenant is known
 app.MapControllers();
 // Liveness of the search pipeline (workers, outbox backlog, search service): counts and times only, no record data. Point an uptime probe
 // or Azure Monitor availability test at it.

@@ -13,12 +13,18 @@ public sealed class AppVariableSchema : IVariableSchema
 {
     private readonly Dictionary<string, VariableRef> _byName = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<long, VariableRef> _byId = new();
+    private readonly System.Text.StringBuilder _description = new();
+    private string? _signature;
+
+    /// <summary>Hash of the variables (id, name, value): values are baked into a compiled formula, so they are part of its cache key.</summary>
+    public string Signature => _signature ??= CompiledFormulaCache.Hash(_description);
 
     public AppVariableSchema(IEnumerable<AppVariable> variables)
     {
         foreach (var v in variables)
         {
             var variable = new VariableRef(v.Id, v.Name, v.Value);
+            _description.Append(v.Id).Append('|').Append(v.Name.Length).Append(':').Append(v.Name).Append('|').Append(v.Value?.Length ?? -1).Append(':').Append(v.Value).Append(';');
             _byId[v.Id] = variable;
             _byName[v.Name.Trim()] = variable;
         }

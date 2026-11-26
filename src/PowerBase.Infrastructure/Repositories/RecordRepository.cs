@@ -132,9 +132,11 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         ISearchOutbox? outbox = null,
         IComputeOutbox? computeOutbox = null,
         IComputeQueuePublisher? computePublisher = null,
-        IMaterializedFieldState? materialized = null)
+        IMaterializedFieldState? materialized = null,
+        Services.HeavyReadGovernor? heavyReads = null)
         : base(connectionFactory, queryContext)
     {
+        _heavyReads = heavyReads;
         _outbox = outbox;
         _computeOutbox = computeOutbox;
         _computePublisher = computePublisher;
@@ -144,6 +146,25 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         _encryptionService = encryptionService;
         _controlConnectionFactory = controlConnectionFactory;
     }
+
+    private readonly Services.HeavyReadGovernor? _heavyReads;
+
+    /// <summary>A slot for one heavy read batch of this tenant's database (doc 21): a limited number at once per instance, and a short wait
+    /// first under high Azure SQL load. No governor (tests, the pipeline projector): no limit.</summary>
+    private Task<IDisposable?> HeavyReadSlotAsync(CancellationToken ct) =>
+        _heavyReads is null
+            ? Task.FromResult<IDisposable?>(null)
+            : EnterAsync(ct);
+
+    private async Task<IDisposable?> EnterAsync(CancellationToken ct = default) =>
+        await _heavyReads!.EnterAsync(QueryContext.TenantId, async c =>
+        {
+            await using var probe = await ConnectionFactory.CreateAsync(c);
+            var row = await probe.QueryFirstOrDefaultAsync<(double? Cpu, double? Io, double? Log)>(new CommandDefinition(
+                "SELECT TOP (1) CAST(avg_cpu_percent AS FLOAT), CAST(avg_data_io_percent AS FLOAT), CAST(avg_log_write_percent AS FLOAT) FROM sys.dm_db_resource_stats ORDER BY end_time DESC",
+                cancellationToken: c));
+            return new[] { row.Cpu, row.Io, row.Log }.Where(v => v.HasValue).Select(v => v!.Value).DefaultIfEmpty(0).Max();
+        }, ct);
 
     private Task<Services.FieldEncryptionContext> GetEncryptionContextAsync(
         System.Data.IDbConnection connection, long appId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default)
@@ -476,6 +497,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         // commandTimeout 0 = no timeout: a report over every record can legitimately take longer than
         // SqlClient's 30 s default. The request's cancellation token still aborts it.
+        using var heavySlot = await HeavyReadSlotAsync(ct);
         var allCommand = new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct);
         var rows = ReplicaIntentOfScope() is null
             ? await connection.QueryAsync(allCommand)
@@ -517,6 +539,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             """;
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
+        using var heavySlot = await HeavyReadSlotAsync(ct);
         var batchCommand = new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct);
         var rows = ReplicaIntentOfScope() is null
             ? await connection.QueryAsync(batchCommand)
@@ -548,6 +571,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             ORDER BY Id
             """;
 
+        using var heavySlot = await HeavyReadSlotAsync(ct);
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var rows = await connection.QueryAsync<(long Id, Guid PublicId)>(
             new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct));

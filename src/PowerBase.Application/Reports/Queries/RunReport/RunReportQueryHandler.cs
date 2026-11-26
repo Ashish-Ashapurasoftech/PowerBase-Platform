@@ -541,9 +541,21 @@ public class RunReportQueryHandler
         var hasFormulaFilters = FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, formulaFids);
         var hasFormulaSorts   = sortFields.Any(s => formulaFids.Contains(s.FieldId));
 
-        var searchOrderBy = BuildSearchOrderBy(sortFields, allFields);
+        // Plan D3 ("use AI while AI can answer"): a stored Lookup / Summary / Formula whose values are fully in the search index (Ready,
+        // and the index holds this very version) is filtered — and, when every value round-trips through a double (SearchExact), sorted —
+        // in the index, through the same stand-in of its value type the indexer wrote. The search-side builders get these lists; SQL and
+        // the projectors keep their own. Records the index is behind on are still re-checked in SQL (IndexLag), and a field job
+        // rewriting the field stops it (FieldsBeingRewritten), exactly as for a plain field.
+        var inSearch = _materialized is null
+            ? (IReadOnlyDictionary<long, bool>)new Dictionary<long, bool>()
+            : await Timed("insearch", _materialized.SearchIndexedFieldsAsync(ct));
+        var searchFilterFields = PowerBase.Application.Search.SearchIndexedFields.For(allFields, inSearch);
+        var searchSortFields = PowerBase.Application.Search.SearchIndexedFields.For(allFields, inSearch, forSort: true);
+        // The computed fields the index has no value for: a condition on one keeps the whole question in SQL / memory.
+        var notInSearchFids = computedFids.Except(PowerBase.Application.Search.SearchIndexedFields.Fids(allFields, inSearch)).ToHashSet();
+
+        var searchOrderBy = BuildSearchOrderBy(sortFields, searchSortFields);
         var canSortInSearch = sortFields.Count == 0 || searchOrderBy != null;
-        var canExpressUserFilter = userFilterTree == null || OData.ODataFilterBuilder.CanExpress(userFilterTree, allFields);
         var hasSearchableFields = allFields.Any(f => f.IsSearchable || f.IsFilterable);
 
         // SOLUTION 1: Fast Azure AI Search paged execution for large tables.
@@ -562,7 +574,7 @@ public class RunReportQueryHandler
                 };
         }
 
-        var canExpressEffectiveFilter = effectiveFilterTree == null || OData.ODataFilterBuilder.CanExpress(effectiveFilterTree, allFields);
+        var canExpressEffectiveFilter = effectiveFilterTree == null || OData.ODataFilterBuilder.CanExpress(effectiveFilterTree, searchFilterFields);
 
         // Columns that opted into a Total/Average row — aggregated over ALL matching records, never just a page.
         var totalCols = definition.HideTotals || isMaskedPreview
@@ -598,7 +610,9 @@ public class RunReportQueryHandler
             && quickSearchFitsIndex
             && (string.IsNullOrWhiteSpace(quickSearch) || !roleHidesSearchableText)
             && !access.RestrictToCreatedBy.HasValue
-            && !FormulaFilterSorter.TreeContainsFormulaField(effectiveFilterTree, computedFids)
+            && !FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, notInSearchFids)
+            // The role filter is re-checked on the page in memory, from the rows SQL read: no computed field there (as before).
+            && !FormulaFilterSorter.TreeContainsFormulaField(access.ViewFilter, computedFids)
             && (totalCols.Count == 0 || totalsExpressibleInSql)
             && (effectiveFilterTree != null || !string.IsNullOrWhiteSpace(quickSearch) || hasFormulaSorts || hasFormulaFilters || isAppEncrypted);
 
@@ -678,7 +692,7 @@ public class RunReportQueryHandler
         {
             try
             {
-                var odata = effectiveFilterTree != null ? OData.ODataFilterBuilder.Build(effectiveFilterTree, allFields) : null;
+                var odata = effectiveFilterTree != null ? OData.ODataFilterBuilder.Build(effectiveFilterTree, searchFilterFields) : null;
                 var targetIndex = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(allFields)
                     ? PowerBase.Application.Search.SearchSlotResolver.GetTableIndexName(table.Id)
                     : null;
@@ -869,11 +883,11 @@ public class RunReportQueryHandler
         // Not while the index is too far behind this table: it would leave out records it does not hold yet. While it is behind on a
         // few, those are decided by the same filter in SQL.
         if (_searchService.IsGridSearchEnabled && userFilterTree != null && hasSearchableFields
-            && OData.ODataFilterBuilder.CanExpress(userFilterTree, allFields)
-            && !FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, computedFids)
+            && OData.ODataFilterBuilder.CanExpress(userFilterTree, searchFilterFields)
+            && !FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, notInSearchFids)
             && await CanAskIndexAsync(userFilterTree) && !(await IndexLagAsync()).Rewrites(userFilterTree))
         {
-            var odata = OData.ODataFilterBuilder.Build(userFilterTree, allFields);
+            var odata = OData.ODataFilterBuilder.Build(userFilterTree, searchFilterFields);
             if (!string.IsNullOrWhiteSpace(odata))
             {
                 try

@@ -37,6 +37,9 @@ public sealed class ComputeSearchNotifier : TenantRepositoryBase
 
     internal static bool IsIndexed(AppField field) => field.IsSearchable || field.IsFilterable;
 
+    /// <summary>False when no message publisher is configured: a field job could not be sent, so nothing should wait for one.</summary>
+    public bool CanSend => _publisher is not null;
+
     /// <summary>The field's stored values changed for these rows (or for too many to list).</summary>
     public async Task ValuesChangedAsync(AppField field, IReadOnlyCollection<long> rowIds, bool tooMany, CancellationToken ct)
     {
