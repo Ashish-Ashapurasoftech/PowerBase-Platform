@@ -53,6 +53,9 @@ public class PagedReportRunResult
     /// be worked out exactly over every matching record (too many to read into memory, or matched by a quick search /
     /// calculated filter SQL can't repeat). Left out rather than shown covering only some records.</summary>
     public bool TotalsIncomplete { get; init; }
+    /// <summary>Paged Summary reports only (<see cref="RunReportQuery.PageSummary"/>): grand totals over every group,
+    /// keyed by column Key — see ReportRunResponse.SummaryTotals. Null when the summary isn't paged.</summary>
+    public IReadOnlyDictionary<string, decimal?>? SummaryTotals { get; init; }
 }
 
 /// <summary>See <see cref="RunReportQueryHandler.ResolveDeleteScopeAsync"/>.</summary>
@@ -278,7 +281,9 @@ public class RunReportQueryHandler
         }
 
         if (report.ReportType is "Summary" or "Chart")
-            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, effectiveRuntimeFilters, filterTree, isMaskedPreview, ct);
+            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, effectiveRuntimeFilters, filterTree, isMaskedPreview, ct,
+                pageGroups: query.PageSummary && report.ReportType == "Summary",
+                sortKey: query.SummarySortKey, sortDesc: query.SummarySortDesc);
 
         return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields,
             effectiveRuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, isMaskedPreview, isAppEncrypted, ct);
@@ -1857,7 +1862,10 @@ public class RunReportQueryHandler
         IReadOnlyList<(long FieldId, string Value, string? SubField)>? runtimeFilters,
         FilterGroup? savedAndRuntimeFilterTree,
         bool isMaskedPreview,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool pageGroups = false,
+        string? sortKey = null,
+        bool sortDesc = false)
     {
         var visibleFieldIds = access.VisibleFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
         var fieldMap = allFields
@@ -2103,6 +2111,27 @@ public class RunReportQueryHandler
             }
         }
 
+        // Paged Summary (the report viewer, like a Table report): sort every group, work out the grand totals over every
+        // group, then hand back just the requested page. Not for a crosstab ("Group columns"): its pivot rows are built from
+        // several flat rows each, so a page of flat rows would split them.
+        if (pageGroups && seriesField is null)
+        {
+            if (!string.IsNullOrEmpty(sortKey))
+                items = SortSummaryItems(items, sortKey, sortDesc);
+            var summaryTotals = definition.HideTotals ? null : SummaryGrandTotals(items, displayAggregations, summaryFormulaPlan.Has);
+            var pageItems = items.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+            return new PagedReportRunResult
+            {
+                Items = pageItems,
+                Columns = columns,
+                TotalCount = items.Count,
+                Page = page,
+                PageSize = pageSize,
+                IsDataMasked = isMaskedPreview,
+                SummaryTotals = summaryTotals ?? new Dictionary<string, decimal?>(),
+            };
+        }
+
         return new PagedReportRunResult
         {
             Items = items,
@@ -2113,6 +2142,88 @@ public class RunReportQueryHandler
             IsDataMasked = isMaskedPreview,
             ResolvedGaugeGoalValue = resolvedGaugeGoalValue,
         };
+    }
+
+    private static decimal? SummaryNumber(object? v)
+    {
+        if (v is null) return null;
+        if (v is System.Text.Json.JsonElement je)
+            return je.ValueKind == System.Text.Json.JsonValueKind.Number && je.TryGetDecimal(out var jd) ? jd : null;
+        if (v is string s)
+            return decimal.TryParse(s, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var sd) ? sd : null;
+        if (v is bool or DateTime or DateTimeOffset) return null;
+        try { return Convert.ToDecimal(v, System.Globalization.CultureInfo.InvariantCulture); }
+        catch { return null; }
+    }
+
+    /// <summary>Sorts Summary groups by one column Key — numerically when both values are numbers (a blank counts as 0,
+    /// like the viewer's own sort), otherwise as text.</summary>
+    private static List<RecordResult> SortSummaryItems(List<RecordResult> items, string key, bool desc)
+    {
+        int Compare(RecordResult a, RecordResult b)
+        {
+            var av = a.Fields.TryGetValue(key, out var x) ? x : null;
+            var bv = b.Fields.TryGetValue(key, out var y) ? y : null;
+            var an = av is null ? 0m : SummaryNumber(av);
+            var bn = bv is null ? 0m : SummaryNumber(bv);
+            int result = an.HasValue && bn.HasValue
+                ? an.Value.CompareTo(bn.Value)
+                : string.Compare(av?.ToString(), bv?.ToString(), StringComparison.OrdinalIgnoreCase);
+            return desc ? -result : result;
+        }
+        var sorted = items.ToList();
+        // List.Sort isn't stable — keep equal groups in their original (Rows) order.
+        var index = sorted.Select((r, i) => (r, i)).ToDictionary(t => t.r, t => t.i);
+        sorted.Sort((a, b) => { var c = Compare(a, b); return c != 0 ? c : index[a].CompareTo(index[b]); });
+        return sorted;
+    }
+
+    /// <summary>The paged Summary's grand-totals row over EVERY group, recombined per aggregate function the same way the
+    /// viewer does it for an unpaged report: Count/Sum add up, Avg is weighted by each group's Count, Min/Max take the
+    /// extreme. Distinct Count, Std Dev, Median, summary formulas and % of total can't be recombined from per-group
+    /// values — those keys map to null (the viewer shows "100%" for % of total itself).</summary>
+    private static Dictionary<string, decimal?> SummaryGrandTotals(
+        List<RecordResult> items, List<SummaryAggregation> displayAggregations, Func<long, bool> isSummaryFormula)
+    {
+        var totals = new Dictionary<string, decimal?>
+        {
+            ["0"] = items.Sum(r => SummaryNumber(r.Fields.GetValueOrDefault("0")) ?? 0m),
+        };
+        for (var i = 0; i < displayAggregations.Count; i++)
+        {
+            var agg = displayAggregations[i];
+            var key = $"agg{i}_{agg.FieldId}";
+            if (isSummaryFormula(agg.FieldId) || agg.DisplayAs == "PercentOfColumnTotal") { totals[key] = null; continue; }
+            var values = items.Select(r => SummaryNumber(r.Fields.GetValueOrDefault(key))).Where(v => v.HasValue).Select(v => v!.Value).ToList();
+            switch (agg.Function)
+            {
+                case "Sum":
+                case "Count":
+                    totals[key] = values.Sum();
+                    break;
+                case "Avg":
+                    decimal weighted = 0, count = 0;
+                    foreach (var r in items)
+                    {
+                        if (SummaryNumber(r.Fields.GetValueOrDefault(key)) is not { } avg) continue;
+                        var c = SummaryNumber(r.Fields.GetValueOrDefault("0")) ?? 0m;
+                        weighted += avg * c;
+                        count += c;
+                    }
+                    totals[key] = count > 0 ? weighted / count : null;
+                    break;
+                case "Min":
+                    totals[key] = values.Count > 0 ? values.Min() : null;
+                    break;
+                case "Max":
+                    totals[key] = values.Count > 0 ? values.Max() : null;
+                    break;
+                default:
+                    totals[key] = null;
+                    break;
+            }
+        }
+        return totals;
     }
 
     /// <summary>Resolves Summary's "Rows" group levels — RowGroupLevels (the chained "Group by X,
