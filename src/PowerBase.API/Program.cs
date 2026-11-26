@@ -199,6 +199,8 @@ builder.Services.AddSwaggerGen(c =>
 // Infrastructure
 builder.Services.AddMemoryCache();
 builder.Services.Configure<PowerBase.Application.Common.Configurations.MetadataCacheOptions>(builder.Configuration.GetSection(PowerBase.Application.Common.Configurations.MetadataCacheOptions.SectionName));
+// Per-tenant rate limit (API-01): RateLimiting:Enabled (off by default).
+PowerBase.API.Middleware.TenantRateLimiting.AddTenantRateLimiting(builder.Services, builder.Configuration);
 // SQL protection for the heaviest reads (whole-table scans): a few at a time per tenant DB, slowed under high Azure SQL load (doc 21).
 builder.Services.Configure<PowerBase.Application.Common.Configurations.SqlWorkloadOptions>(builder.Configuration.GetSection(PowerBase.Application.Common.Configurations.SqlWorkloadOptions.SectionName));
 builder.Services.AddSingleton<PowerBase.Infrastructure.Services.HeavyReadGovernor>();
@@ -886,6 +888,7 @@ app.UseMiddleware<PowerBase.API.Middleware.CacheVersionScopeMiddleware>();
 app.UseMiddleware<PowerBase.API.QuickbaseApi.Xml.QbXmlTokenMiddleware>();
 app.UseMiddleware<JwtMiddleware>();
 app.UseMiddleware<PowerBase.API.Middleware.RequestOriginMiddleware>();
+PowerBase.API.Middleware.TenantRateLimiting.UseTenantRateLimiting(app);   // after JwtMiddleware: the tenant is known
 app.MapControllers();
 // Liveness of the search pipeline (workers, outbox backlog, search service): counts and times only, no record data. Point an uptime probe
 // or Azure Monitor availability test at it.
