@@ -99,7 +99,7 @@ public class CreateTableCommandHandler
         }
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.Created, AuditEntityTypes.AppTable, table.PublicId.ToString(), $"Table added: {table.Name}", appId: app.Id, ct: ct);
+            AuditActions.Created, AuditEntityTypes.AppTable, table.PublicId.ToString(), $"Table added: {table.Name}", appId: app.Id, ct: ct, tableId: table.Id > 0 ? table.Id : null);
 
         return new CreateTableResult
         {

@@ -11,13 +11,16 @@ public class DuplicateFormRuleCommandHandler
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
     private readonly IFieldReferenceIndexer _refIndexer;
+    private readonly IFormRepository _formRepo;
 
     public DuplicateFormRuleCommandHandler(
         IFormRuleRepository ruleRepo,
         IQueryContext queryContext,
         IAuditRepository auditRepo,
+        IFormRepository formRepo,
         IFieldReferenceIndexer? refIndexer = null)
     {
+        _formRepo = formRepo;
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _ruleRepo = ruleRepo;
         _queryContext = queryContext;
@@ -35,7 +38,8 @@ public class DuplicateFormRuleCommandHandler
         var created = await _ruleRepo.GetByPublicIdAsync(newPublicId, ct);
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.Created, AuditEntityTypes.FormRule, created.Id.ToString(), ct: ct);
+            AuditActions.Created, AuditEntityTypes.FormRule, created.Id.ToString(), ct: ct,
+            tableId: await _formRepo.GetTableIdByFormIdAsync(source.FormId, ct));
         await _refIndexer.ReindexFormRuleAsync(newPublicId, ct);
 
         return CreateFormRuleCommandHandler.MapToDetail(created);

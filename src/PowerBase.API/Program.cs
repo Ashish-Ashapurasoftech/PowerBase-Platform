@@ -225,6 +225,13 @@ builder.Services.AddSingleton<PowerBase.Application.Pipelines.IPipelineApiReques
 builder.Services.AddDataProtection();
 builder.Services.AddScoped<PowerBase.API.Pipelines.RequestConnectionService>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.IRequestConnectionService>(services => services.GetRequiredService<PowerBase.API.Pipelines.RequestConnectionService>());
+// Microsoft Outlook accounts for the PowerFlows "Send an Email" step.
+builder.Services.AddHttpClient(PowerBase.API.Pipelines.OutlookConnectionService.HTTP_CLIENT_NAME, client => client.Timeout = TimeSpan.FromSeconds(30));
+builder.Services.AddHttpClient(PowerBase.Infrastructure.Services.OutlookGraphMailSender.HTTP_CLIENT_NAME, client => client.Timeout = TimeSpan.FromSeconds(100));
+builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IMicrosoftConnectionRepository, PowerBase.Infrastructure.Repositories.MicrosoftConnectionRepository>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Outlook.IOutlookGraphMailSender, PowerBase.Infrastructure.Services.OutlookGraphMailSender>();
+builder.Services.AddScoped<PowerBase.API.Pipelines.OutlookConnectionService>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Outlook.IOutlookConnectionService>(services => services.GetRequiredService<PowerBase.API.Pipelines.OutlookConnectionService>());
 var executionSection = builder.Configuration.GetSection("PipelineExecution");
 builder.Services.Configure<PowerBase.Application.Common.Configurations.PipelineExecutionOptions>(executionSection);
 
@@ -278,7 +285,9 @@ builder.Services.AddScoped<IQueryContext>(sp => sp.GetRequiredService<QueryConte
 builder.Services.AddScoped<IJwtService, JwtService>();
 builder.Services.AddScoped<IAppAccessService, AppAccessService>();
 builder.Services.AddScoped<IRolePermissionEnforcer, RolePermissionEnforcer>();
-builder.Services.AddScoped<IEmailService, EmailService>();
+builder.Services.AddScoped<EmailService>();
+builder.Services.AddScoped<PowerBase.Infrastructure.Services.OutlookInviteEmailService>();
+builder.Services.AddScoped<IEmailService, PowerBase.Infrastructure.Services.OutlookInviteEmailService>();
 builder.Services.AddScoped<IPasswordService, PasswordService>();
 builder.Services.AddScoped<ISchemaEngineService, SchemaEngineService>();
 // Field Type Conversion ("Change Type") module — PowerBase.Application/Fields/TypeConversion
@@ -579,6 +588,11 @@ builder.Services.AddScoped<PowerBase.Application.Apps.Queries.ListMyAppCopies.Li
 builder.Services.AddScoped<PowerBase.Application.Apps.Commands.DismissAppCopy.DismissAppCopyCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Import.Pbl.PblValidator>();
 builder.Services.AddScoped<PowerBase.Application.Import.FormulaTranslation.FormulaTranslator>();
+builder.Services.Configure<PowerBase.Application.Import.Quickbase.QuickbaseImportOptions>(
+    builder.Configuration.GetSection(PowerBase.Application.Import.Quickbase.QuickbaseImportOptions.SectionName));
+builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IQuickbaseCatalogRepository, PowerBase.Infrastructure.Repositories.QuickbaseCatalogRepository>();
+builder.Services.AddScoped<PowerBase.Application.Import.Quickbase.IQuickbaseTablesApi, PowerBase.Application.Import.Quickbase.QuickbaseTablesApi>();
+builder.Services.AddScoped<PowerBase.Application.Import.Quickbase.QuickbaseIdResolver>();
 builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportPreview.ImportPreviewQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblExtrasImporter>();
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblDeferredResolver>();
@@ -680,6 +694,8 @@ builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateRe
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateProxyField.UpdateProxyFieldCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateParentLink.UpdateParentLinkCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.AddFormSection.AddRelationshipFormSectionCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateLookupSource.UpdateLookupSourceCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetLookupSourceOptionsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.RelationshipFieldFactory>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.RelationshipKeyCarryOverService>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.IReferenceRelinkService, PowerBase.Application.Relationships.ReferenceRelinkService>();

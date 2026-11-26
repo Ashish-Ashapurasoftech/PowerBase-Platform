@@ -13,7 +13,7 @@ public class ImportConfigMapperTests
         Name = "  Nightly  ", SourceTableId = Guid.NewGuid(), ImportType = ImportTypes.Merge, MergeKeyFid = 6,
         Mappings = [new() { DestFid = 6, SourceFid = 6 }, new() { DestFid = 9, SourceFid = 9 }],
         ColumnRules = [new() { DestFid = 9, RequireField = true }, new() { DestFid = 7 }], // the second has nothing switched on
-        ConstraintPolicy = ImportConstraintPolicy.AbortIfAnyIssue
+        DuplicatePolicy = ImportDuplicatePolicy.ExcludeAll, ErrorPolicy = ImportErrorPolicy.AllOrNothing
     };
 
     [Fact]
@@ -26,7 +26,8 @@ public class ImportConfigMapperTests
         var loaded = ImportConfigMapper.ToConfig(entity, config.SourceTableId);
 
         loaded.Name.Should().Be("Nightly");
-        loaded.ConstraintPolicy.Should().Be(ImportConstraintPolicy.AbortIfAnyIssue);
+        loaded.DuplicatePolicy.Should().Be(ImportDuplicatePolicy.ExcludeAll);
+        loaded.ErrorPolicy.Should().Be(ImportErrorPolicy.AllOrNothing);
         loaded.ColumnRules.Should().ContainSingle().Which.Should().BeEquivalentTo(new ImportColumnRule { DestFid = 9, RequireField = true });
         loaded.Mappings.Should().HaveCount(2);
     }
@@ -51,7 +52,8 @@ public class ImportConfigMapperTests
         var loaded = ImportConfigMapper.ToConfig(old, Guid.NewGuid());
 
         loaded.ColumnRules.Should().BeEmpty();
-        loaded.ConstraintPolicy.Should().Be(ImportConstraintPolicy.ImportValid);
+        loaded.DuplicatePolicy.Should().Be(ImportDuplicatePolicy.KeepFirst);
+        loaded.ErrorPolicy.Should().Be(ImportErrorPolicy.ImportValid);
         loaded.Mappings.Should().ContainSingle();
     }
 
@@ -60,6 +62,53 @@ public class ImportConfigMapperTests
     {
         var entity = new ImportDefinition { FieldMappingJson = "[]", OptionsJson = "{\"constraintPolicy\":\"somethingRemoved\"}" };
 
-        ImportConfigMapper.ToConfig(entity, Guid.NewGuid()).ConstraintPolicy.Should().Be(ImportConstraintPolicy.ImportValid);
+        var loaded = ImportConfigMapper.ToConfig(entity, Guid.NewGuid());
+
+        loaded.DuplicatePolicy.Should().Be(ImportDuplicatePolicy.KeepFirst);
+        loaded.ErrorPolicy.Should().Be(ImportErrorPolicy.ImportValid);
+    }
+
+    [Theory]
+    [InlineData(ImportConstraintPolicy.ImportValid, ImportDuplicatePolicy.KeepFirst, ImportErrorPolicy.ImportValid)]
+    [InlineData(ImportConstraintPolicy.ExcludeDuplicateGroups, ImportDuplicatePolicy.ExcludeAll, ImportErrorPolicy.ImportValid)]
+    [InlineData(ImportConstraintPolicy.AbortIfAnyIssue, ImportDuplicatePolicy.KeepFirst, ImportErrorPolicy.AllOrNothing)]
+    public void A_definition_saved_with_the_old_combined_choice_reads_as_the_two_settings(string combined, string duplicate, string error)
+    {
+        var entity = new ImportDefinition { FieldMappingJson = "[]", OptionsJson = "{\"constraintPolicy\":\"" + combined + "\"}" };
+
+        var loaded = ImportConfigMapper.ToConfig(entity, Guid.NewGuid());
+
+        loaded.DuplicatePolicy.Should().Be(duplicate);
+        loaded.ErrorPolicy.Should().Be(error);
+    }
+
+    [Fact]
+    public void The_two_settings_are_stored_apart_and_the_old_combined_choice_is_never_written()
+    {
+        var entity = new ImportDefinition();
+        var config = new ImportDefinitionConfig { Name = "x", DuplicatePolicy = ImportDuplicatePolicy.ExcludeAll, ErrorPolicy = ImportErrorPolicy.AllOrNothing };
+
+        ImportConfigMapper.Apply(entity, config);
+
+        entity.OptionsJson.Should().Contain("\"duplicatePolicy\":\"excludeAll\"").And.Contain("\"errorPolicy\":\"allOrNothing\"").And.NotContain("constraintPolicy");
+        ImportJson.Serialize(config).Should().NotContain("constraintPolicy");
+    }
+
+    [Fact]
+    public void An_extra_table_keeps_its_own_settings_and_one_saved_without_them_has_none_of_its_own()
+    {
+        var entity = new ImportDefinition();
+        var config = new ImportDefinitionConfig
+        {
+            Name = "x",
+            AdditionalTargets = [new() { DestinationTableId = Guid.NewGuid(), ErrorPolicy = ImportErrorPolicy.AllOrNothing }, new() { DestinationTableId = Guid.NewGuid() }]
+        };
+
+        ImportConfigMapper.Apply(entity, config);
+        var loaded = ImportConfigMapper.ToConfig(entity, Guid.NewGuid());
+
+        loaded.AdditionalTargets[0].ErrorPolicy.Should().Be(ImportErrorPolicy.AllOrNothing);
+        loaded.AdditionalTargets[0].DuplicatePolicy.Should().BeNull();
+        loaded.AdditionalTargets[1].ErrorPolicy.Should().BeNull("a table without its own setting follows the import's");
     }
 }

@@ -33,6 +33,13 @@ public sealed class ImportMappingApp
     public bool Include { get; set; } = true;
     public string? NameOverride { get; set; }
     public List<string> ExcludedTableRefs { get; set; } = [];
+
+    /// <summary>Quickbase app id to store on the imported app (meta.App.QBAppID), as resolved by the wizard (catalog or typed).
+    /// Null = the meta.QuickbaseAppCatalog entry for the app's logical id is used.</summary>
+    public string? QbAppId { get; set; }
+
+    /// <summary>Table logical ref → Quickbase table id (meta.AppTable.QBTableID), as resolved in the wizard.</summary>
+    public Dictionary<string, string> QbTableIds { get; set; } = [];
 }
 
 /// <summary>The user's decisions for an import. Built by the wizard; also accepted as a JSON file

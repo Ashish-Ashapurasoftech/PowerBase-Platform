@@ -251,7 +251,10 @@ public class PblPermissionsApplier
 
                 var value = c.Value;
                 // Quickbase writes a checkbox test as '1'/'0'; PowerBase stores booleans as true/false.
-                if ((field.TypeCode is "Boolean" or "Formula_Bool") && value is "1" or "0")
+                // A Lookup (or Summary) of a checkbox holds a checkbox value too: its own type code is "Lookup", so go by the type
+                // of value it shows (settings resultTypeCode), otherwise "Program - Qualifies for QCI By Default = 1" stays "1" and the
+                // filter editor cannot show it as Checked.
+                if ((EffectiveTypeCode(field) is "Boolean" or "Formula_Bool") && value is "1" or "0")
                     value = value == "1" ? "true" : "false";
 
                 var condition = new FilterCondition { FieldId = fid, Operator = c.Operator, Value = value };
@@ -280,6 +283,22 @@ public class PblPermissionsApplier
         var result = Convert(pbl);
         problem = error;
         return error is null && RoleRecordFilterJson.CountConditions(result) > 0 ? result : null;
+    }
+
+    /// <summary>The type of value a field holds: its own type code, or for a Lookup / Summary the type of value it shows
+    /// (settings <c>resultTypeCode</c>, falling back to the looked-up field's <c>sourceTypeCode</c>).</summary>
+    internal static string EffectiveTypeCode(AppField field)
+    {
+        if (field.TypeCode is not ("Lookup" or "Summary") || string.IsNullOrWhiteSpace(field.Settings)) return field.TypeCode;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(field.Settings);
+            foreach (var key in new[] { "resultTypeCode", "sourceTypeCode" })
+                if (doc.RootElement.TryGetProperty(key, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrWhiteSpace(v.GetString()))
+                    return v.GetString()!;
+        }
+        catch (System.Text.Json.JsonException) { /* unreadable settings: keep the field's own type */ }
+        return field.TypeCode;
     }
 
     private static Dictionary<string, AppField> FieldIndex(IReadOnlyList<AppField> fields)

@@ -37,4 +37,11 @@ public class RunReportRequest
     /// exact AND/OR structure — this is NOT merged as a separate AND'd-on-top group, because a
     /// flat AND merge can't correctly represent an ask-condition that lives inside an OR group.</summary>
     public Dictionary<string, string>? AskAnswers { get; set; }
+
+    /// <summary>Summary reports only: page the groups (Page/PageSize) like a Table report instead of
+    /// returning every group at once. See RunReportQuery.PageSummary.</summary>
+    public bool PageSummary { get; set; }
+    /// <summary>With PageSummary: sort the groups by this Summary column Key before paging.</summary>
+    public string? SummarySortKey { get; set; }
+    public bool SummarySortDesc { get; set; }
 }

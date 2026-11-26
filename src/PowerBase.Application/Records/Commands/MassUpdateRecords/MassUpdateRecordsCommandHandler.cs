@@ -289,7 +289,7 @@ public class MassUpdateRecordsCommandHandler
 
             await _auditRepo.LogActivityAsync(
                 AuditActions.Updated, AuditEntityTypes.Record, table.PublicId.ToString(),
-                $"{affected} record(s) mass-updated in {table.Name}", appId: table.AppId, ct: ct);
+                $"{affected} record(s) mass-updated in {table.Name}", appId: table.AppId, ct: ct, tableId: table.Id);
 
             await _uow.CommitAsync(ct);
         }

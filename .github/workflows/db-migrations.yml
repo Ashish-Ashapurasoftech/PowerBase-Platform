@@ -62,11 +62,15 @@ jobs:
           ConnectionStrings__DefaultConnection: ${{ secrets.AZURE_SQL_CONNECTION_STRING }}
         run: |
           echo "### 🛡️ Control Database Migrations" >> $GITHUB_STEP_SUMMARY
+          set +e
           output=$(dotnet run --project src/PowerBase.Migrator/PowerBase.Migrator.csproj --no-build --configuration Release -- migrate control)
+          exit_code=$?
+          set -e
           echo "$output"
           echo '```text' >> $GITHUB_STEP_SUMMARY
-          echo "$output" | grep -E '(\[run\]|\[skip\]|Applied:|Mode|Server)' >> $GITHUB_STEP_SUMMARY || echo "$output" >> $GITHUB_STEP_SUMMARY
+          echo "$output" | grep -E '(\[run\]|\[skip\]|Applied:|Mode|Server|FAILED)' >> $GITHUB_STEP_SUMMARY || echo "$output" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
+          if [ $exit_code -ne 0 ]; then exit $exit_code; fi
 
       # 2. All Tenant Databases Migrations (database/migrations/tenant against all provisioned Powerbase_N)
       - name: Run All Tenant Migrations
@@ -75,11 +79,15 @@ jobs:
           ConnectionStrings__DefaultConnection: ${{ secrets.AZURE_SQL_CONNECTION_STRING }}
         run: |
           echo "### 🏢 All Tenant Migrations" >> $GITHUB_STEP_SUMMARY
+          set +e
           output=$(dotnet run --project src/PowerBase.Migrator/PowerBase.Migrator.csproj --no-build --configuration Release -- migrate tenants)
+          exit_code=$?
+          set -e
           echo "$output"
           echo '```text' >> $GITHUB_STEP_SUMMARY
-          echo "$output" | grep -E '(\[run\]|Tenant [0-9]|Applied:|Tenants processed)' >> $GITHUB_STEP_SUMMARY || echo "$output" >> $GITHUB_STEP_SUMMARY
+          echo "$output" | grep -E '(\[run\]|Tenant [0-9]|Applied:|Tenants processed|SKIPPED|FAILED)' >> $GITHUB_STEP_SUMMARY || echo "$output" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
+          if [ $exit_code -ne 0 ]; then exit $exit_code; fi
 
       # 3. Single Tenant Migration (if tenant_id is explicitly provided)
       - name: Run Single Tenant Migration
@@ -88,11 +96,15 @@ jobs:
           ConnectionStrings__DefaultConnection: ${{ secrets.AZURE_SQL_CONNECTION_STRING }}
         run: |
           echo "### 🏢 Single Tenant Migration (Tenant ${{ github.event.inputs.tenant_id }})" >> $GITHUB_STEP_SUMMARY
+          set +e
           output=$(dotnet run --project src/PowerBase.Migrator/PowerBase.Migrator.csproj --no-build --configuration Release -- migrate tenant --id ${{ github.event.inputs.tenant_id }})
+          exit_code=$?
+          set -e
           echo "$output"
           echo '```text' >> $GITHUB_STEP_SUMMARY
           echo "$output" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
+          if [ $exit_code -ne 0 ]; then exit $exit_code; fi
 
       # 4. Legacy Root Migrations (database/migrations against Powerbase)
       - name: Run Root Migrations

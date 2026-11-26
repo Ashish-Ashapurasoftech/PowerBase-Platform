@@ -10,6 +10,8 @@ public class AppFieldListItemDto
     public string? Label { get; set; }
     public string? Description { get; set; }
     public string TypeCode { get; set; } = string.Empty;
+    /// <summary>Reference, Lookup and Summary only: their settings' resultTypeCode (see RelationshipTypeLabel).</summary>
+    public string? ResultTypeCode { get; set; }
     public bool IsRequired { get; set; }
     public bool IsSearchable { get; set; }
     public bool IsSortable { get; set; }

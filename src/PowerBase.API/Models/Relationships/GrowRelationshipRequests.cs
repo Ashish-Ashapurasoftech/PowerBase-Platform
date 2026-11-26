@@ -60,6 +60,17 @@ public class UpdateParentLinkRequest
     public bool DisplayAsLinkToParent { get; set; }
 }
 
+/// <summary>Lookup field options: the Reference field (by its relationship) and the parent Value field a Lookup pulls.</summary>
+public class UpdateLookupSourceRequest
+{
+    /// <summary>PublicId of the relationship whose Reference field the lookup follows (one the table is the child of).</summary>
+    public Guid RelationshipId { get; set; }
+    /// <summary>Fid of the field on that relationship's parent table whose value is pulled down.</summary>
+    public int SourceFid { get; set; }
+    /// <summary>Reason recorded on the field's Version History. Optional.</summary>
+    public string? CommitMessage { get; set; }
+}
+
 /// <summary>Replace the dependent-dropdown conditions of a relationship's Reference field.</summary>
 public class UpdateReferenceFilterRequest
 {

@@ -75,7 +75,7 @@ public class UpdateReportVisibilityMatrixCommandHandler
             await _reportRepo.SetReportRolesAsync(report.Id, reportRolesToSave, ct);
 
             await _auditRepo.LogActivityAsync(
-                AuditActions.Updated, AuditEntityTypes.Report, report.Id.ToString(), $"Report visibility modified: {report.Name}", appId: app.Id, ct: ct);
+                AuditActions.Updated, AuditEntityTypes.Report, report.Id.ToString(), $"Report visibility modified: {report.Name}", appId: app.Id, ct: ct, tableId: report.AppTableId);
         }
     }
 }

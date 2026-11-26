@@ -48,6 +48,8 @@ public sealed class ImportRunProcessor(
         public ImportDetailsWriter Details { get; } = details;
         public List<ImportRunIssue> BufferedIssues { get; } = new();
         public long RowsRead, Inserted, Updated, Unchanged, Skipped, Errored, Cursor;
+        /// <summary>Of <see cref="Errored"/>, the rows with a problem "all or nothing" stops for (not a value repeated inside the source).</summary>
+        public long BlockingErrored;
         /// <summary>A user asked for the run to stop; the pass ended early.</summary>
         public bool Cancelled { get; set; }
         public long Imported => Inserted + Updated;
@@ -107,32 +109,37 @@ public sealed class ImportRunProcessor(
                 await EndAsync(run, snapshot, plan, ImportRunStatus.Cancelled, "Cancelled before anything was imported.", null, ct);
                 return;
             }
+            // The duplicate setting and the error setting are separate: each may add one extra pass over the source before the real one.
+            var excludeAll = plan.DuplicatePolicy == ImportDuplicatePolicy.ExcludeAll;
+            var allOrNothing = plan.ErrorPolicy == ImportErrorPolicy.AllOrNothing;
             Dictionary<int, HashSet<ulong>>? groups = null;
             var writeFrom = 0;
-            if (plan.ConstraintPolicy == ImportConstraintPolicy.ExcludeDuplicateGroups)
+            if (excludeAll)
             {
-                groups = await ScanDuplicateGroupsAsync(plan, run, maxId, 0, 45, ct);
+                var scanTo = allOrNothing ? 30 : 45;
+                groups = await ScanDuplicateGroupsAsync(plan, run, maxId, 0, scanTo, ct);
                 if (groups is null)
                 {
                     await EndAsync(run, snapshot, plan, ImportRunStatus.Cancelled, "Cancelled before anything was imported.", null, ct);
                     return;
                 }
-                writeFrom = 45;
+                writeFrom = scanTo;
             }
-            else if (plan.ConstraintPolicy == ImportConstraintPolicy.AbortIfAnyIssue)
+            if (allOrNothing)
             {
-                await using var check = await ExecutePassAsync(plan, run, maxId, gate, ImportPassMode.Validate, null, 0, 50, ct);
+                var checkTo = excludeAll ? 60 : 50;
+                await using var check = await ExecutePassAsync(plan, run, maxId, gate, ImportPassMode.Validate, groups, writeFrom, checkTo, ct);
                 if (check.Cancelled)
                 {
                     await EndAsync(run, snapshot, plan, ImportRunStatus.Cancelled, "Cancelled before anything was imported.", null, ct);
                     return;
                 }
-                if (check.Errored > 0)
+                if (check.BlockingErrored > 0)
                 {
                     await RejectRunAsync(plan, run, snapshot, check, ct);
                     return;
                 }
-                writeFrom = 50;
+                writeFrom = checkTo;
             }
 
             await using var final = await ExecutePassAsync(plan, run, maxId, gate, ImportPassMode.Write, groups, writeFrom, 100, ct);
@@ -222,6 +229,7 @@ public sealed class ImportRunProcessor(
                 result.Cursor = chunk.LastId;
                 result.RowsRead += chunk.Rows.Count; result.Inserted += outcome.Inserted; result.Updated += outcome.Updated;
                 result.Unchanged += outcome.Unchanged; result.Skipped += outcome.Skipped; result.Errored += outcome.Errored;
+                result.BlockingErrored += outcome.BlockingErrors;
                 await result.Details.AppendAsync(outcome.Feedback, outcome.Written, ct);
 
                 var progress = Progress(progressFrom, progressTo, result.Cursor, maxId);
@@ -259,7 +267,7 @@ public sealed class ImportRunProcessor(
     {
         await runs.AddIssuesAsync(run.Id, check.BufferedIssues, IssueCap, ct);
         await runs.AdvanceAsync(run.Id, new ImportChunkResult(check.Cursor, check.RowsRead, 0, 0, check.Skipped, check.Errored), 100, ct);
-        var detail = $"Nothing was imported. {check.Errored:N0} of {check.RowsRead:N0} rows have problems, and this import is set to stop when any row does. " +
+        var detail = $"Nothing was imported. {check.BlockingErrored:N0} of {check.RowsRead:N0} rows have problems, and this import is set to import nothing when any row does. " +
                      "The details file lists them.";
         var (path, note) = await SaveDetailsAsync(check.Details, run, ct);
         await EndAsync(run, snapshot, plan, ImportRunStatus.Failed, note is null ? detail : $"{detail} {note}", path, ct);

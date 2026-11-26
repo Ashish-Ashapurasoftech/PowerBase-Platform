@@ -265,7 +265,7 @@ public sealed class RecordWriteService : IRecordWriteService
             await _auditRepo.LogActivityAsync(
                 auditAction, AuditEntityTypes.Record, recordPublicId.ToString(),
                 entityTitle,
-                appId: table.AppId, ct: ct);
+                appId: table.AppId, ct: ct, tableId: table.Id, recordNumber: recordId);
         }
         else
         {
@@ -303,7 +303,7 @@ public sealed class RecordWriteService : IRecordWriteService
                 appId: table.AppId,
                 oldValues: JsonSerializer.Serialize(oldValuesDict),
                 newValues: JsonSerializer.Serialize(newValuesDict),
-                ct: ct);
+                ct: ct, tableId: table.Id, recordNumber: recordId);
         }
 
         // Invoke pipeline trigger interceptor if any genuine pipeline field changed, independent of IsAuditable

@@ -48,8 +48,21 @@ public class RelationshipQueriesHandler
         return dtos[0];
     }
 
+    /// <summary>Per parent table, the Ids of its live relationships (read once per call) — tells a Report Link another
+    /// relationship made from one that belongs to none.</summary>
+    private readonly Dictionary<long, HashSet<long>> _liveRelationshipIdsByParent = new();
+
+    private async Task<HashSet<long>> LiveRelationshipIdsOfParentAsync(long parentTableId, CancellationToken ct)
+    {
+        if (!_liveRelationshipIdsByParent.TryGetValue(parentTableId, out var ids))
+            _liveRelationshipIdsByParent[parentTableId] = ids =
+                (await _relRepo.ListByParentTableAsync(parentTableId, ct)).Where(r => !r.IsDeleted).Select(r => r.Id).ToHashSet();
+        return ids;
+    }
+
     private async Task<IReadOnlyList<RelationshipDto>> BuildAsync(IReadOnlyList<Relationship> rels, CancellationToken ct)
     {
+        _liveRelationshipIdsByParent.Clear();   // the handler may be reused: never trust an earlier call's list
         if (rels.Count == 0) return [];
 
         // Cache tables and their field lists across the batch.
@@ -73,7 +86,10 @@ public class RelationshipQueriesHandler
             var refField = childFields.FirstOrDefault(f => f.Id == rel.ReferenceFieldId);
             var fields = new List<RelationshipFieldDto>();
             if (refField is not null)
-                fields.Add(new(refField.PublicId, refField.Fid ?? 0, refField.Label ?? refField.Name, "reference", "Reference"));
+                fields.Add(new(refField.PublicId, refField.Fid ?? 0, refField.Label ?? refField.Name, "reference", "Reference")
+                {
+                    ResultTypeCode = FormulaTypeMap.ParseReferenceSettings(refField.Settings)?.ResultTypeCode,
+                });
 
             // Key field on parent: this relationship's own display-key override takes precedence,
             // then the parent table's global Set Key, then the default Record ID# — same precedence
@@ -101,6 +117,7 @@ public class RelationshipQueriesHandler
                 {
                     SourceFieldLabel = srcLabel is not null ? $"{parent.Name}: {srcLabel}" : null,
                     SourceFieldPublicId = srcField?.PublicId,
+                    ResultTypeCode = ls?.ResultTypeCode,
                 });
             }
 
@@ -116,6 +133,7 @@ public class RelationshipQueriesHandler
                 {
                     TargetFieldLabel = tLabel is not null ? $"{child.Name}: {tLabel}" : null,
                     TargetFieldPublicId = tField?.PublicId,
+                    ResultTypeCode = ss?.ResultTypeCode,
                 });
             }
 
@@ -128,7 +146,13 @@ public class RelationshipQueriesHandler
                 var rls = FormulaTypeMap.ParseReportLinkSettings(f.Settings);
                 if (rls is null) continue;
                 var linkedToRel = rls.RelationshipId == rel.Id;
-                var targetsChild = string.Equals(rls.TargetTablePublicId, childPublicIdStr, StringComparison.OrdinalIgnoreCase);
+                // Matching by target table is for links that belong to no relationship (made by hand, or before
+                // links were tied to one). A link another live relationship made is that relationship's: with two
+                // relationships between the same tables it would otherwise show under both.
+                var ownedByAnother = rls.RelationshipId is long ownerId && ownerId != rel.Id
+                    && (await LiveRelationshipIdsOfParentAsync(rel.ParentTableId, ct)).Contains(ownerId);
+                var targetsChild = !ownedByAnother
+                    && string.Equals(rls.TargetTablePublicId, childPublicIdStr, StringComparison.OrdinalIgnoreCase);
                 if (!linkedToRel && !targetsChild) continue;
 
                 // Source: null SourceFid → Record ID# on the parent table
@@ -185,6 +209,8 @@ public class RelationshipQueriesHandler
                 ParentTableName = parent.Name,
                 ChildTablePublicId = child.PublicId,
                 ChildTableName = child.Name,
+                ParentSingularLabel = string.IsNullOrWhiteSpace(parent.SingularLabel) ? parent.Name : parent.SingularLabel,
+                ChildSingularLabel = string.IsNullOrWhiteSpace(child.SingularLabel) ? child.Name : child.SingularLabel,
                 ReferenceFid = rel.ReferenceFid,
                 ReferenceFieldName = refField?.Name ?? string.Empty,
                 ProxyFid = proxyField?.Fid,

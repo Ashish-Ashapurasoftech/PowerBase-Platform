@@ -97,7 +97,8 @@ public class BulkCreateRecordsCommandHandlerTests
         await _uow.Received(1).CommitAsync(Arg.Any<CancellationToken>());
         await _tableRepo.Received(1).IncrementRecordCountByAsync(_table.Id, 3, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>());
         await _auditRepo.Received(1).LogActivitiesAsync(AuditActions.Created, AuditEntityTypes.Record,
-            Arg.Is<IReadOnlyCollection<string>>(ids => ids.Count == 3), Arg.Any<string?>(), _table.AppId, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>());
+            Arg.Is<IReadOnlyCollection<string>>(ids => ids.Count == 3), Arg.Any<string?>(), _table.AppId, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), _table.Id,
+            Arg.Is<IReadOnlyList<long>?>(n => n != null && n.Count == 3));
     }
 
     [Fact]

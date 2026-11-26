@@ -68,7 +68,7 @@ public class UpdateProxyFieldCommandHandler
                 : $"Proxy field set to '{proxy.Label ?? proxy.Name}' for relationship {child.Name} → {parent.Name}";
             await _auditRepo.LogActivityAsync(
                 AuditActions.SchemaChanged, AuditEntityTypes.AppField, rel.Id.ToString(),
-                message, appId: child.AppId, ct: ct);
+                message, appId: child.AppId, ct: ct, tableId: child.Id);
         }
 
         return await _queries.GetAsync(rel.PublicId, ct);

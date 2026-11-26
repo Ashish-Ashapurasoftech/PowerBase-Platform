@@ -135,6 +135,12 @@ async Task<int> RunAllTenantsAsync()
             var tenantCs = BuildTenantConnectionString(controlConnectionString, dbName);
             await MigrationRunner.RunAsync(tenantCs, tenantMigrationsPath, $"Tenant {id}");
         }
+        catch (SqlException ex) when (ex.Number == 4060 || ex.Message.Contains("Cannot open database", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"  [SKIPPED] Database '{dbName}' does not exist on server (error 4060). Skipping decommissioned tenant.");
+            Console.ResetColor();
+        }
         catch (Exception ex)
         {
             Console.ForegroundColor = ConsoleColor.Red;
@@ -311,7 +317,10 @@ async Task<List<(long Id, string DatabaseName)>> GetAllProvisionedTenantsAsync()
     const string sql = """
         SELECT Id, DatabaseName
         FROM meta.Tenant
-        WHERE ProvisioningState = 'Ready' AND DatabaseName IS NOT NULL
+        WHERE ProvisioningState = 'Ready' 
+          AND IsDeleted = 0 
+          AND Status <> 'Deleted'
+          AND DatabaseName IS NOT NULL
         ORDER BY Id
         """;
 

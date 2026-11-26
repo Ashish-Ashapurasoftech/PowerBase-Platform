@@ -50,7 +50,7 @@ public static class ImportTypeCompatibility
         var from = KindOf(source);
         return Allowed(from, KindOf(destination))
             ? null
-            : $"'{DisplayName(source)}' ({source.TypeCode}) cannot be imported into '{DisplayName(destination)}' ({destination.TypeCode}).";
+            : $"'{DisplayName(source)}' ({PowerBase.Application.Relationships.RelationshipTypeLabel.Of(source)}) cannot be imported into '{DisplayName(destination)}' ({PowerBase.Application.Relationships.RelationshipTypeLabel.Of(destination)}).";
     }
 
     /// <summary>Null when a formula's result may be written to the destination; otherwise the reason it cannot. Only the
@@ -120,7 +120,7 @@ public static class ImportTypeCompatibility
             error = $"'{text}' is not a date and time. Use the form 2026-03-09 14:30.";
             return false;
         }
-        error = $"A fixed value is not available for {destination.TypeCode} fields.";
+        error = $"A fixed value is not available for {PowerBase.Application.Relationships.RelationshipTypeLabel.Of(destination)} fields.";
         return false;
     }
 

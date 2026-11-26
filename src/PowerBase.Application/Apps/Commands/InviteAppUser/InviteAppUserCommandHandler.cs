@@ -249,6 +249,19 @@ public class InviteAppUserCommandHandler
             var setupLink = $"{baseUrl}/auth/accept-invite?token={rawToken}";
             await _emailService.SendInviteSetupEmailAsync(command.Email, tenantName, inviter.Name, setupLink, ct);
 
+            // 5. Add/update provisional app membership as Pending so it is visible in App Users and can be resent
+            await _appUserRepo.CreateAsync(new AppUser
+            {
+                AppId        = appId,
+                UserId       = user.Id,
+                UserPublicId = user.PublicId,
+                UserName     = user.Name,
+                UserEmail    = user.Email,
+                AppRoleId    = appRoleId,
+                Status       = "Pending",
+                AddedBy      = _queryContext.UserId,
+            }, ct: ct);
+
             await _auditRepo.LogActivityAsync(
                 AuditActions.InviteSent, AuditEntityTypes.TenantUser,
                 user.Id.ToString(), $"User invited (setup email) to app: {command.Email}", appId: appId, ct: ct);
