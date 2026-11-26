@@ -8,6 +8,10 @@ public sealed class RelationshipDto
     public string ParentTableName { get; init; } = string.Empty;
     public Guid ChildTablePublicId { get; init; }
     public string ChildTableName { get; init; } = string.Empty;
+    /// <summary>What one record of each table is called ("Department", "Employee"), for naming the relationship the
+    /// Quickbase way: "Department ⇉ Many Employee". Falls back to the table name when the table has no singular label.</summary>
+    public string ParentSingularLabel { get; init; } = string.Empty;
+    public string ChildSingularLabel { get; init; } = string.Empty;
     public int ReferenceFid { get; init; }
     public string ReferenceFieldName { get; init; } = string.Empty;
     /// <summary>Fid of the reference proxy (a lookup of this relationship or a formula field on the child table), or
@@ -31,15 +35,19 @@ public sealed class RelationshipDto
 public sealed record RelationshipFieldDto(Guid PublicId, int Fid, string Name, string Role, string TypeCode = "")
 {
     /// <summary>"TableName: FieldName" for the source field.
-    /// Lookup/proxy → the parent field being pulled down.
-    /// ReportLink → the field on this table whose value is matched (null = Record ID#).</summary>
+    /// Lookup/proxy â the parent field being pulled down.
+    /// ReportLink â the field on this table whose value is matched (null = Record ID#).</summary>
     public string? SourceFieldLabel { get; init; }
 
     /// <summary>"TableName: FieldName" for the target field.
-    /// ReportLink → the reference field in the child table.
-    /// Summary → the child field being aggregated (null for Count/Exists).</summary>
+    /// ReportLink â the reference field in the child table.
+    /// Summary â the child field being aggregated (null for Count/Exists).</summary>
     public string? TargetFieldLabel { get; init; }
 
     public Guid? SourceFieldPublicId { get; init; }
     public Guid? TargetFieldPublicId { get; init; }
+
+    /// <summary>Reference, lookup / proxy and summary only: the type the field is shown as (its settings' resultTypeCode —
+    /// "Currency" for a lookup of a Currency field), so the screen can name it "Currency (Lookup)". Null when not saved.</summary>
+    public string? ResultTypeCode { get; init; }
 }

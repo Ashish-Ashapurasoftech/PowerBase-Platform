@@ -851,7 +851,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                     }
                     started = System.Diagnostics.Stopwatch.GetTimestamp();
                     await services.GetRequiredService<IAuditRepository>().LogActivitiesAsync(AuditActions.Created, AuditEntityTypes.Record,
-                        created.Select(id => id.ToString()).ToList(), "Record created via PowerFlow Copy Records", destination.AppId, uow.Transaction, ct);
+                        created.Select(id => id.ToString()).ToList(), "Record created via PowerFlow Copy Records", destination.AppId, uow.Transaction, ct, tableId: destination.Id);
                     await tableRepo.IncrementRecordCountByAsync(destination.Id, created.Count, uow.Transaction, ct);
                     AddPhase("audit-count", started);
 
@@ -979,7 +979,8 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                             if (copyCreatedOnField != null) values[copyCreatedOnField.Fid!.Value] = DateTime.UtcNow;
                             if (copyCreatedByField != null) values[copyCreatedByField.Fid!.Value] = queryContext.UserId;
                             await services.GetRequiredService<IAuditRepository>().LogActivityAsync(AuditActions.Created, AuditEntityTypes.Record,
-                                publicId.ToString(), "Record created via PowerFlow Copy Records", appId: destination.AppId, ct: ct);
+                                publicId.ToString(), "Record created via PowerFlow Copy Records", appId: destination.AppId, ct: ct, tableId: destination.Id,
+                                recordNumber: identityField != null ? Convert.ToInt64(values[identityField.Fid!.Value]) : null);
                             await tableRepo.IncrementRecordCountAsync(destination.Id, ct);
                             if (await HasListenersAsync())
                                 await triggerInterceptor.InterceptAsync(destination, destinationFields, publicId, values, "record-added", ct);

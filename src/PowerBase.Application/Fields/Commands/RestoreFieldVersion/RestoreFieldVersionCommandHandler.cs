@@ -186,7 +186,7 @@ public class RestoreFieldVersionCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, existing.PublicId.ToString(),
-            $"Field '{label}' restored to version {command.VersionToRestore} In TableName : {table.Name}", appId: table.AppId, ct: ct);
+            $"Field '{label}' restored to version {command.VersionToRestore} In TableName : {table.Name}", appId: table.AppId, ct: ct, tableId: table.Id);
 
         // A restored version can change the formula/settings AND the label other formulas bind to.
         await _refIndexer.ReindexTableFieldsAsync(table.Id, ct);

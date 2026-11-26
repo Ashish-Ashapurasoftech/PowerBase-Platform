@@ -68,7 +68,7 @@ public class UpdateDefaultReportSettingsCommandHandler
         await _tableRepo.UpdateDefaultReportSettingsAsync(command.TablePublicId, json, ct);
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.Updated, AuditEntityTypes.AppTable, table.Id.ToString(), $"Default report settings modified for table: {table.Name}", appId: table.AppId, ct: ct);
+            AuditActions.Updated, AuditEntityTypes.AppTable, table.Id.ToString(), $"Default report settings modified for table: {table.Name}", appId: table.AppId, ct: ct, tableId: table.Id);
     }
 }
 

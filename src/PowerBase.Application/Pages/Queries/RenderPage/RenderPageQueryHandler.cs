@@ -213,7 +213,10 @@ public class RenderPageQueryHandler
             var result = await _runReportHandler.HandleAsync(new RunReportQuery(
                 widget.ReportPublicId, Page: 1, PageSize: widget.PageSize ?? 10,
                 RuntimeFilterTree: runtimeFilterTree,
-                QuickSearch: quickSearch), ct);
+                QuickSearch: quickSearch,
+                // A Summary widget gets just its page of groups (like a Table widget gets its page of records)
+                // instead of every group — thousands of groups froze the whole dashboard while it drew them.
+                PageSummary: report.ReportType == "Summary"), ct);
 
             ChartConfig? chart = null;
             if (report.ReportType == "Chart")

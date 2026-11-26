@@ -229,7 +229,7 @@ public class CreateReportCommandHandler
         }
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.Created, AuditEntityTypes.Report, publicId.ToString(), $"Report added: {command.Name}", appId: table.AppId, ct: ct);
+            AuditActions.Created, AuditEntityTypes.Report, publicId.ToString(), $"Report added: {command.Name}", appId: table.AppId, ct: ct, tableId: table.Id);
         await _refIndexer.ReindexReportAsync(publicId, ct);
 
         return new ReportDetailResult

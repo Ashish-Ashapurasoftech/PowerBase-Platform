@@ -27,6 +27,10 @@ public sealed record ImportChunkOutcome(
     IReadOnlyList<ImportWrittenRow>? Written = null)
 {
     public static readonly ImportChunkOutcome None = new(0, 0, 0, 0, []);
+
+    /// <summary>The rows rejected for any problem except repeating a value inside the source. Those are what "all or nothing" stops for: a repeated value is
+    /// already settled by the duplicate setting (keep the first, or leave all out), so it never stops an import.</summary>
+    public long BlockingErrors => Feedback.Count(f => f.Issue.Outcome == ImportOutcome.Errored && f.Issue.ReasonCode != ImportReason.DuplicateInRun);
 }
 
 /// <summary>A source row that was imported, as the details file lists it: what happened to it, the record it became or matched, and the

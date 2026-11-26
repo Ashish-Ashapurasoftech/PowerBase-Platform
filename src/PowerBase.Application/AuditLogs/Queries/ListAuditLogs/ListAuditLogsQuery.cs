@@ -9,4 +9,6 @@ public record ListAuditLogsQuery(
     string? EntityId,
     string? Action,
     int Page = 1,
-    int PageSize = 50);
+    int PageSize = 50,
+    Guid? TablePublicId = null,
+    long? RecordNumber = null);

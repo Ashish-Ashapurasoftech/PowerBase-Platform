@@ -99,16 +99,80 @@ public class ImportConstraintPolicyTests
         h.FeedbackCsv.Should().Contain("Required value missing");
     }
 
-    [Fact]
-    public async Task The_pre_check_sees_duplicates_that_are_a_whole_chunk_apart_because_nothing_has_been_written_yet()
+    // ---- The two settings are independent: a repeated value is the duplicate setting's business, never a reason to stop ----
+
+    private static ImportDefinitionConfig With(string duplicate, string error, params ImportColumnRule[] rules)
     {
-        var h = ImportHarness.Create(Copy(ImportConstraintPolicy.AbortIfAnyIssue), SharedNameAcrossChunks());
+        var config = Copy(ImportConstraintPolicy.ImportValid, rules);
+        config.DuplicatePolicy = duplicate;
+        config.ErrorPolicy = error;
+        return config;
+    }
+
+    [Fact]
+    public async Task A_repeated_value_does_not_stop_all_or_nothing_when_the_first_is_kept()
+    {
+        var h = ImportHarness.Create(With(ImportDuplicatePolicy.KeepFirst, ImportErrorPolicy.AllOrNothing), SharedNameAcrossChunks());
+
+        await h.RunAsync();
+
+        h.Store.Inserted.Count(r => Equals(r[6], "SHARED")).Should().Be(1);
+        h.Completion!.Value.Status.Should().Be(ImportRunStatus.Partial);
+        h.Issues.Should().ContainSingle().Which.Should().Match<PowerBase.Domain.Entities.ImportRunIssue>(i =>
+            i.SourceRowRef == 2400 && i.ReasonCode == ImportReason.DuplicateInRun);
+    }
+
+    [Fact]
+    public async Task A_repeated_value_does_not_stop_all_or_nothing_when_every_row_of_the_group_is_left_out()
+    {
+        var h = ImportHarness.Create(With(ImportDuplicatePolicy.ExcludeAll, ImportErrorPolicy.AllOrNothing), SharedNameAcrossChunks());
+
+        await h.RunAsync();
+
+        h.Store.Inserted.Should().HaveCount(ImportHarness.RowCount - 2).And.NotContain(r => Equals(r[6], "SHARED"));
+        h.Completion!.Value.Status.Should().Be(ImportRunStatus.Partial);
+        h.Issues.Select(i => i.SourceRowRef).Should().BeEquivalentTo(new long?[] { 10, 2400 });
+    }
+
+    [Theory]
+    [InlineData(ImportDuplicatePolicy.KeepFirst)]
+    [InlineData(ImportDuplicatePolicy.ExcludeAll)]
+    public async Task Any_other_problem_still_stops_all_or_nothing_whichever_way_duplicates_are_handled(string duplicate)
+    {
+        // A repeated name far apart AND a row with a missing required value: the missing value alone stops the import.
+        var h = ImportHarness.Create(With(duplicate, ImportErrorPolicy.AllOrNothing),
+            new HarnessOptions { Row = id => Row(id, name: id is 10 or 2400 ? "SHARED" : id == 5 ? "" : null) });
 
         await h.RunAsync();
 
         h.Store.Inserted.Should().BeEmpty();
         h.Completion!.Value.Status.Should().Be(ImportRunStatus.Failed);
-        h.Issues.Should().ContainSingle().Which.SourceRowRef.Should().Be(2400);
+        h.Completion!.Value.Detail.Should().Contain("Nothing was imported");
+    }
+
+    [Fact]
+    public async Task Importing_valid_rows_skips_a_bad_row_and_leaves_out_the_whole_duplicate_group()
+    {
+        var h = ImportHarness.Create(With(ImportDuplicatePolicy.ExcludeAll, ImportErrorPolicy.ImportValid),
+            new HarnessOptions { Row = id => Row(id, name: id is 10 or 2400 ? "SHARED" : id == 5 ? "" : null) });
+
+        await h.RunAsync();
+
+        h.Store.Inserted.Should().HaveCount(ImportHarness.RowCount - 3);
+        h.Issues.Select(i => i.SourceRowRef).Should().BeEquivalentTo(new long?[] { 5, 10, 2400 });
+    }
+
+    [Fact]
+    public async Task A_value_that_already_belongs_to_another_record_is_an_error_not_a_duplicate_so_all_or_nothing_stops_for_it()
+    {
+        var config = With(ImportDuplicatePolicy.KeepFirst, ImportErrorPolicy.AllOrNothing);
+        var h = ImportHarness.Create(config, new HarnessOptions { Row = id => Row(id) });
+        h.Store.Existing["n7"] = 777; // Name n7 is already in the table, on a record this copy does not update
+
+        await h.RunAsync();
+
+        h.Store.Inserted.Should().BeEmpty();
+        h.Completion!.Value.Status.Should().Be(ImportRunStatus.Failed);
     }
 
     [Fact]
@@ -152,13 +216,24 @@ public class ImportConstraintPolicyTests
     }
 
     [Fact]
-    public async Task An_unknown_policy_is_rejected()
+    public async Task An_unknown_duplicate_setting_is_rejected()
     {
-        var h = ImportHarness.Create(Copy("nonsense"));
+        var h = ImportHarness.Create(With("nonsense", ImportErrorPolicy.ImportValid));
 
         await h.RunAsync();
 
         h.Completion!.Value.Status.Should().Be(ImportRunStatus.Failed);
-        h.Completion!.Value.Detail.Should().Contain("unique rule");
+        h.Completion!.Value.Detail.Should().Contain("repeat a unique value");
+    }
+
+    [Fact]
+    public async Task An_unknown_error_setting_is_rejected()
+    {
+        var h = ImportHarness.Create(With(ImportDuplicatePolicy.KeepFirst, "nonsense"));
+
+        await h.RunAsync();
+
+        h.Completion!.Value.Status.Should().Be(ImportRunStatus.Failed);
+        h.Completion!.Value.Detail.Should().Contain("when rows have a problem");
     }
 }
