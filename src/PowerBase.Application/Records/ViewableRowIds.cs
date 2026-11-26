@@ -1,52 +1,75 @@
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
 using PowerBase.Application.Relationships;
+using PowerBase.Application.Reports;
 using PowerBase.Domain.Entities;
 
 namespace PowerBase.Application.Records;
 
 /// <summary>
-/// The row Ids of a table the current user may view under the role's View rules (Custom Rules and Own records),
-/// for endpoints that read values across many records without returning the records themselves — filter
-/// dropdowns (distinct values) and reference pickers (parent options). Conditions on physical fields run in SQL;
-/// conditions on Formula/Lookup/Summary fields have no column, so they are evaluated in memory, as in GetRecord.
+/// Which rows of a table a request may read under a role's View rules (Custom Rules and Own records), in the form the
+/// repository applies best. <see cref="Kind"/>:
+/// <list type="bullet">
+/// <item><c>All</c> — no restriction.</item>
+/// <item><c>None</c> — the role sees no row.</item>
+/// <item><c>Sql</c> — the rule runs in SQL: <see cref="Filter"/> (resolved against <see cref="Fields"/>, which hold the stand-ins of
+/// Ready stored columns) plus <see cref="RestrictToCreatedBy"/>. Covers every row of any table, with no id list.</item>
+/// <item><c>Ids</c> — the rule needed calculated values worked out in memory; <see cref="Ids"/> is the complete list.</item>
+/// </list>
+/// </summary>
+public sealed record ViewRowScope(
+    ViewRowScopeKind Kind,
+    FilterGroup? Filter = null,
+    IReadOnlyList<AppField>? Fields = null,
+    long? RestrictToCreatedBy = null,
+    IReadOnlyCollection<long>? Ids = null)
+{
+    public static readonly ViewRowScope All = new(ViewRowScopeKind.All);
+    public static readonly ViewRowScope None = new(ViewRowScopeKind.None);
+}
+
+public enum ViewRowScopeKind { All, None, Sql, Ids }
+
+/// <summary>
+/// The rows of a table the current user may view under the role's View rules, for endpoints that read values across many
+/// records without returning the records themselves — filter dropdowns (distinct values) and reference pickers (parent options).
+/// Conditions on physical fields and on Ready stored calculated fields (c_{fid}) run in SQL; conditions on any other Formula /
+/// Lookup / Summary field have no column, so they are evaluated in memory over at most <see cref="InMemoryReadLimit.Rows"/>
+/// rows — past that the request is refused (<see cref="Domain.Exceptions.ResultTooLargeException"/>), never answered from
+/// the first rows only.
 /// </summary>
 public static class ViewableRowIds
 {
-    /// <summary>Null when the user may view every row (no restriction to apply).</summary>
-    public static async Task<IReadOnlyCollection<long>?> ResolveAsync(
+    /// <summary>The scope for <paramref name="access"/>: SQL whenever the rule can run there, a complete id list otherwise.</summary>
+    public static async Task<ViewRowScope> ResolveScopeAsync(
         TableAccessContext access, AppTable table, IReadOnlyList<AppField> fields,
         IRecordRepository recordRepo, IRelationalProjector relationalProjector, IFormulaProjector formulaProjector,
         CancellationToken ct = default, IReadOnlySet<long>? readyFieldIds = null)
     {
-        if (access.Unrestricted) return null;
-        if (!access.CanView) return [];
-        if (access.ViewFilter is null && access.RestrictToCreatedBy is null) return null;
+        if (access.Unrestricted) return ViewRowScope.All;
+        if (!access.CanView) return ViewRowScope.None;
+        if (access.ViewFilter is null && access.RestrictToCreatedBy is null) return ViewRowScope.All;
 
         var formulaFids = fields
             .Where(f => f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings))
             .Select(f => (long)f.Fid!.Value)
             .ToHashSet();
 
-        // A Ready stored field (c_{fid}) is a column now: when every computed condition is on one, the whole rule runs in SQL through
-        // the stand-ins, as in reports. Otherwise the rule keeps today's split (the in-memory path reads the original fields).
+        // Only physical conditions: the rule is SQL as it is.
+        if (!FormulaFilterSorter.TreeContainsFormulaField(access.ViewFilter, formulaFids))
+            return new ViewRowScope(ViewRowScopeKind.Sql, access.ViewFilter, fields, access.RestrictToCreatedBy);
+
+        // A Ready stored field (c_{fid}) is a column now: when every calculated condition is on one, the whole rule runs in SQL
+        // through the stand-ins, as in reports.
         if (readyFieldIds is { Count: > 0 })
         {
             var notStored = formulaFids.Except(Compute.MaterializedReadFields.ReadyFids(fields, readyFieldIds)).ToHashSet();
-            if (notStored.Count < formulaFids.Count && !FormulaFilterSorter.TreeContainsFormulaField(access.ViewFilter, notStored))
-                return await recordRepo.ListMatchingRowIdsAsync(
-                    table, Compute.MaterializedReadFields.Substitute(fields, readyFieldIds), access.ViewFilter,
-                    restrictToCreatedBy: access.RestrictToCreatedBy, maxRows: 10000, timeoutSeconds: 30, ct: ct);
+            if (!FormulaFilterSorter.TreeContainsFormulaField(access.ViewFilter, notStored))
+                return new ViewRowScope(ViewRowScopeKind.Sql, access.ViewFilter,
+                    Compute.MaterializedReadFields.Substitute(fields, readyFieldIds), access.RestrictToCreatedBy);
         }
-        var (physical, formula) = FormulaFilterSorter.SplitFilterTree(access.ViewFilter, formulaFids);
 
-        // Fast bounded path: if the filter contains only physical fields (or no filter), query only row IDs directly
-        // with a 30-second timeout. Avoids loading 50,000 full entities and decrypting unused columns into memory.
-        if (formula is null)
-        {
-            return await recordRepo.ListMatchingRowIdsAsync(
-                table, fields, physical, restrictToCreatedBy: access.RestrictToCreatedBy, maxRows: 10000, timeoutSeconds: 30, ct: ct);
-        }
+        var (physical, formula) = FormulaFilterSorter.SplitFilterTree(access.ViewFilter, formulaFids);
 
         // Formula conditions require in-memory evaluation: select only fields needed by formula/physical filter.
         var neededFids = new HashSet<long>();
@@ -54,25 +77,50 @@ public static class ViewableRowIds
         var minimalFields = fields.Where(f => f.Fid.HasValue && (neededFids.Contains(f.Fid.Value) || f.IsSystem)).ToList();
         if (minimalFields.Count == 0) minimalFields = fields.ToList();
 
-        var rows = await recordRepo.ListAllMatchingAsync(
-            table, minimalFields, physical, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
-        if (rows.Count > 0)
+        // Every row, in Id batches: one batch in memory at a time, only the ids of the rows that pass are kept. No row limit.
+        var ids = new List<long>();
+        await foreach (var matches in MatchStream.MatchesAsync(recordRepo, relationalProjector, formulaProjector, table, minimalFields,
+                           minimalFields, minimalFields, minimalFields, physical, formula, access.RestrictToCreatedBy, ct))
         {
-            var relational = await relationalProjector.ProjectAsync(table, minimalFields, rows, ct);
-            var computed = formulaProjector.Project(minimalFields, rows, relational, table);
-            rows = FormulaFilterSorter.ApplyFormulaFilters(rows.Zip(computed, (r, c) => (r, c)), formula, minimalFields)
-                .Select(p => p.Row)
-                .ToList();
+            foreach (var (row, _) in matches)
+                if (row.TryGetValue("Id", out var id) && id is not null) ids.Add(Convert.ToInt64(id));
         }
-
-        return rows
-            .Select(r => r.TryGetValue("Id", out var id) && id is not null ? Convert.ToInt64(id) : (long?)null)
-            .Where(id => id.HasValue)
-            .Select(id => id!.Value)
-            .ToList();
+        return ids.Count == 0 ? ViewRowScope.None : new ViewRowScope(ViewRowScopeKind.Ids, Ids: ids);
     }
 
-    private static void CollectReferencedFids(PowerBase.Application.Reports.FilterGroup? group, HashSet<long> fids)
+    /// <summary>
+    /// The scope as a complete id list, for callers that need ids. Null when the user may view every row. A SQL scope's ids are
+    /// read in keyset batches — every one, no limit (an id is 8 bytes; a million viewable rows is ~8 MB). Prefer
+    /// <see cref="ResolveScopeAsync"/> and hand the SQL scope to the repository: then no id list is built at all.
+    /// </summary>
+    public static async Task<IReadOnlyCollection<long>?> ResolveAsync(
+        TableAccessContext access, AppTable table, IReadOnlyList<AppField> fields,
+        IRecordRepository recordRepo, IRelationalProjector relationalProjector, IFormulaProjector formulaProjector,
+        CancellationToken ct = default, IReadOnlySet<long>? readyFieldIds = null)
+    {
+        var scope = await ResolveScopeAsync(access, table, fields, recordRepo, relationalProjector, formulaProjector, ct, readyFieldIds);
+        switch (scope.Kind)
+        {
+            case ViewRowScopeKind.All: return null;
+            case ViewRowScopeKind.None: return [];
+            case ViewRowScopeKind.Ids: return scope.Ids!;
+        }
+
+        var ids = new List<long>();
+        long afterId = 0;
+        while (true)
+        {
+            var batch = await recordRepo.ListIdsAfterIdAsync(table, scope.Fields!, afterId, MatchStream.BatchSize * 10,
+                scope.Filter, scope.RestrictToCreatedBy, ct);
+            if (batch.Count == 0) break;
+            ids.AddRange(batch.Select(b => b.Id));
+            afterId = batch[^1].Id;
+            if (batch.Count < MatchStream.BatchSize * 10) break;
+        }
+        return ids;
+    }
+
+    private static void CollectReferencedFids(FilterGroup? group, HashSet<long> fids)
     {
         if (group?.Nodes == null) return;
         foreach (var node in group.Nodes)

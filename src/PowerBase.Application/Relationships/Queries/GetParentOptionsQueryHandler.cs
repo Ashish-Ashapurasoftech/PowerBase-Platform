@@ -35,6 +35,11 @@ public class GetParentOptionsQueryHandler
     private async Task<IReadOnlySet<long>?> ReadyFieldIdsAsync(CancellationToken ct) =>
         _materialized is null ? null : await _materialized.ReadyFieldIdsAsync(ct);
 
+    /// <summary>The parent fields the role and report filters are resolved against in SQL: Ready stored Formula / Lookup / Summary
+    /// fields as their c_{fid} stand-ins (a filter on them is then SQL), the fields themselves otherwise. Null = the default.</summary>
+    private async Task<IReadOnlyList<AppField>?> FilterFieldsAsync(IReadOnlyList<AppField> parentFields, CancellationToken ct) =>
+        await ReadyFieldIdsAsync(ct) is { Count: > 0 } ready ? Compute.MaterializedReadFields.Substitute(parentFields, ready) : null;
+
     public GetParentOptionsQueryHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
@@ -70,8 +75,10 @@ public class GetParentOptionsQueryHandler
         IReadOnlyDictionary<int, string?>? filterValues = null,
         string? selectedRecordId = null,
         Guid? elementId = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        int skip = 0)
     {
+        skip = Math.Max(0, skip);
         var rel = await _relRepo.GetByPublicIdAsync(relationshipPublicId, ct)
             ?? throw new NotFoundException("Relationship", relationshipPublicId);
 
@@ -146,10 +153,22 @@ public class GetParentOptionsQueryHandler
                 }
                 else
                 {
-                    // Fall back to ViewableRowIds for formula rules
-                    onlyRowIds = await Records.ViewableRowIds.ResolveAsync(
+                    // A rule on calculated fields: SQL through the stored columns when they are Ready (every parent row, any table
+                    // size), else a complete id list worked out in memory, or a refusal — never the first rows only.
+                    var scope = await Records.ViewableRowIds.ResolveScopeAsync(
                         access, parent, parentFields, _recordRepo, _relationalProjector, _formulaProjector, ct, await ReadyFieldIdsAsync(ct));
-                    if (onlyRowIds is { Count: 0 }) return new GetParentOptionsResult(headers, []);
+                    switch (scope.Kind)
+                    {
+                        case Records.ViewRowScopeKind.None:
+                            return new GetParentOptionsResult(headers, []);
+                        case Records.ViewRowScopeKind.Sql:
+                            roleFilter = scope.Filter;
+                            restrictToCreatedBy = scope.RestrictToCreatedBy;
+                            break;
+                        case Records.ViewRowScopeKind.Ids:
+                            onlyRowIds = scope.Ids;
+                            break;
+                    }
                 }
             }
         }
@@ -166,36 +185,50 @@ public class GetParentOptionsQueryHandler
         var hasComputed = labelFields.Any(IsComputedLabel) || (primaryLabelField is not null && IsComputedLabel(primaryLabelField));
         IReadOnlyList<ReferenceOption> options;
 
-        if (!hasComputed)
+        // Paged: one page of effectiveTake options from position skip, read as effectiveTake + 1 so the client knows whether
+        // scrolling can load more (hasMore). The search runs in the database (the repository also handles encrypted labels).
+        var filterFields = await FilterFieldsAsync(parentFields, ct);
+        var hasMore = false;
+        if (!hasComputed || string.IsNullOrWhiteSpace(search))
         {
             options = await _recordRepo.SearchForReferenceAsync(
-                parent, labelFields, search, effectiveTake, primaryLabelField, ct, filters, onlyRowIds,
+                parent, labelFields, hasComputed ? null : search, effectiveTake + 1, primaryLabelField, ct, filters, onlyRowIds,
                 roleFilter: roleFilter, restrictToCreatedBy: restrictToCreatedBy, timeoutSeconds: 30, allParentFields: parentFields,
-                extraFilter: plan?.Filter, orderBy: plan?.Sort, keyField: displayKey);
+                extraFilter: plan?.Filter, orderBy: plan?.Sort, keyField: displayKey, filterFields: filterFields, skip: skip);
+            hasMore = options.Count > effectiveTake;
+            if (hasMore) options = options.Take(effectiveTake).ToList();
+            // A computed label (Formula/Lookup/Summary) is worked out for the page's rows after the SQL read.
+            if (hasComputed) await FillComputedLabelsAsync(parent, parentFields, labelFields, primaryLabelField, options, ct);
         }
         else
         {
-            // A computed label (Formula/Lookup/Summary) has no SQL column, so it can't be searched in
-            // SQL: fetch the (capped) page unfiltered, compute the labels, then filter in memory.
-            var hasSearch = !string.IsNullOrWhiteSpace(search);
-            options = await _recordRepo.SearchForReferenceAsync(
-                parent, labelFields, null, hasSearch ? 200 : effectiveTake, primaryLabelField, ct, filters, onlyRowIds,
-                roleFilter: roleFilter, restrictToCreatedBy: restrictToCreatedBy, timeoutSeconds: 30, allParentFields: parentFields,
-                extraFilter: plan?.Filter, orderBy: plan?.Sort, keyField: displayKey);
-            await FillComputedLabelsAsync(parent, parentFields, labelFields, primaryLabelField, options, ct);
-
-            if (hasSearch)
+            // Searching a computed label: it has no SQL column, so the parent rows are read in batches, their labels worked
+            // out and the matches collected until the page is full. Every row is looked at if needed (before: only the first
+            // 200 rows were searched), and only one batch is in memory at a time.
+            const int batch = 200;
+            var matches = new List<ReferenceOption>();
+            var toSkip = skip;
+            for (var offset = 0; ; offset += batch)
             {
-                options = options
-                    .Where(o => new[] { o.Value1, o.Value2, o.Value3 }
-                        .Any(v => v is not null && v.Contains(search!, StringComparison.OrdinalIgnoreCase)))
-                    .Take(effectiveTake)
-                    .ToList();
+                var rows = await _recordRepo.SearchForReferenceAsync(
+                    parent, labelFields, null, batch, primaryLabelField, ct, filters, onlyRowIds,
+                    roleFilter: roleFilter, restrictToCreatedBy: restrictToCreatedBy, timeoutSeconds: 30, allParentFields: parentFields,
+                    extraFilter: plan?.Filter, orderBy: plan?.Sort, keyField: displayKey, filterFields: filterFields, skip: offset);
+                await FillComputedLabelsAsync(parent, parentFields, labelFields, primaryLabelField, rows, ct);
+                foreach (var o in rows.Where(o => new[] { o.Value1, o.Value2, o.Value3, o.Label }
+                             .Any(v => v is not null && v.Contains(search!, StringComparison.OrdinalIgnoreCase))))
+                {
+                    if (toSkip > 0) { toSkip--; continue; }
+                    matches.Add(o);
+                }
+                if (matches.Count > effectiveTake || rows.Count < batch) break;
             }
+            hasMore = matches.Count > effectiveTake;
+            options = matches.Take(effectiveTake).ToList();
         }
 
-        // If a previously selected record is outside the current page, resolve it securely:
-        if (!string.IsNullOrWhiteSpace(selectedRecordId) && !options.Any(o => string.Equals(o.Id, selectedRecordId, StringComparison.OrdinalIgnoreCase)))
+        // If a previously selected record is outside the current page, resolve it securely (first page only):
+        if (skip == 0 && !string.IsNullOrWhiteSpace(selectedRecordId) && !options.Any(o => string.Equals(o.Id, selectedRecordId, StringComparison.OrdinalIgnoreCase)))
         {
             var selectedOption = await ResolveSelectedRecordOptionAsync(
                 parent, parentFields, labelFields, primaryLabelField, selectedRecordId, filters, roleRowIds, roleFilter, restrictToCreatedBy, displayKey, ct);
@@ -205,7 +238,7 @@ public class GetParentOptionsQueryHandler
             }
         }
 
-        return new GetParentOptionsResult(headers, options);
+        return new GetParentOptionsResult(headers, options, hasMore);
     }
 
     /// <summary>The columns, filter and sort a form element's record picker choice stands for.</summary>
@@ -319,8 +352,12 @@ public class GetParentOptionsQueryHandler
                     ViewFilter = tree,
                     VisibleFields = parentFields,
                 };
-                filterRowIds = await Records.ViewableRowIds.ResolveAsync(
+                var scope = await Records.ViewableRowIds.ResolveScopeAsync(
                     byTree, parent, parentFields, _recordRepo, _relationalProjector, _formulaProjector, ct, await ReadyFieldIdsAsync(ct));
+                // Through Ready stored columns the report's filter is SQL (resolved against the stand-ins, see FilterFieldsAsync);
+                // otherwise the complete id list of the rows passing it — an empty list when none does.
+                if (scope.Kind == Records.ViewRowScopeKind.Sql) filter = scope.Filter;
+                else filterRowIds = scope.Kind == Records.ViewRowScopeKind.Ids ? scope.Ids : [];
             }
         }
 
@@ -361,7 +398,7 @@ public class GetParentOptionsQueryHandler
         var results = await _recordRepo.SearchForReferenceAsync(
             parent, labelFields, null, 1, primaryLabelField, ct, selectedClause, onlyRowIds,
             roleFilter: roleFilter, restrictToCreatedBy: restrictToCreatedBy, timeoutSeconds: 30, allParentFields: parentFields,
-            keyField: keyField);
+            keyField: keyField, filterFields: await FilterFieldsAsync(parentFields, ct));
 
         var opt = results.FirstOrDefault(o => string.Equals(o.Id, selectedRecordId, StringComparison.OrdinalIgnoreCase));
         if (opt != null && (labelFields.Any(IsComputedLabel) || (primaryLabelField != null && IsComputedLabel(primaryLabelField))))

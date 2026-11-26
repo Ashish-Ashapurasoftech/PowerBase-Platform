@@ -545,7 +545,8 @@ public class ReportsController : ControllerBase
             request.GroupByFieldId,
             request.GroupByDesc,
             request.ClearGrouping,
-            request.AskAnswers), ct);
+            request.AskAnswers,
+            request.SkipCount), ct);
         return Ok(new ApiResponse<ReportRunResponse>(ToRunResponse(result)));
     }
 

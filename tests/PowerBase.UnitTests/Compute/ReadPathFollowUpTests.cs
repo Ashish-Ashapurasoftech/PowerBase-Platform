@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -66,9 +67,9 @@ public class ReadPathFollowUpTests
     private static (IRecordRepository Repo, IRelationalProjector Rel, IFormulaProjector Formula) Mocks()
     {
         var repo = Substitute.For<IRecordRepository>();
-        repo.ListMatchingRowIdsAsync(default!, default!, default, default, default, default, default)
-            .ReturnsForAnyArgs(Task.FromResult<IReadOnlyList<long>>(new List<long> { 1, 2 }));
-        repo.ListAllMatchingAsync(default!, default!, default, default, default, default, default)
+        repo.ListIdsAfterIdAsync(default!, default!, default, default, default, default, default)
+            .ReturnsForAnyArgs(Task.FromResult<IReadOnlyList<(long Id, Guid PublicId)>>(new List<(long, Guid)> { (1, Guid.NewGuid()), (2, Guid.NewGuid()) }));
+        repo.ListBatchAfterIdAsync(default!, default!, default, default, default, default, default, default)
             .ReturnsForAnyArgs(Task.FromResult<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(new List<IReadOnlyDictionary<string, object?>>()));
         return (repo, Substitute.For<IRelationalProjector>(), Substitute.For<IFormulaProjector>());
     }
@@ -85,10 +86,10 @@ public class ReadPathFollowUpTests
             CancellationToken.None, new HashSet<long> { total.Id });
 
         ids.Should().BeEquivalentTo(new[] { 1L, 2L });
-        await repo.Received(1).ListMatchingRowIdsAsync(Arg.Any<AppTable>(),
+        await repo.Received(1).ListIdsAfterIdAsync(Arg.Any<AppTable>(),
             Arg.Is<IReadOnlyList<AppField>>(f => f.Any(x => x.PhysicalColumnName == "c_8")),
-            access.ViewFilter, Arg.Any<long?>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>());
-        await repo.DidNotReceiveWithAnyArgs().ListAllMatchingAsync(default!, default!, default, default, default, default, default);
+            Arg.Any<long>(), Arg.Any<int>(), access.ViewFilter, Arg.Any<long?>(), Arg.Any<CancellationToken>());
+        await repo.DidNotReceiveWithAnyArgs().ListBatchAfterIdAsync(default!, default!, default, default, default, default, default, default);
     }
 
     [Fact]
@@ -102,7 +103,7 @@ public class ReadPathFollowUpTests
         await ViewableRowIds.ResolveAsync(access, new AppTable { Id = Dept }, fields, repo, rel, formula,
             CancellationToken.None, new HashSet<long>());
 
-        await repo.DidNotReceiveWithAnyArgs().ListMatchingRowIdsAsync(default!, default!, default, default, default, default, default);
-        await repo.ReceivedWithAnyArgs(1).ListAllMatchingAsync(default!, default!, default, default, default, default, default);
+        await repo.DidNotReceiveWithAnyArgs().ListIdsAfterIdAsync(default!, default!, default, default, default, default, default);
+        await repo.ReceivedWithAnyArgs(1).ListBatchAfterIdAsync(default!, default!, default, default, default, default, default, default);
     }
 }

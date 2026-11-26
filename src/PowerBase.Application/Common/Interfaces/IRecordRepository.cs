@@ -64,7 +64,9 @@ public interface IRecordRepository
         IReadOnlyList<AppField>? allParentFields = null,
         FilterGroup? extraFilter = null,
         IReadOnlyList<SortSpec>? orderBy = null,
-        AppField? keyField = null);
+        AppField? keyField = null,
+        IReadOnlyList<AppField>? filterFields = null,
+        int skip = 0);
 
     /// <summary>Fast lookup of matching row Ids only (1 column, bounded, with timeout) for security filtering.</summary>
     Task<IReadOnlyList<long>> ListMatchingRowIdsAsync(
@@ -207,11 +209,13 @@ public interface IRecordRepository
     /// ordered by Id (keyset paging), decrypted, with no command timeout. Call repeatedly with the last Id
     /// returned until a batch comes back short or empty to stream every matching record without holding them
     /// all in memory — a summary over computed (Formula) fields accumulates its groups batch by batch.</summary>
+    /// <param name="sqlLookupFids">As for <see cref="ListAsync"/>: conditions on these Lookups compare the parent column in SQL.</param>
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListBatchAfterIdAsync(
         AppTable table, IReadOnlyList<AppField> fields, long afterId, int batchSize,
         FilterGroup? filterTree = null,
         long? restrictToCreatedBy = null,
-        CancellationToken ct = default);
+        CancellationToken ct = default,
+        IReadOnlySet<long>? sqlLookupFids = null);
 
     /// <summary>Like <see cref="ListBatchAfterIdAsync"/> but returns only (Id, PublicId) — no field columns, no
     /// decryption — so a background delete can walk millions of matching records cheaply. The filter must be
@@ -367,11 +371,15 @@ public interface IRecordRepository
         CancellationToken ct = default);
 
     /// <param name="onlyRowIds">When given, only these rows are read (the rows the user's role may view).</param>
+    /// <param name="scopeFilter">When given, only rows matching this filter are read (a role's View rule run in SQL — no id
+    /// list, so no limit on the table size), resolved against <paramref name="scopeFields"/> (stand-ins of Ready stored
+    /// columns included). <paramref name="scopeRestrictToCreatedBy"/>: only that owner's rows.</param>
     /// <param name="dropUndecryptable">For an encrypted field, leave out a value that cannot be decrypted instead of
     /// returning it as stored (ciphertext).</param>
     Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(
         AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default,
-        IReadOnlyCollection<long>? onlyRowIds = null, bool dropUndecryptable = false);
+        IReadOnlyCollection<long>? onlyRowIds = null, bool dropUndecryptable = false,
+        FilterGroup? scopeFilter = null, IReadOnlyList<AppField>? scopeFields = null, long? scopeRestrictToCreatedBy = null);
 
     Task<int> SanitizeTableEncryptedDataAsync(AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct = default);
 }

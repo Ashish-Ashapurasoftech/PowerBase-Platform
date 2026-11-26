@@ -28,4 +28,7 @@ public record RunReportQuery(
     /// persisted — keyed by tree-path (see RunReportRequest.AskAnswers), substituted directly
     /// into the saved FilterTree in place before it's resolved, preserving its exact AND/OR
     /// structure.</summary>
-    IReadOnlyDictionary<string, string>? AskAnswers = null);
+    IReadOnlyDictionary<string, string>? AskAnswers = null,
+    /// <summary>The caller already has the match count for this exact question (only the page changed): skip the COUNT query and
+    /// answer TotalCount = -1 (keep yours). Ignored when the report shows totals (they need the count).</summary>
+    bool SkipCount = false);

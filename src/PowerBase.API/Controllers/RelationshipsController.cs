@@ -290,12 +290,13 @@ public class RelationshipsController : ControllerBase
     [ProducesResponseType(typeof(ApiResponse<ParentOptionsResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> ParentOptions(
         Guid tableId, Guid relId, [FromQuery] string? search, [FromQuery] int take,
-        [FromQuery] string? filterValues, [FromQuery] string? selectedRecordId, [FromQuery] Guid? elementId, CancellationToken ct)
+        [FromQuery] string? filterValues, [FromQuery] string? selectedRecordId, [FromQuery] Guid? elementId,
+        CancellationToken ct, [FromQuery] int skip = 0)
     {
         if (!TryParseFilterValues(filterValues, out var values))
             return InvalidFilterValues();
-        var result = await _parentOptions.HandleAsync(relId, search, take, values, selectedRecordId, elementId, ct);
-        return Ok(new ApiResponse<ParentOptionsResponse>(new ParentOptionsResponse(result.Headers, result.Options)));
+        var result = await _parentOptions.HandleAsync(relId, search, take, values, selectedRecordId, elementId, ct, skip);
+        return Ok(new ApiResponse<ParentOptionsResponse>(new ParentOptionsResponse(result.Headers, result.Options, result.HasMore)));
     }
 
     /// <summary>Whether one parent record passes the Reference field's dropdown filter (i.e. the picker

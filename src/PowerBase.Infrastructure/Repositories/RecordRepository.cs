@@ -463,10 +463,11 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         // Same ORDER BY rules as ListAsync: computed fields have no column and are skipped; Id when nothing sortable remains.
         var orderBy = BuildReportOrderBy(sortFields, fieldLookup, sqlLookupFids);
 
-        // Guardrail: TOP InMemoryReadLimit.Rows (50,000) ensures an in-memory pass on a massive table cannot pull millions of rows
-        // and trigger OutOfMemory. Callers that hit it say so (see RunReportQueryHandler).
+        // Guardrail: an in-memory pass on a massive table must not pull millions of rows. TOP ReadRows is one more than the budget
+        // (InMemoryReadLimit.Rows), so the caller can tell a complete read from a cut one and never passes a cut one off as complete:
+        // a report flags it, every other caller refuses (InMemoryReadLimit.EnsureComplete).
         var sql = $"""
-            SELECT TOP {Application.Records.InMemoryReadLimit.Rows} Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{BuildFieldColumnList(fields)}
+            SELECT TOP {Application.Records.InMemoryReadLimit.ReadRows} Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{BuildFieldColumnList(fields)}
             FROM {PhysicalNaming.FullTableName(table.Id)}{ReportFromAlias(sqlLookupFids)}
             WHERE IsDeleted = 0{filterWhere}
             ORDER BY {orderBy}
@@ -492,19 +493,25 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         AppTable table, IReadOnlyList<AppField> fields, long afterId, int batchSize,
         FilterGroup? filterTree = null,
         long? restrictToCreatedBy = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        IReadOnlySet<long>? sqlLookupFids = null)
     {
         var parameters = new DynamicParameters();
         parameters.Add("afterId", afterId);
         parameters.Add("batchSize", batchSize);
         var fieldLookup = BuildFieldLookup(fields);
-        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
+        // With sqlLookupFids the report's filter builder (conditions on those Lookups read the parent column through the alias);
+        // without, exactly the SQL this method always ran.
+        var filterWhere = (sqlLookupFids is { Count: > 0 }
+                ? BuildReportFilterWhere(filterTree, parameters, fieldLookup, sqlLookupFids)
+                : BuildFilterTreeWhere(filterTree, parameters, fieldLookup))
+            + BuildOwnerWhere(restrictToCreatedBy, parameters);
 
         // Keyset paging (Id > @afterId) rather than OFFSET: every batch costs the same however deep into
         // the table it is, so a summary over millions of records doesn't slow down as it goes.
         var sql = $"""
             SELECT TOP (@batchSize) Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{BuildFieldColumnList(fields)}
-            FROM {PhysicalNaming.FullTableName(table.Id)}
+            FROM {PhysicalNaming.FullTableName(table.Id)}{ReportFromAlias(sqlLookupFids)}
             WHERE IsDeleted = 0 AND Id > @afterId{filterWhere}
             ORDER BY Id
             """;
@@ -819,9 +826,15 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         IReadOnlyList<AppField>? allParentFields = null,
         FilterGroup? extraFilter = null,
         IReadOnlyList<SortSpec>? orderBy = null,
-        AppField? keyField = null)
+        AppField? keyField = null,
+        IReadOnlyList<AppField>? filterFields = null,
+        int skip = 0)
     {
-        take = Math.Clamp(take, 1, 200);
+        // 201: a page of up to 200 plus one row that tells the caller more follow.
+        take = Math.Clamp(take, 1, 201);
+        skip = Math.Max(0, skip);
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var enc = await GetEncryptionContextAsync(connection, parentTable.AppId, null, ct);
 
         var parameters = new DynamicParameters();
         var where = "IsDeleted = 0";
@@ -833,7 +846,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             var tree = roleFilter is not null && extraFilter is not null
                 ? new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = roleFilter }, new FilterNode { Group = extraFilter }] }
                 : roleFilter ?? extraFilter;
-            var roleWhere = BuildFilterTreeWhere(tree, parameters, parentFieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
+            // filterFields carry the stand-ins of Ready stored columns, so a rule on a stored Formula / Lookup / Summary runs here too.
+            var filterLookup = filterFields is null ? parentFieldLookup : BuildFieldLookup(filterFields);
+            var roleWhere = BuildFilterTreeWhere(tree, parameters, filterLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
             where += roleWhere;
         }
 
@@ -851,7 +866,11 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         // field, or the row Id when there is none.
         var physicalLabelFields = labelFields.Where(f => !IsComputedLabel(f)).ToList();
         var searchColExpr = physicalLabelFields.Count > 0 ? LabelColumnExpr(physicalLabelFields[0]) : "CAST(Id AS NVARCHAR(400))";
-        if (!string.IsNullOrWhiteSpace(search))
+        // A label column that holds ciphertext can't be searched with LIKE (it never matched): such a search reads the rows in Id
+        // batches, decrypts them and matches the plaintext — every row if needed, one batch in memory at a time.
+        var searchesCiphertext = !string.IsNullOrWhiteSpace(search) && enc.IsActive
+            && physicalLabelFields.Any(f => Services.FieldEncryptionContext.StoresCiphertext(f, enc.IsAppEncrypted));
+        if (!string.IsNullOrWhiteSpace(search) && !searchesCiphertext)
         {
             parameters.Add("search", $"%{search}%");
             if (physicalLabelFields.Count > 0)
@@ -865,6 +884,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             }
         }
         parameters.Add("take", take);
+        parameters.Add("skip", skip);
 
         // Id is returned as text: the row Id by default, or (translated by the caller) the parent
         // table's Set-Key key-field value — either way, exactly what the reference column stores.
@@ -898,19 +918,56 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var reportOrderBy = physicalSort is { Count: > 0 } ? BuildReportOrderBy(physicalSort, sortLookup, null) : "Id";
         var orderByExpr = physicalSort is { Count: > 0 } && reportOrderBy != "Id" ? reportOrderBy : searchColExpr;
 
+        if (searchesCiphertext)
+        {
+            const int batchSize = 500;
+            var matches = new List<ReferenceOption>();
+            var toSkip = skip;
+            parameters.Add("batch", batchSize);
+            long afterId = 0;
+            var batchSql = $"""
+                SELECT TOP (@batch) {string.Join(", ", selectCols)}
+                FROM {PhysicalNaming.FullTableName(parentTable.Id)} AS p
+                WHERE {where} AND p.Id > @afterId
+                ORDER BY p.Id
+                """;
+            while (true)
+            {
+                parameters.Add("afterId", afterId);
+                var batch = (await connection.QueryAsync<ReferenceOption>(new CommandDefinition(batchSql, parameters,
+                    commandTimeout: timeoutSeconds, cancellationToken: ct))).AsList();
+                if (batch.Count == 0) break;
+                afterId = long.Parse(batch[^1].Id, System.Globalization.CultureInfo.InvariantCulture);
+                await DecryptOptionsAsync(batch);
+                foreach (var o in batch.Where(o => new[] { o.Value1, o.Value2, o.Value3, o.Label }
+                             .Any(v => v is not null && v.Contains(search!, StringComparison.OrdinalIgnoreCase))))
+                {
+                    if (toSkip > 0) { toSkip--; continue; }
+                    matches.Add(o);
+                }
+                if (matches.Count >= take || batch.Count < batchSize) break;
+            }
+            return matches.Take(take).ToList();
+        }
+
+        // Paged: a total order (Id breaks ties) so OFFSET pages neither repeat nor skip a row.
+        var pageOrderBy = System.Text.RegularExpressions.Regex.IsMatch(orderByExpr, @"\bId\b") ? orderByExpr : $"{orderByExpr}, p.Id";
         var sql = $"""
-            SELECT TOP (@take) {string.Join(", ", selectCols)}
+            SELECT {string.Join(", ", selectCols)}
             FROM {PhysicalNaming.FullTableName(parentTable.Id)} AS p
             WHERE {where}
-            ORDER BY {orderByExpr}
+            ORDER BY {pageOrderBy}
+            OFFSET @skip ROWS FETCH NEXT @take ROWS ONLY
             """;
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var enc = await GetEncryptionContextAsync(connection, parentTable.AppId, null, ct);
         var rows = await connection.QueryAsync<ReferenceOption>(new CommandDefinition(sql, parameters, commandTimeout: timeoutSeconds, cancellationToken: ct));
         var list = rows.AsList();
+        await DecryptOptionsAsync(list);
+        return list;
 
         // Decrypt label-field values in place when the parent app has field encryption active.
         // Id is the parent's internal BIGINT row Id (a system column) — it is never encrypted.
+        async Task DecryptOptionsAsync(List<ReferenceOption> list)
+        {
         if (list.Count > 0 && (enc.IsAppEncrypted || labelFields.Any(f => f.IsEncrypted) || keyField?.IsEncrypted == true))
         {
             var decryptCols = new[]
@@ -939,7 +996,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 }
             }
         }
-        return list;
+        }
     }
 
     /// <inheritdoc />
@@ -3806,7 +3863,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     public async Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(
         AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default,
         IReadOnlyCollection<long>? onlyRowIds = null,
-        bool dropUndecryptable = false)
+        bool dropUndecryptable = false,
+        FilterGroup? scopeFilter = null, IReadOnlyList<AppField>? scopeFields = null, long? scopeRestrictToCreatedBy = null)
     {
         var col = field.IsSystem && !string.IsNullOrEmpty(field.PhysicalColumnName)
             ? field.PhysicalColumnName!
@@ -3833,7 +3891,11 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             parameters.Add("onlyRowIds", System.Text.Json.JsonSerializer.Serialize(onlyRowIds));
             whereExtra += " AND Id IN (SELECT CAST([value] AS BIGINT) FROM OPENJSON(@onlyRowIds))";
         }
-        
+        // A role's View rule as SQL: applied in the same query, over every row (no id list to build or cap).
+        if (scopeFilter is not null || scopeRestrictToCreatedBy.HasValue)
+            whereExtra += BuildFilterTreeWhere(scopeFilter, parameters, BuildFieldLookup(scopeFields ?? [field]))
+                          + BuildOwnerWhere(scopeRestrictToCreatedBy, parameters);
+
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var encContext = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
         // An encrypted app stores every non-system, non-exempt field as ciphertext even when the field's own

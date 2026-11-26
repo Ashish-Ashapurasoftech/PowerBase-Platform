@@ -214,12 +214,17 @@ public class ReportFormulasTests
     // ── Table ──────────────────────────────────────────────────────────────────
 
     [Fact]
-    public async Task A_table_report_shows_filters_and_sorts_by_a_report_formula()
+    public async Task A_table_report_filters_and_sorts_by_a_number_report_formula_in_sql()
     {
         var orders = MakeOrders(300);
-        _recordRepo.ListAllMatchingAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(),
+        var expected = orders.Where(o => o.Total > 50).OrderByDescending(o => o.Total).ToList();
+        // SQL does the filter, the sort and the count on the expression; the page it returns is what the report shows.
+        _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(), Arg.Any<long?>(),
+                Arg.Any<CancellationToken>(), Arg.Any<IReadOnlySet<long>?>())
+            .Returns(expected.Count);
+        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<FilterGroup?>(),
                 Arg.Any<IReadOnlyList<SortSpec>?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>(), Arg.Any<IReadOnlySet<long>?>())
-            .Returns(StoredRows(orders));
+            .Returns(StoredRows(expected.Take(20).ToList()));
 
         var result = await RunAsync(new ReportDefinition
         {
@@ -229,10 +234,16 @@ public class ReportFormulasTests
             TableSortGroup = [new SortGroupLevel { FieldId = TotalId, Desc = true }],
         }, "Table");
 
-        var expected = orders.Where(o => o.Total > 50).OrderByDescending(o => o.Total).ToList();
         result.TotalCount.Should().Be(expected.Count);
         result.Columns.Select(c => c.Name).Should().Equal("Region", "Line Total");
         result.Items.Take(5).Select(i => Convert.ToDecimal(i.Fields[TotalId.ToString()])).Should().Equal(expected.Take(5).Select(o => o.Total));
+        var expression = $"(({PhysicalNaming.ColumnName(QtyFid)}) * ({PhysicalNaming.ColumnName(PriceFid)}))";
+        await _recordRepo.Received().ListAsync(Arg.Any<AppTable>(),
+            Arg.Is<IReadOnlyList<AppField>>(f => f.Any(x => x.Id == TotalId && x.PhysicalColumnName == expression)),
+            Arg.Any<int>(), Arg.Any<int>(), Arg.Any<FilterGroup?>(),
+            Arg.Is<IReadOnlyList<SortSpec>?>(s => s != null && s[0].FieldId == TotalId && s[0].Desc),
+            Arg.Any<long?>(), Arg.Any<CancellationToken>(), Arg.Any<IReadOnlySet<long>?>());
+        await _recordRepo.DidNotReceiveWithAnyArgs().ListAllMatchingAsync(default!, default!);
     }
 
     [Fact]

@@ -45,11 +45,12 @@ public class ViewableRowIdsTests
 
     public ViewableRowIdsTests()
     {
-        _recordRepo.ListMatchingRowIdsAsync(_table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(),
-                Arg.Any<long?>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
-            .Returns(new[] { 1L, 2L });
-        _recordRepo.ListAllMatchingAsync(_table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(),
-                Arg.Any<IReadOnlyList<SortSpec>?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>())
+        // The ids of a SQL scope and the rows of an in-memory rule are read in Id batches (no row limit); one short batch here.
+        _recordRepo.ListIdsAfterIdAsync(_table, Arg.Any<IReadOnlyList<AppField>>(), 0, Arg.Any<int>(), Arg.Any<FilterGroup?>(),
+                Arg.Any<long?>(), Arg.Any<CancellationToken>())
+            .Returns(new List<(long, Guid)> { (1L, Guid.NewGuid()), (2L, Guid.NewGuid()) });
+        _recordRepo.ListBatchAfterIdAsync(_table, Arg.Any<IReadOnlyList<AppField>>(), 0, Arg.Any<int>(), Arg.Any<FilterGroup?>(),
+                Arg.Any<long?>(), Arg.Any<CancellationToken>(), Arg.Any<IReadOnlySet<long>?>())
             .Returns(Rows);
         _relational.ProjectAsync(_table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
             .Returns(Rows.Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList());
@@ -81,9 +82,9 @@ public class ViewableRowIdsTests
         var rule = Rule(DeptFid, "IT");
 
         (await Resolve(Access(rule))).Should().BeEquivalentTo(new[] { 1L, 2L });
-        await _recordRepo.Received().ListMatchingRowIdsAsync(_table, _fields,
+        await _recordRepo.Received().ListIdsAfterIdAsync(_table, _fields, 0, Arg.Any<int>(),
             Arg.Is<FilterGroup?>(g => g != null && g.Nodes.Single().Condition!.FieldId == DeptFid),
-            Arg.Any<long?>(), Arg.Any<int>(), 30, Arg.Any<CancellationToken>());
+            Arg.Any<long?>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -99,8 +100,8 @@ public class ViewableRowIdsTests
 
         await Resolve(access);
 
-        await _recordRepo.Received().ListMatchingRowIdsAsync(_table, _fields, Arg.Any<FilterGroup?>(),
-            77, Arg.Any<int>(), 30, Arg.Any<CancellationToken>());
+        await _recordRepo.Received().ListIdsAfterIdAsync(_table, _fields, 0, Arg.Any<int>(), Arg.Any<FilterGroup?>(),
+            77, Arg.Any<CancellationToken>());
     }
 
     [Fact]

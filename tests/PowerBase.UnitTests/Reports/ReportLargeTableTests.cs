@@ -127,32 +127,61 @@ public class ReportLargeTableTests
         await _recordRepo.DidNotReceiveWithAnyArgs().AggregateColumnsAsync(default!, default!, default!, default, default, default, default);
     }
 
-    [Fact]
-    public async Task Sort_by_a_formula_over_more_records_than_one_read_says_so_and_totals_stored_columns_in_sql()
+    /// <summary>More matches than one read holds: the single read comes back one row past the budget, then every match is
+    /// streamed in Id batches (rows 1..count, Budget = the row number).</summary>
+    private void MoreMatchThanOneRead(int count)
     {
-        var sut = Handler(sorts: [new() { FieldId = Doubled, Desc = true }]);
-        EveryMatchIs(Rows(InMemoryReadLimit.Rows));   // the read stopped at the limit: more records match
-        BudgetTotalInSqlIs(sum: 10_000_000m, rows: 10_000_000);
-
-        var result = await sut.HandleAsync(new RunReportQuery(ReportId, 1, 20));
-
-        result.InMemoryRowLimit.Should().Be(InMemoryReadLimit.Rows);
-        result.Totals[Budget.ToString()].Sum.Should().Be(10_000_000m, "a stored column is totalled in SQL over every match, not the rows read");
-        result.Totals.Should().NotContainKey(Doubled.ToString(), "a calculated total over only the rows read would be wrong");
-        result.TotalsIncomplete.Should().BeTrue();
+        EveryMatchIs(Rows(InMemoryReadLimit.ReadRows));
+        _recordRepo.ListBatchAfterIdAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<long>(), Arg.Any<int>(),
+                Arg.Any<FilterGroup?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>(), Arg.Any<IReadOnlySet<long>?>())
+            .Returns(ci =>
+            {
+                var after = ci.ArgAt<long>(2);
+                var size = ci.ArgAt<int>(3);
+                return (IReadOnlyList<IReadOnlyDictionary<string, object?>>)Enumerable.Range(0, (int)Math.Max(0, Math.Min(size, count - after)))
+                    .Select(i => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
+                    {
+                        ["Id"] = after + i + 1, ["PublicId"] = Guid.NewGuid(), ["CreatedOn"] = new DateTime(2026, 1, 1), ["CreatedBy"] = 1L,
+                        ["ModifiedOn"] = null, ["ModifiedBy"] = null, [PhysicalNaming.ColumnName(Budget)] = (decimal)(after + i + 1),
+                    }).ToList();
+            });
     }
 
     [Fact]
-    public async Task Filter_on_a_formula_over_more_records_than_one_read_shows_no_totals_at_all()
+    public async Task Sort_by_a_formula_over_more_records_than_one_read_is_complete_with_exact_totals()
     {
-        var sut = Handler(filter: new FilterGroup { Logic = "and", Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = Doubled, Operator = "gt", Value = "1" } }] });
-        EveryMatchIs(Rows(InMemoryReadLimit.Rows));
+        const int count = InMemoryReadLimit.Rows + 10_000;
+        var sut = Handler(sorts: [new() { FieldId = Doubled, Desc = true }]);
+        MoreMatchThanOneRead(count);
 
         var result = await sut.HandleAsync(new RunReportQuery(ReportId, 1, 20));
 
-        result.InMemoryRowLimit.Should().Be(InMemoryReadLimit.Rows);
-        result.Totals.Should().BeEmpty("which records match is itself worked out over only the rows read");
-        result.TotalsIncomplete.Should().BeTrue();
+        result.InMemoryRowLimit.Should().BeNull("every match was looked at");
+        result.TotalCount.Should().Be(count);
+        result.Items.Should().HaveCount(20);
+        result.Items[0].Fields[Doubled.ToString()].Should().Be((decimal)count * 2, "the highest Doubled is on the last row, past the old 50,000 cut");
+        result.Totals[Budget.ToString()].Sum.Should().Be((decimal)count * (count + 1) / 2);
+        result.Totals[Doubled.ToString()].Sum.Should().Be((decimal)count * (count + 1), "a calculated total over every match");
+        result.TotalsIncomplete.Should().BeFalse();
+        await _recordRepo.DidNotReceiveWithAnyArgs().AggregateColumnsAsync(default!, default!, default!);
+    }
+
+    [Fact]
+    public async Task Filter_on_a_formula_over_more_records_than_one_read_counts_and_totals_every_match()
+    {
+        const int count = InMemoryReadLimit.Rows + 10_000;
+        // Doubled > 100,000 holds for Budget > 50,000: exactly the rows the old 50,000-row read never looked at.
+        var sut = Handler(filter: new FilterGroup { Logic = "and", Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = Doubled, Operator = "gt", Value = "100000" } }] });
+        MoreMatchThanOneRead(count);
+
+        var result = await sut.HandleAsync(new RunReportQuery(ReportId, 2, 20));
+
+        result.InMemoryRowLimit.Should().BeNull();
+        result.TotalCount.Should().Be(count - InMemoryReadLimit.Rows);
+        result.Items.Should().HaveCount(20);
+        result.Items[0].Fields[Budget.ToString()].Should().Be((decimal)(InMemoryReadLimit.Rows + 21), "page 2 in Id order");
+        result.Totals[Budget.ToString()].NonBlankCount.Should().Be(count - InMemoryReadLimit.Rows);
+        result.TotalsIncomplete.Should().BeFalse();
     }
 
     // ── Totals on a plain report ───────────────────────────────────────────────────────────────

@@ -37,4 +37,8 @@ public class RunReportRequest
     /// exact AND/OR structure — this is NOT merged as a separate AND'd-on-top group, because a
     /// flat AND merge can't correctly represent an ask-condition that lives inside an OR group.</summary>
     public Dictionary<string, string>? AskAnswers { get; set; }
+
+    /// <summary>Only the page changed since the last run with the same filters and sort: the client keeps its count, the server skips the
+    /// COUNT query and answers totalCount = -1.</summary>
+    public bool SkipCount { get; set; }
 }

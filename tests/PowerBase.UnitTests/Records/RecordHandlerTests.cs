@@ -316,6 +316,35 @@ public class RecordHandlerTests
     // --- ListRecordsQueryHandler ---
 
     [Fact]
+    public async Task ListRecords_view_rule_on_a_number_formula_runs_in_sql_through_its_expression()
+    {
+        var table = MakeTable();
+        var amount = new AppField { Id = 6, Fid = 6, Name = "Amount", TypeCode = "Currency" };
+        var doubled = new AppField { Id = 7, Fid = 7, Name = "Doubled", TypeCode = "Formula_Number", Settings = """{"expression":"[Amount] * 2"}""" };
+        var fields = new List<AppField> { amount, doubled };
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(fields);
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(new TableAccessContext
+            {
+                Unrestricted = false, ViewScope = PowerBase.Domain.Constants.RecordScopes.AllRecords, VisibleFields = [amount],
+                ViewFilter = new FilterGroup { Logic = "and", Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = 7, Operator = "gt", Value = "10" } }] },
+            });
+        _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>()).Returns(3);
+        var sut = new ListRecordsQueryHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector);
+
+        var result = await sut.HandleAsync(new ListRecordsQuery(table.PublicId, 1, 20));
+
+        result.TotalCount.Should().Be(3);
+        // The hidden formula's stand-in rides along for the WHERE only; the role still reads only Amount.
+        await _recordRepo.Received().ListAsync(Arg.Any<AppTable>(),
+            Arg.Is<IReadOnlyList<AppField>>(l => l.Any(x => x.Id == 7 && x.PhysicalColumnName == "((f_6) * (2))") && l.Any(x => x.Id == 6)),
+            1, 20, Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>(), Arg.Any<IReadOnlySet<long>?>());
+        await _recordRepo.DidNotReceiveWithAnyArgs().ListBatchAfterIdAsync(default!, default!, default, default);
+    }
+
+
+    [Fact]
     public async Task ListRecords_ReturnsPagedResult()
     {
         var table = MakeTable();

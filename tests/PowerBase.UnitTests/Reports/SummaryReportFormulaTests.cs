@@ -307,22 +307,16 @@ public class SummaryReportFormulaTests
     }
 
     [Fact]
-    public async Task A_Table_report_with_a_formula_filter_reads_every_matching_record_with_no_row_cap()
+    public async Task A_Table_report_filter_on_a_number_formula_runs_in_sql_over_every_record()
     {
-        var orders = MakeOrders(500);
-        var stored = orders.Select(o => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["Id"] = o.Id,
-            ["PublicId"] = Guid.NewGuid(),
-            ["CreatedOn"] = DateTime.UtcNow,
-            [PhysicalNaming.ColumnName(RegionFid)] = o.Region,
-            [PhysicalNaming.ColumnName(QtyFid)] = o.Qty,
-            [PhysicalNaming.ColumnName(PriceFid)] = o.Price,
-        }).ToList();
-        _recordRepo.ListAllMatchingAsync(
-                Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>(),
-                Arg.Any<long?>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(stored));
+        // [Qty] * [Price] is exact in SQL: the filter becomes a WHERE on the expression — the database counts every match,
+        // nothing is read into memory to work the formula out.
+        _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(), Arg.Any<long?>(),
+                Arg.Any<CancellationToken>(), Arg.Any<IReadOnlySet<long>?>())
+            .Returns(62);
+        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<FilterGroup?>(),
+                Arg.Any<IReadOnlyList<SortSpec>?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>(), Arg.Any<IReadOnlySet<long>?>())
+            .Returns(new List<IReadOnlyDictionary<string, object?>>());
 
         var result = await RunAsync(
             new ReportDefinition
@@ -335,7 +329,15 @@ public class SummaryReportFormulaTests
             },
             reportType: "Table");
 
-        result.TotalCount.Should().Be(orders.Count(o => o.Total > 100));
+        result.TotalCount.Should().Be(62);
+        result.InMemoryRowLimit.Should().BeNull();
+        var expression = $"(({PhysicalNaming.ColumnName(QtyFid)}) * ({PhysicalNaming.ColumnName(PriceFid)}))";
+        await _recordRepo.Received().CountAsync(Arg.Any<AppTable>(),
+            Arg.Is<IReadOnlyList<AppField>>(f => f.Any(x => x.Fid == TotalFid && x.PhysicalColumnName == expression)),
+            Arg.Is<FilterGroup?>(g => g != null && g.Nodes.Single().Condition!.FieldId == TotalFid),
+            Arg.Any<long?>(), Arg.Any<CancellationToken>(), Arg.Any<IReadOnlySet<long>?>());
+        await _recordRepo.DidNotReceiveWithAnyArgs().ListAllMatchingAsync(default!, default!);
+        await _recordRepo.DidNotReceiveWithAnyArgs().ListBatchAfterIdAsync(default!, default!, default, default);
     }
 
     [Fact]

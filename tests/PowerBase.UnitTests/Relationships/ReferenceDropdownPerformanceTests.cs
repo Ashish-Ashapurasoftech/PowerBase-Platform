@@ -125,7 +125,7 @@ public class ReferenceDropdownPerformanceTests
             parentTable,
             Arg.Any<IReadOnlyList<AppField>>(),
             "Acme",
-            10,
+            11, // one page of 10 read as 11: the extra row tells the picker more options follow
             Arg.Any<AppField?>(),
             Arg.Any<CancellationToken>(),
             Arg.Any<IReadOnlyList<ReferenceFilterClause>?>(),
@@ -254,30 +254,17 @@ public class ReferenceDropdownPerformanceTests
             VisibleFields = fields
         };
 
-        _recordRepo.ListMatchingRowIdsAsync(
-            table,
-            fields,
-            Arg.Any<FilterGroup?>(),
-            restrictToCreatedBy: 99L,
-            maxRows: 10000,
-            timeoutSeconds: 30,
-            ct: Arg.Any<CancellationToken>())
-            .Returns([101L, 102L, 103L]);
+        _recordRepo.ListIdsAfterIdAsync(table, fields, 0, Arg.Any<int>(), Arg.Any<FilterGroup?>(), 99L, Arg.Any<CancellationToken>())
+            .Returns(new List<(long, Guid)> { (101L, Guid.NewGuid()), (102L, Guid.NewGuid()), (103L, Guid.NewGuid()) });
 
         var rowIds = await ViewableRowIds.ResolveAsync(
             access, table, fields, _recordRepo, _relationalProjector, _formulaProjector, default);
 
         rowIds.Should().Equal(101L, 102L, 103L);
 
-        // Verify ListMatchingRowIdsAsync was called with 30s timeout and 10k max rows
-        await _recordRepo.Received(1).ListMatchingRowIdsAsync(
-            table,
-            fields,
-            Arg.Is<FilterGroup?>(f => f != null && f.Nodes.Count > 0),
-            99L,
-            10000,
-            30,
-            Arg.Any<CancellationToken>());
+        // The ids come from the Id-only keyset reader (no field columns, no decryption) — every one, no 10,000 cap.
+        await _recordRepo.Received(1).ListIdsAfterIdAsync(table, fields, 0, Arg.Any<int>(),
+            Arg.Is<FilterGroup?>(f => f != null && f.Nodes.Count > 0), 99L, Arg.Any<CancellationToken>());
 
         // Verify ListAllMatchingAsync was NOT called
         await _recordRepo.DidNotReceive().ListAllMatchingAsync(

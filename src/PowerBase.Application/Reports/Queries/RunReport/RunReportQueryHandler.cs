@@ -110,6 +110,15 @@ public class RunReportQueryHandler
     /// <summary>Stored (c_{fid}) Lookup / Summary columns: which are Ready, and the AppField ids of those this run reads in SQL.</summary>
     private readonly Compute.IMaterializedFieldState? _materialized;
     private IReadOnlySet<long> _readyFieldIds = new HashSet<long>();
+    /// <summary>Number formulas SQL computes exactly (field Id → stand-in whose column is the SQL expression), see SqlFormulaFields.</summary>
+    private IReadOnlyDictionary<long, AppField> _sqlFormulaFields = new Dictionary<long, AppField>();
+    /// <summary>This run may skip the COUNT query (the caller has the count; only the page changed).</summary>
+    private bool _skipCount;
+
+    /// <summary>The fields as SQL is to read them: Ready stored fields as their c_{fid} stand-ins, translated formulas as their
+    /// SQL-expression stand-ins. The projectors always get the original fields.</summary>
+    private IReadOnlyList<AppField> SqlFields(IReadOnlyList<AppField> fields) =>
+        SqlFormulaFields.Substitute(MaterializedReadFields.Substitute(fields, _readyFieldIds), _sqlFormulaFields);
     private readonly IServerTiming _timing;
 
     private static async Task<App?> WrapApp(Task<App> task) => await task;
@@ -282,6 +291,7 @@ public class RunReportQueryHandler
             return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, effectiveRuntimeFilters, filterTree, isMaskedPreview, ct);
         }
 
+        _skipCount = query.SkipCount;
         return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields,
             effectiveRuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, isMaskedPreview, isAppEncrypted, ct);
     }
@@ -467,6 +477,12 @@ public class RunReportQueryHandler
         _readyFieldIds = _materialized is null ? new HashSet<long>() : await Timed("stored", _materialized.ReadyFieldIdsAsync(ct));
         var storedFids = MaterializedReadFields.ReadyFids(allFields, _readyFieldIds);
         formulaFids.ExceptWith(storedFids);
+
+        // A Number formula SQL computes exactly ([Amount] * 1.18, [Qty] * [Price] - [Discount], …) is filtered, sorted, counted and
+        // totalled in SQL through its expression — every record, in the database — instead of being worked out in memory for every row.
+        // A Ready stored one keeps its stored column (indexed). The shown value is still worked out by the projector.
+        _sqlFormulaFields = SqlFormulaFields.Build(allFields, isAppEncrypted, _readyFieldIds);
+        formulaFids.ExceptWith(SqlFormulaFields.Fids(_sqlFormulaFields));
 
         var hasFormulaFilters = FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, formulaFids);
         var hasFormulaSorts   = sortFields.Any(s => formulaFids.Contains(s.FieldId));
@@ -859,8 +875,8 @@ public class RunReportQueryHandler
         var usedFields = FieldsUsed(allFields, selectedFields, sortFields, filterTree);
         var projectedFields = FieldsToProject(allFields, usedFields);
         // SQL gets the Ready Lookups / Summaries as stand-ins reading c_{fid}; the projectors keep the original fields.
-        var readFields = MaterializedReadFields.Substitute(FieldsToRead(allFields, usedFields), _readyFieldIds);
-        var sqlFields = MaterializedReadFields.Substitute(allFields, _readyFieldIds);
+        var readFields = SqlFields(FieldsToRead(allFields, usedFields));
+        var sqlFields = SqlFields(allFields);
 
         IReadOnlyList<RecordResult> items;
         int total;
@@ -889,7 +905,7 @@ public class RunReportQueryHandler
                     || pageOnlyFids.Count > WideReportFieldCount
                     || allFields.Any(f => f.Fid is int fid && pageOnlyFids.Contains(fid) && FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings)));
             var everyRowReadFields = narrowEveryRow
-                ? MaterializedReadFields.Substitute(FieldsToRead(allFields, everyRowUsed), _readyFieldIds)
+                ? SqlFields(FieldsToRead(allFields, everyRowUsed))
                 : readFields;
 
             // Step timings of this path, in the log: where a slow report spends its time and memory (one line per step).
@@ -906,64 +922,112 @@ public class RunReportQueryHandler
                 allRows = await _recordRepo.ListAllMatchingAsync(table, everyRowReadFields,
                     physicalFilterTree, sqlSorts,
                     restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids);
-            // The read stops at InMemoryReadLimit.Rows: past that the in-memory order and filter below only cover the
-            // first that-many records, which the result says (InMemoryRowLimit) instead of passing them off as all.
-            var readEveryMatch = allRows.Count < InMemoryReadLimit.Rows;
+            // The read asks for one row more than InMemoryReadLimit.Rows, so a full read is told from a cut one. All matches fit:
+            // worked on in memory below, as before. More match: the whole question is answered by streaming every match in Id
+            // batches instead (count, totals and the page complete, one batch in memory at a time) — never from the first rows only.
+            var readEveryMatch = InMemoryReadLimit.IsComplete(allRows.Count);
             Step("read", allRows.Count);
-
-            // Over every record read, only the References / Lookups / Summaries the filter, the sort and (when every match
-            // was read) the totals use: one the page only shows is worked out below, for the page's rows alone.
-            var everyRowFields = FieldsToProject(allFields, FieldsUsed(allFields, readEveryMatch ? totalCols : [], sortFields, filterTree));
-            var allRelationalRaw = await _relationalProjector.ProjectAsync(table, everyRowFields, allRows, ct);
-            var allRelational = Relationships.ReferenceOriginalFallback.Apply(allFields, allRows, allRelationalRaw);
-            Step("relational", allRows.Count);
-            // Never every formula of the table: only those the report uses (a table can hold hundreds, some reading other tables per record).
-            var formulaFieldsEveryRow = FieldsForFormulas(allFields, narrowEveryRow ? everyRowUsed : usedFields);
-            var allComputed = _formulaProjector.Project(formulaFieldsEveryRow, allRows, allRelational, table);
-            Step($"formulas({formulaFieldsEveryRow.Count(f => FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings))} of {allFields.Count(f => FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings))})", allRows.Count);
-            var pairs = allRows.Zip(allComputed, (r, c) => (Row: r, Computed: c)).ToList();
-
-            // Apply formula-field conditions in memory.
-            if (formulaConditions != null)
-                pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, formulaConditions, allFields);
-            Step("filtered", pairs.Count);
-
-            // If any sort key is a formula field, re-sort all rows in memory (covers all sort keys).
-            if (hasFormulaSorts)
-                pairs = FormulaFilterSorter.ApplySort(pairs, sortFields, allFields);
-
-            total = pairs.Count;
-            if (!readEveryMatch) inMemoryRowLimit = InMemoryReadLimit.Rows;
-
-            if (totalCols.Count > 0)
+            if (!readEveryMatch)
             {
-                if (readEveryMatch)
+                allRows = [];   // let the cut read go before streaming
+                // The same fields the single read used (narrowed or not, see narrowEveryRow above), plus what the totals need: they
+                // are now worked out over every match.
+                var streamReadFields = everyRowReadFields;
+                var streamProjectFields = FieldsToProject(allFields, FieldsUsed(allFields, totalCols, sortFields, filterTree));
+                var streamFormulaFields = FieldsForFormulas(allFields, narrowEveryRow ? everyRowUsed : usedFields);
+                var keep = page * pageSize;
+                var kept = new List<(IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed)>();
+                var streamed = 0;
+                var streamTotals = new Dictionary<string, ColumnTotal>();
+                using (Common.ReadReplicaScope.Begin(Common.ReadReplicaLane.Interactive))
                 {
-                    // Every matching row is already in memory here, so aggregate them directly.
-                    totals = AggregateInMemory(pairs.Select(p => RecordResult.FromRow(p.Row, selectedFields, null, p.Computed)).ToList(), totalCols);
+                    await foreach (var matches in MatchStream.MatchesAsync(_recordRepo, _relationalProjector, _formulaProjector, table, allFields,
+                                       streamReadFields, streamProjectFields, streamFormulaFields, physicalFilterTree, formulaConditions,
+                                       access.RestrictToCreatedBy, ct, sqlLookupFids))
+                    {
+                        streamed += matches.Count;
+                        if (totalCols.Count > 0 && matches.Count > 0)
+                            foreach (var (key, t) in AggregateInMemory(matches.Select(p => RecordResult.FromRow(p.Row, selectedFields, null, p.Computed)).ToList(), totalCols))
+                                streamTotals[key] = streamTotals.TryGetValue(key, out var acc)
+                                    ? new ColumnTotal { Sum = acc.Sum + t.Sum, NonBlankCount = acc.NonBlankCount + t.NonBlankCount, RowCount = acc.RowCount + t.RowCount }
+                                    : t;
+                        kept = MatchStream.KeepFirst(kept, matches, keep, sortFields, allFields);
+                    }
                 }
-                else if (formulaConditions == null)
-                {
-                    // Only the order is calculated: which records match is plain SQL, so stored columns are still totalled
-                    // over all of them; calculated ones would cover only the rows read, so they're left out.
-                    (totals, totalsIncomplete) = await TotalsOverAllMatchesAsync(table, allFields, selectedFields, totalCols,
-                        physicalFilterTree, access.RestrictToCreatedBy, fitsInMemory: false, sqlLookupFids, ct);
-                }
+                Step("streamed", streamed);
+                total = streamed;
+                totals = streamTotals;
+                var streamPage = kept.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+                if (narrowEveryRow)
+                    streamPage = await WidenPageAsync(table, allFields, readFields, projectedFields, usedFields, streamPage, ct);
                 else
                 {
-                    // Which records match is itself worked out in memory, over only the rows read: no total can be exact.
-                    totalsIncomplete = true;
+                    // What the page shows was not narrowed: work its References / Lookups / Summaries out for its rows alone.
+                    var pageRows = streamPage.Select(p => p.Row).ToList();
+                    var pageRelational = await _relationalProjector.ProjectAsync(table, streamProjectFields, pageRows, ct);
+                    streamPage = await ProjectPageOnlyFieldsAsync(table, allFields, projectedFields, streamProjectFields, pageRows, pageRelational, streamPage, ct);
                 }
+                var streamUserNames = await ResolveUserNamesAsync(streamPage.Select(p => p.Row), allFields, _userRepo, ct, streamPage.Select(p => p.Computed));
+                items = streamPage.Select(p => RecordResult.FromRow(p.Row, selectedFields, streamUserNames, p.Computed)).ToList();
+                Step("page", streamPage.Count);
             }
+            else
+            {
 
-            // Paginate in memory.
-            var pagePairs = pairs.Skip((page - 1) * pageSize).Take(pageSize).ToList();
-            pagePairs = narrowEveryRow
-                ? await WidenPageAsync(table, allFields, readFields, projectedFields, usedFields, pagePairs, ct)
-                : await ProjectPageOnlyFieldsAsync(table, allFields, projectedFields, everyRowFields, allRows, allRelationalRaw, pagePairs, ct);
-            var userNames = await ResolveUserNamesAsync(pagePairs.Select(p => p.Row), allFields, _userRepo, ct, pagePairs.Select(p => p.Computed));
-            items = pagePairs.Select(p => RecordResult.FromRow(p.Row, selectedFields, userNames, p.Computed)).ToList();
-            Step("page", pagePairs.Count);
+                // Over every record read, only the References / Lookups / Summaries the filter, the sort and (when every match
+                // was read) the totals use: one the page only shows is worked out below, for the page's rows alone.
+                var everyRowFields = FieldsToProject(allFields, FieldsUsed(allFields, readEveryMatch ? totalCols : [], sortFields, filterTree));
+                var allRelationalRaw = await _relationalProjector.ProjectAsync(table, everyRowFields, allRows, ct);
+                var allRelational = Relationships.ReferenceOriginalFallback.Apply(allFields, allRows, allRelationalRaw);
+                Step("relational", allRows.Count);
+                // Never every formula of the table: only those the report uses (a table can hold hundreds, some reading other tables per record).
+                var formulaFieldsEveryRow = FieldsForFormulas(allFields, narrowEveryRow ? everyRowUsed : usedFields);
+                var allComputed = _formulaProjector.Project(formulaFieldsEveryRow, allRows, allRelational, table);
+                Step($"formulas({formulaFieldsEveryRow.Count(f => FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings))} of {allFields.Count(f => FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings))})", allRows.Count);
+                var pairs = allRows.Zip(allComputed, (r, c) => (Row: r, Computed: c)).ToList();
+
+                // Apply formula-field conditions in memory.
+                if (formulaConditions != null)
+                    pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, formulaConditions, allFields);
+                Step("filtered", pairs.Count);
+
+                // If any sort key is a formula field, re-sort all rows in memory (covers all sort keys).
+                if (hasFormulaSorts)
+                    pairs = FormulaFilterSorter.ApplySort(pairs, sortFields, allFields);
+
+                total = pairs.Count;
+                if (!readEveryMatch) inMemoryRowLimit = InMemoryReadLimit.Rows;
+
+                if (totalCols.Count > 0)
+                {
+                    if (readEveryMatch)
+                    {
+                        // Every matching row is already in memory here, so aggregate them directly.
+                        totals = AggregateInMemory(pairs.Select(p => RecordResult.FromRow(p.Row, selectedFields, null, p.Computed)).ToList(), totalCols);
+                    }
+                    else if (formulaConditions == null)
+                    {
+                        // Only the order is calculated: which records match is plain SQL, so stored columns are still totalled
+                        // over all of them; calculated ones would cover only the rows read, so they're left out.
+                        (totals, totalsIncomplete) = await TotalsOverAllMatchesAsync(table, allFields, selectedFields, totalCols,
+                            physicalFilterTree, access.RestrictToCreatedBy, fitsInMemory: false, sqlLookupFids, ct);
+                    }
+                    else
+                    {
+                        // Which records match is itself worked out in memory, over only the rows read: no total can be exact.
+                        totalsIncomplete = true;
+                    }
+                }
+
+                // Paginate in memory.
+                var pagePairs = pairs.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+                pagePairs = narrowEveryRow
+                    ? await WidenPageAsync(table, allFields, readFields, projectedFields, usedFields, pagePairs, ct)
+                    : await ProjectPageOnlyFieldsAsync(table, allFields, projectedFields, everyRowFields, allRows, allRelationalRaw, pagePairs, ct);
+                var userNames = await ResolveUserNamesAsync(pagePairs.Select(p => p.Row), allFields, _userRepo, ct, pagePairs.Select(p => p.Computed));
+                items = pagePairs.Select(p => RecordResult.FromRow(p.Row, selectedFields, userNames, p.Computed)).ToList();
+                Step("page", pagePairs.Count);
+            }
         }
         else
         {
@@ -972,8 +1036,11 @@ public class RunReportQueryHandler
             // the totals need the count (whether every match fits in memory) and run beside the row query.
             var rowsTask = Timed("rows", _recordRepo.ListAsync(table, readFields, page, pageSize, filterTree, sortFields,
                 restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids));
-            var countTask = Timed("count", _recordRepo.CountAsync(table, sqlFields, filterTree,
-                restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids));
+            // Only the page changed (and no totals need the count): the caller keeps its count, -1 says "not counted this time".
+            var countTask = _skipCount && totalCols.Count == 0
+                ? Task.FromResult(-1)
+                : Timed("count", _recordRepo.CountAsync(table, sqlFields, filterTree,
+                    restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids));
             total = await countTask;
             Task<(Dictionary<string, ColumnTotal> Totals, bool Incomplete)>? totalsTask = totalCols.Count > 0
                 ? Timed("totals", TotalsOverAllMatchesAsync(table, allFields, selectedFields, totalCols, filterTree,
@@ -1035,13 +1102,13 @@ public class RunReportQueryHandler
     {
         var totals = new Dictionary<string, ColumnTotal>();
         // A Ready stored Lookup / Summary is totalled in SQL from its c_ column, over every match, like a stored field.
-        var physicalCols = MaterializedReadFields.Substitute(totalCols, _readyFieldIds)
+        var physicalCols = SqlFields(totalCols)
             .Where(c => !PhysicalNaming.IsComputedTypeCode(c.TypeCode) && !c.IsEncrypted).ToList();
         if (physicalCols.Count > 0)
         {
             // Report totals: a heavy read over every match that may come from the read replica (when it is on).
             using var totalsScope = Common.ReadReplicaScope.Begin(Common.ReadReplicaLane.Interactive);
-            foreach (var kv in await _recordRepo.AggregateColumnsAsync(table, MaterializedReadFields.Substitute(allFields, _readyFieldIds), physicalCols, filterTree,
+            foreach (var kv in await _recordRepo.AggregateColumnsAsync(table, SqlFields(allFields), physicalCols, filterTree,
                          restrictToCreatedBy: restrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids))
                 totals[kv.Key.ToString()] = kv.Value;
         }
@@ -1053,7 +1120,7 @@ public class RunReportQueryHandler
 
         // Only the columns the totals and the filter use, and only the Lookups / Summaries among them.
         var used = FieldsUsed(allFields, selectedFields, [], filterTree);
-        var everyRow = await _recordRepo.ListAllMatchingAsync(table, MaterializedReadFields.Substitute(FieldsToRead(allFields, used), _readyFieldIds), filterTree, [], restrictToCreatedBy: restrictToCreatedBy, ct: ct,
+        var everyRow = await _recordRepo.ListAllMatchingAsync(table, SqlFields(FieldsToRead(allFields, used)), filterTree, [], restrictToCreatedBy: restrictToCreatedBy, ct: ct,
             sqlLookupFids: sqlLookupFids);
         var everyRelational = await _relationalProjector.ProjectAsync(table, FieldsToProject(allFields, used), everyRow, ct);
         var everyComputed = _formulaProjector.Project(allFields, everyRow, everyRelational, table);

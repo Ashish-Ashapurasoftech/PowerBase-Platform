@@ -176,7 +176,12 @@ public class ExportReportQueryHandler
         // A Ready stored Lookup / Summary (c_{fid}) is ordered and filtered in SQL like a stored field (design 7).
         var ready = _materialized is null ? new HashSet<long>() : await _materialized.ReadyFieldIdsAsync(ct);
         formulaFids.ExceptWith(Compute.MaterializedReadFields.ReadyFids(allFields, ready));
-        var sqlFields = Compute.MaterializedReadFields.Substitute(allFields, ready);
+        // A Number formula SQL computes exactly is filtered and sorted in SQL through its expression too (as in RunReport). The
+        // translation reads only Number / Currency / Percent / Rating columns, which are never encrypted, so the app's encryption
+        // flag does not change what translates.
+        var sqlFormulas = SqlFormulaFields.Build(allFields, isAppEncrypted: false, ready);
+        formulaFids.ExceptWith(SqlFormulaFields.Fids(sqlFormulas));
+        var sqlFields = SqlFormulaFields.Substitute(Compute.MaterializedReadFields.Substitute(allFields, ready), sqlFormulas);
 
         var (physicalFilterTree, formulaConditions) = FormulaFilterSorter.SplitFilterTree(filterTree, formulaFids);
         var hasFormulaSorts = sortFields.Any(s => formulaFids.Contains(s.FieldId));
@@ -204,19 +209,15 @@ public class ExportReportQueryHandler
         }
         else
         {
-            // A calculated filter or sort SQL can't evaluate: read the matches (capped at InMemoryReadLimit.Rows) and finish in memory.
-            var rows = await _recordRepo.ListAllMatchingAsync(table, sqlFields, physicalFilterTree, sqlSorts,
-                restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
-            var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, rows,
-                await _relationalProjector.ProjectAsync(table, allFields, rows, ct));
-            var computed = _formulaProjector.Project(allFields, rows, relational, table);
-            pairs = rows.Zip(computed, (r, c) => (Row: r, Computed: c)).ToList();
+            // A calculated filter or sort SQL can't evaluate: every physically matching row is streamed in Id batches, projected
+            // and filtered batch by batch (no row limit — the file holds every match), then put in the report's order.
+            pairs = [];
+            await foreach (var matches in MatchStream.MatchesAsync(_recordRepo, _relationalProjector, _formulaProjector, table, allFields,
+                               sqlFields, allFields, allFields, physicalFilterTree, formulaConditions, access.RestrictToCreatedBy, ct))
+                pairs.AddRange(matches);
+            if (sortFields.Count > 0)
+                pairs = FormulaFilterSorter.ApplySort(pairs, sortFields, allFields);
         }
-
-        if (formulaConditions != null)
-            pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, formulaConditions, allFields);
-        if (hasFormulaSorts)
-            pairs = FormulaFilterSorter.ApplySort(pairs, sortFields, allFields);
 
         var userNames = await RunReport.RunReportQueryHandler.ResolveUserNamesAsync(pairs.Select(p => p.Row), allFields, _userRepo, ct, pairs.Select(p => p.Computed));
         var items = pairs.Select(p => RecordResult.FromRow(p.Row, selectedFields, userNames, p.Computed)).ToList();

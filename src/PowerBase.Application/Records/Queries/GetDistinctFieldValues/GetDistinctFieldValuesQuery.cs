@@ -66,13 +66,19 @@ public class GetDistinctFieldValuesQueryHandler
         var access = await _enforcer.GetTableAccessAsync(table, fields, ct);
         if (!access.CanView || !access.VisibleFields.Any(f => f.Id == field.Id))
             return new DistinctValuesResponse(new List<string>(), false);
-        var onlyRowIds = await Records.ViewableRowIds.ResolveAsync(
+        // The View rule goes into the distinct query itself when it can run in SQL (every row of any table); only a rule on a
+        // calculated field without a stored column becomes an id list, which is complete or refused (never the first rows only).
+        var scope = await Records.ViewableRowIds.ResolveScopeAsync(
             access, table, fields, _recordRepo, _relationalProjector, _formulaProjector, ct,
             _materialized is null ? null : await _materialized.ReadyFieldIdsAsync(ct));
-        if (onlyRowIds is { Count: 0 }) return new DistinctValuesResponse(new List<string>(), false);
+        if (scope.Kind == Records.ViewRowScopeKind.None) return new DistinctValuesResponse(new List<string>(), false);
 
-        var (values, exceedsLimit) = await _recordRepo.GetDistinctFieldValuesAsync(
-            table, fieldForValues, query.Limit, query.SubField, ct, onlyRowIds);
+        var (values, exceedsLimit) = scope.Kind == Records.ViewRowScopeKind.Sql
+            ? await _recordRepo.GetDistinctFieldValuesAsync(
+                table, fieldForValues, query.Limit, query.SubField, ct,
+                scopeFilter: scope.Filter, scopeFields: scope.Fields, scopeRestrictToCreatedBy: scope.RestrictToCreatedBy)
+            : await _recordRepo.GetDistinctFieldValuesAsync(
+                table, fieldForValues, query.Limit, query.SubField, ct, scope.Ids);
 
         // User/MultiUser (incl. the built-in Record Owner/Last Modified By system fields) store
         // a plain core.[User].Id (BIGINT) in the tenant column — RecordRepository intentionally

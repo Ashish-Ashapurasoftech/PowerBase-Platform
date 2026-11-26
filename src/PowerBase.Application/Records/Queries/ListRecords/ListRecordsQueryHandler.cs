@@ -23,6 +23,7 @@ public class ListRecordsQueryHandler
     private readonly IUserRepository _userRepo;
     private readonly IFormulaProjector _formulaProjector;
     private readonly IRelationalProjector _relationalProjector;
+    private readonly Compute.IMaterializedFieldState? _materialized;
 
     public ListRecordsQueryHandler(
         IAppTableRepository tableRepo,
@@ -31,8 +32,10 @@ public class ListRecordsQueryHandler
         IRolePermissionEnforcer enforcer,
         IUserRepository userRepo,
         IFormulaProjector formulaProjector,
-        IRelationalProjector relationalProjector)
+        IRelationalProjector relationalProjector,
+        Compute.IMaterializedFieldState? materialized = null)
     {
+        _materialized = materialized;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
@@ -66,36 +69,57 @@ public class ListRecordsQueryHandler
             .Where(f => f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings))
             .Select(f => (long)f.Fid!.Value)
             .ToHashSet();
+
+        // A Ready stored Lookup / Summary / Formula (c_{fid}) and a Number formula SQL computes exactly are SQL-readable: a condition on
+        // them runs in the query (every record, the database's work) instead of the batched in-memory pass below.
+        var ready = _materialized is null ? new HashSet<long>() : await _materialized.ReadyFieldIdsAsync(ct);
+        var sqlFormulas = SqlFormulaFields.Build(fields, isAppEncrypted: false, ready);   // reads only never-encrypted number columns
+        formulaFids.ExceptWith(Compute.MaterializedReadFields.ReadyFids(fields, ready));
+        formulaFids.ExceptWith(SqlFormulaFields.Fids(sqlFormulas));
+        IReadOnlyList<PowerBase.Domain.Entities.AppField> SqlFields(IReadOnlyList<PowerBase.Domain.Entities.AppField> fs) =>
+            SqlFormulaFields.Substitute(Compute.MaterializedReadFields.Substitute(fs, ready), sqlFormulas);
+        var sqlAllFields = SqlFields(fields);
+
         if (FormulaFilterSorter.TreeContainsFormulaField(effectiveFilter, formulaFids))
         {
             var (physicalFilter, formulaFilter) = FormulaFilterSorter.SplitFilterTree(effectiveFilter, formulaFids);
-            var allRows = await _recordRepo.ListAllMatchingAsync(
-                table, fields, physicalFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
-            // Project every field: a rule's formula may itself be hidden from the role, or depend on hidden fields.
-            var allRelational = Relationships.ReferenceOriginalFallback.Apply(fields, allRows,
-                await _relationalProjector.ProjectAsync(table, fields, allRows, ct));
-            var allComputed = _formulaProjector.Project(fields, allRows, allRelational, table);
-            var pairs = allRows.Zip(allComputed, (r, c) => (Row: r, Computed: c)).ToList();
-            if (formulaFilter is not null)
-                pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, formulaFilter, fields);
+            // Every physically matching row, in Id batches (one batch in memory at a time, no row limit): the matches are counted
+            // and only the requested page's rows are kept. Project every field: a rule's formula may itself be hidden from the
+            // role, or depend on hidden fields.
+            var skipCount = (page - 1) * pageSize;
+            var matchCount = 0;
+            var pagePairs = new List<(IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed)>();
+            await foreach (var matches in MatchStream.MatchesAsync(_recordRepo, _relationalProjector, _formulaProjector, table, fields,
+                               sqlAllFields, fields, fields, physicalFilter, formulaFilter, access.RestrictToCreatedBy, ct))
+            {
+                foreach (var pair in matches)
+                {
+                    if (matchCount >= skipCount && pagePairs.Count < pageSize) pagePairs.Add(pair);
+                    matchCount++;
+                }
+            }
 
-            var pagePairs = pairs.Skip((page - 1) * pageSize).Take(pageSize).ToList();
             var pageUserNames = await RunReportQueryHandler.ResolveUserNamesAsync(
                 pagePairs.Select(p => p.Row), visibleFields, _userRepo, ct, pagePairs.Select(p => p.Computed));
             return new PagedRecordResult
             {
                 Items = pagePairs.Select(p => Records.RecordResult.FromRow(p.Row, visibleFields, pageUserNames, p.Computed)).ToList(),
-                TotalCount = pairs.Count,
+                TotalCount = matchCount,
                 Page = page,
                 PageSize = pageSize,
             };
         }
 
+        // The columns read stay those the role may see; the SQL stand-ins of calculated fields the filter uses are added so their
+        // conditions resolve (a stand-in whose column is an expression is never SELECTed).
+        var standInsUsed = sqlAllFields.Where(f => f.IsSystem && f.Fid.HasValue && formulaFidsAll(f) && !visibleFields.Any(v => v.Id == f.Id)).ToList();
+        bool formulaFidsAll(PowerBase.Domain.Entities.AppField f) => ready.Contains(f.Id) || sqlFormulas.ContainsKey(f.Id);
+        var listFields = standInsUsed.Count == 0 ? SqlFields(visibleFields) : [.. SqlFields(visibleFields), .. standInsUsed];
         var rows = await _recordRepo.ListAsync(
-            table, visibleFields, page, pageSize,
+            table, listFields, page, pageSize,
             filterTree: effectiveFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
         var total = await _recordRepo.CountAsync(
-            table, fields, filterTree: effectiveFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+            table, sqlAllFields, filterTree: effectiveFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
         var relational = Relationships.ReferenceOriginalFallback.Apply(visibleFields, rows,
             await _relationalProjector.ProjectAsync(table, visibleFields, rows, ct));
