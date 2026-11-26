@@ -199,6 +199,9 @@ builder.Services.AddSwaggerGen(c =>
 // Infrastructure
 builder.Services.AddMemoryCache();
 builder.Services.Configure<PowerBase.Application.Common.Configurations.MetadataCacheOptions>(builder.Configuration.GetSection(PowerBase.Application.Common.Configurations.MetadataCacheOptions.SectionName));
+// SQL protection for the heaviest reads (whole-table scans): a few at a time per tenant DB, slowed under high Azure SQL load (doc 21).
+builder.Services.Configure<PowerBase.Application.Common.Configurations.SqlWorkloadOptions>(builder.Configuration.GetSection(PowerBase.Application.Common.Configurations.SqlWorkloadOptions.SectionName));
+builder.Services.AddSingleton<PowerBase.Infrastructure.Services.HeavyReadGovernor>();
 // ARC-01: the shared versions (meta.CacheVersion) that carry every cache invalidation to every API instance.
 builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.ICacheVersionStore, PowerBase.Infrastructure.Services.SqlCacheVersionStore>();
 builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.IMetadataCache, PowerBase.Infrastructure.Services.MetadataCache>();
