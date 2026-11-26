@@ -16,6 +16,12 @@ public sealed class AppFieldSchema : IFieldSchema
 {
     private readonly Dictionary<string, FieldRef> _byName = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<long, FieldRef> _byFid = new();
+    private readonly System.Text.StringBuilder _description = new();
+    private string? _signature;
+
+    /// <summary>Hash of everything a formula binds against here (each field's Fid, name, label, type, address flag), for
+    /// <see cref="CompiledFormulaCache"/>: two schemas with the same signature bind every expression the same way.</summary>
+    public string Signature => _signature ??= CompiledFormulaCache.Hash(_description);
 
     public AppFieldSchema(IReadOnlyList<AppField> fields)
     {
@@ -27,6 +33,7 @@ public sealed class AppFieldSchema : IFieldSchema
 
             var fid = (long)f.Fid.Value;
             var isAddress = f.TypeCode == "Address";
+            _description.Append(fid).Append('|').Append(f.Name.Length).Append(':').Append(f.Name).Append('|').Append(f.Label?.Length ?? -1).Append(':').Append(f.Label).Append('|').Append(type.Value).Append('|').Append(isAddress).Append(';');
             _byFid[fid] = new FieldRef(fid, string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label, type.Value, isAddress);
             // Always register by internal name.
             _byName[f.Name] = new FieldRef(fid, f.Name, type.Value, isAddress);

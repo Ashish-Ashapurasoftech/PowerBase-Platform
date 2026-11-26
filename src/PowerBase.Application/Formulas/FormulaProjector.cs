@@ -77,7 +77,10 @@ public sealed class FormulaProjector : IFormulaProjector
             var exprAndType = FormulaTypeMap.ExpressionAndType(f.TypeCode, f.Settings);
             if (exprAndType is { } et)
             {
-                var c = _engine.Compile(et.Expression, schema, et.Type, variableSchema: variableSchema);
+                // Cached across requests (FRM-01): the key holds the expression, the field list and the variables it binds against.
+                var c = variableSchema is null or AppVariableSchema
+                    ? CompiledFormulaCache.GetOrCompile(_engine, et.Expression, schema, et.Type, variableSchema as AppVariableSchema)
+                    : _engine.Compile(et.Expression, schema, et.Type, variableSchema: variableSchema);
                 formula = c.HasErrors ? null : c;
             }
             compiled.Add(((long)f.Fid!.Value, formula));
@@ -177,12 +180,12 @@ public sealed class FormulaProjector : IFormulaProjector
 
             if (bs.ButtonLabel?.Kind == ValueSourceKinds.Formula && !string.IsNullOrWhiteSpace(bs.ButtonLabel.Formula))
             {
-                var c = _engine.Compile(bs.ButtonLabel.Formula!, schema, FormulaType.Text);
+                var c = CompiledFormulaCache.GetOrCompile(_engine, bs.ButtonLabel.Formula!, schema, FormulaType.Text);
                 if (!c.HasErrors) labelComp = c;
             }
             if (bs.ButtonColor?.Kind == ValueSourceKinds.Formula && !string.IsNullOrWhiteSpace(bs.ButtonColor.Formula))
             {
-                var c = _engine.Compile(bs.ButtonColor.Formula!, schema, FormulaType.Text);
+                var c = CompiledFormulaCache.GetOrCompile(_engine, bs.ButtonColor.Formula!, schema, FormulaType.Text);
                 if (!c.HasErrors) colorComp = c;
             }
 
@@ -283,7 +286,7 @@ public sealed class FormulaProjector : IFormulaProjector
                 _logger?.LogWarning("[FormulaDependencies] formula {Fid} has no readable expression: it reads nothing", fid);
                 continue;
             }
-            var compiled = _engine.Compile(et.Expression, schema, et.Type);
+            var compiled = CompiledFormulaCache.GetOrCompile(_engine, et.Expression, schema, et.Type);
             if (compiled.HasErrors)
             {
                 _logger?.LogWarning("[FormulaDependencies] formula {Fid} does not compile: it evaluates to null and reads nothing", fid);
