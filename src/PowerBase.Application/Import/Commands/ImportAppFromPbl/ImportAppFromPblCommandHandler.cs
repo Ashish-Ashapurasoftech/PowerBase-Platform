@@ -1241,7 +1241,7 @@ public class ImportAppFromPblCommandHandler
                 {
                     // Report-level formula columns (source: QB::Report::Formula::*) are scoped to this one report —
                     // translate them now (needs the table's real fields, like any Formula field) and give each a
-                    // reserved Fid (ReportFormulaFields.FirstId..+2) so the Columns/sort resolution below picks them
+                    // reserved Fid (ReportFormulaFields.FirstId..+MaxFormulas-1) so the Columns/sort resolution below picks them
                     // up exactly like a real field. A formula that fails to translate or compiles to a type report
                     // formulas can't hold is left out of the name map — it then falls through to the same
                     // "column whose field was not created" handling as any other missing column.

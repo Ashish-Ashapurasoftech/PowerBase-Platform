@@ -12,8 +12,9 @@ namespace PowerBase.Application.Reports;
 /// </summary>
 public static class ReportFormulaFields
 {
-    /// <summary>A report can define at most this many formulas.</summary>
-    public const int MaxFormulas = 3;
+    /// <summary>A report can define at most this many formulas. The reserved id range (FirstId .. FirstId + MaxFormulas - 1) must stay clear
+    /// of <see cref="SummaryFormulaFields.FirstId"/> (2,000,000,101), so this can grow up to 100 without moving anything.</summary>
+    public const int MaxFormulas = 10;
 
     /// <summary>The first of the reserved ids (FirstId .. FirstId + MaxFormulas - 1) a report formula's virtual field uses. Far above
     /// any real field's Fid, and positive on purpose: negative computed-value keys already mean something else (an Action
