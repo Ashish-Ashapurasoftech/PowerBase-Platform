@@ -27,4 +27,10 @@ public interface IAppRepository
     Task<long> GetDatabaseSizeBytesAsync(CancellationToken ct = default);
     Task<long> GetFileStorageSizeBytesAsync(CancellationToken ct = default);
     Task DeleteAsync(Guid publicId, CancellationToken ct = default);
+
+    /// <summary>Stores the Quickbase source ids of an imported app and its tables (migration 098). With
+    /// <paramref name="onlyWhereEmpty"/> a value already stored is kept (update import); otherwise non-null values overwrite.
+    /// Tables are matched by their PowerBase id; a null value never clears a column.</summary>
+    Task SetQuickbaseIdsAsync(long appId, string? qbAppId, string? qbAppLogicalId,
+        IReadOnlyList<(long TableId, string? QbTableId, string? QbTableLogicalId)> tables, bool onlyWhereEmpty, CancellationToken ct = default);
 }

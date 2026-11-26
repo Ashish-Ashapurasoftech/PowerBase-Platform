@@ -53,7 +53,7 @@ public class PblPipelinesImporter(
 
     /// <summary>Imports the pipelines of <paramref name="apps"/> into the applications that were created
     /// (<paramref name="imported"/>). A pipeline whose application was not created is reported on the first one that was.</summary>
-    public virtual async Task ImportAsync(IReadOnlyList<ParsedApp> apps, IReadOnlyList<(ParsedApp App, ImportReport Report)> imported, CancellationToken ct, bool activate = false)
+    public virtual async Task ImportAsync(IReadOnlyList<ParsedApp> apps, IReadOnlyList<(ParsedApp App, ImportReport Report)> imported, CancellationToken ct, bool activate = false, bool strict = true)
     {
         var pipelines = apps.SelectMany(a => a.Pipelines ?? []).ToList();
         if (pipelines.Count == 0 || imported.Count == 0)
@@ -77,6 +77,13 @@ public class PblPipelinesImporter(
                         : "The application this pipeline belongs to was not imported, so neither was the pipeline.");
                     continue;
                 }
+                if (strict && PipelineCompleteness.Reason(pipeline) is { } incomplete)
+                {
+                    item.Status = PipelineImportStatuses.Skipped;
+                    item.NeedsReview = true;
+                    Issue(item, "PIPELINE_SKIPPED_NOT_COMPLETE", incomplete);
+                    continue;
+                }
                 await ImportOneAsync(pipeline, home.Report, resolver, item, ct);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -87,6 +94,11 @@ public class PblPipelinesImporter(
             finally
             {
                 item.NeedsReview |= item.Status != PipelineImportStatuses.Created || pipeline.ChangesExecution;
+            }
+            if (strict && !IsComplete(pipeline, item))
+            {
+                await SkipIncompleteAsync(item, ct);
+                continue;
             }
             if (activate && item.PipelinePublicId is { } publicId)
                 await ActivateAsync(publicId, item, ct);
@@ -140,6 +152,37 @@ public class PblPipelinesImporter(
             }
         }
         return report.Pipelines;
+    }
+
+    /// <summary>Issue codes after which the imported PowerFlow is not an exact copy of the Quickbase pipeline.</summary>
+    private static readonly HashSet<string> IncompleteCodes = new(StringComparer.Ordinal)
+    {
+        "PIPELINE_APP_NOT_IMPORTED", "PIPELINE_IMPORT_FAILED", "PIPELINE_STEPS_NOT_SAVED",
+        "PIPELINE_TRIGGER_NOT_SAVED", "PIPELINE_OVERWRITE_STEPS_KEPT",
+    };
+
+    /// <summary>Strict import: a pipeline is kept only when every step of the Quickbase pipeline was imported, none is a draft,
+    /// nothing was dropped and its schedule was created — i.e. the PowerFlow is a 100% copy.</summary>
+    public static bool IsComplete(PblPipeline pipeline, PipelineImportReportItem item) =>
+        !pipeline.IsUnreadable
+        && item.Status == PipelineImportStatuses.Created
+        && item.PipelinePublicId is not null
+        && PipelineCompleteness.Reason(pipeline) is null
+        && !item.Issues.Any(i => IncompleteCodes.Contains(i.Code));
+
+    /// <summary>Removes a PowerFlow that was not imported completely and reports the pipeline as skipped, with the reasons.</summary>
+    private async Task SkipIncompleteAsync(PipelineImportReportItem item, CancellationToken ct)
+    {
+        if (item.PipelinePublicId is { } id)
+        {
+            try { await pipelineRepo.DeleteAsync(id, ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { Issue(item, "PIPELINE_SKIP_CLEANUP_FAILED", $"Could not remove the partial PowerFlow ({Describe(ex)})."); }
+        }
+        item.PipelinePublicId = null;
+        item.Status = PipelineImportStatuses.Skipped;
+        item.NeedsReview = true;
+        item.StepsImported = 0;
+        Issue(item, "PIPELINE_SKIPPED_NOT_COMPLETE", "Skipped: the pipeline could not be imported 100% (see the other issues for each step that is missing or incomplete), so it was not created.");
     }
 
     private static PipelineImportReportItem NewItem(PblPipeline pipeline)

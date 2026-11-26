@@ -11,6 +11,7 @@ using PowerBase.Application.Relationships.Commands.CreateRelationship;
 using PowerBase.Application.Relationships.Commands.DeleteRelationship;
 using PowerBase.Application.Relationships.Commands.RemoveRelationshipField;
 using PowerBase.Application.Relationships.Commands.UpdateDisplayKey;
+using PowerBase.Application.Relationships.Commands.UpdateLookupSource;
 using PowerBase.Application.Relationships.Commands.UpdateParentLink;
 using PowerBase.Application.Relationships.Commands.UpdateProxyField;
 using PowerBase.Application.Relationships.Commands.UpdateReferenceFilter;
@@ -41,6 +42,8 @@ public class RelationshipsController : ControllerBase
     private readonly UpdateProxyFieldCommandHandler _updateProxyField;
     private readonly UpdateParentLinkCommandHandler _updateParentLink;
     private readonly AddRelationshipFormSectionCommandHandler _addFormSection;
+    private readonly UpdateLookupSourceCommandHandler _updateLookupSource;
+    private readonly GetLookupSourceOptionsQueryHandler _lookupSourceOptions;
 
     public RelationshipsController(
         CreateRelationshipCommandHandler createHandler,
@@ -58,7 +61,9 @@ public class RelationshipsController : ControllerBase
         UpdateReferenceFilterCommandHandler updateReferenceFilter,
         UpdateProxyFieldCommandHandler updateProxyField,
         UpdateParentLinkCommandHandler updateParentLink,
-        AddRelationshipFormSectionCommandHandler addFormSection)
+        AddRelationshipFormSectionCommandHandler addFormSection,
+        UpdateLookupSourceCommandHandler updateLookupSource,
+        GetLookupSourceOptionsQueryHandler lookupSourceOptions)
     {
         _createHandler = createHandler;
         _deleteHandler = deleteHandler;
@@ -76,6 +81,8 @@ public class RelationshipsController : ControllerBase
         _updateProxyField = updateProxyField;
         _updateParentLink = updateParentLink;
         _addFormSection = addFormSection;
+        _updateLookupSource = updateLookupSource;
+        _lookupSourceOptions = lookupSourceOptions;
     }
 
     /// <summary>Create a one-to-many relationship (provisions the reference, lookup and summary fields).</summary>
@@ -230,6 +237,33 @@ public class RelationshipsController : ControllerBase
     {
         var result = await _updateParentLink.HandleAsync(new UpdateParentLinkCommand(id, fieldId, request.DisplayAsLinkToParent), ct);
         return Ok(new ApiResponse<RelationshipDto>(result));
+    }
+
+    /// <summary>Lookup field options: the table's Reference fields (one per relationship it is the child of) and, for each,
+    /// the parent fields compatible with the type of value the lookup shows — plus the current choice.</summary>
+    [HttpGet("tables/{tableId:guid}/fields/{fieldId:guid}/lookup-source-options")]
+    [RequireAppPermission(PermissionCodes.FieldsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<LookupSourceOptionsDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> LookupSourceOptions(Guid tableId, Guid fieldId, CancellationToken ct)
+    {
+        var result = await _lookupSourceOptions.HandleAsync(tableId, fieldId, ct);
+        return Ok(new ApiResponse<LookupSourceOptionsDto>(result));
+    }
+
+    /// <summary>Lookup field options: point a Lookup at another Reference field (an existing relationship — none is
+    /// created) and/or another compatible Value field on that relationship's parent table.</summary>
+    [HttpPut("tables/{tableId:guid}/fields/{fieldId:guid}/lookup-source")]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<LookupSourceOptionsDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> UpdateLookupSource(Guid tableId, Guid fieldId, [FromBody] UpdateLookupSourceRequest request, CancellationToken ct)
+    {
+        await _updateLookupSource.HandleAsync(
+            new UpdateLookupSourceCommand(tableId, fieldId, request.RelationshipId, request.SourceFid, request.CommitMessage), ct);
+        var result = await _lookupSourceOptions.HandleAsync(tableId, fieldId, ct);
+        return Ok(new ApiResponse<LookupSourceOptionsDto>(result));
     }
 
     /// <summary>Set the dependent-dropdown conditions of the relationship's Reference field (empty clears them).</summary>

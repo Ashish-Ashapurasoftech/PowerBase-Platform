@@ -186,7 +186,7 @@ public class FieldSettingsGuard
             }
             else if (blockedTypeCodes is not null && blockedTypeCodes.Contains(target.TypeCode))
             {
-                errors[field] = [$"'{target.Label ?? target.Name}' ({target.TypeCode}) cannot be written by an Action Button here."];
+                errors[field] = [$"'{target.Label ?? target.Name}' ({PowerBase.Application.Relationships.RelationshipTypeLabel.Of(target)}) cannot be written by an Action Button here."];
             }
         }
 

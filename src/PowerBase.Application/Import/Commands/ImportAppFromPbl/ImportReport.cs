@@ -56,6 +56,8 @@ public static class PipelineImportStatuses
     /// <summary>The PowerFlow exists but its steps could not be saved; they are listed in the issues.</summary>
     public const string CreatedWithoutSteps = "CreatedWithoutSteps";
     public const string NotCreated = "NotCreated";
+    /// <summary>Strict import: not created because at least one step could not be imported exactly (reasons in the issues).</summary>
+    public const string Skipped = "Skipped";
 }
 
 /// <summary>A note about one pipeline or one of its steps. <see cref="StepId"/> is the Quickbase step id (or its location when the

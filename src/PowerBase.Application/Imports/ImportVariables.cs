@@ -103,7 +103,15 @@ public static class ImportVariables
     /// run's clock and user. Returns each variable's value as the text a filter value or a fixed value takes, or what is wrong.</summary>
     public static (IReadOnlyDictionary<string, string> Values, string? Error) Evaluate(IReadOnlyList<ImportVariable> variables, FormulaEngine engine, EvaluationOptions options)
     {
-        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var (raw, error) = EvaluateTyped(variables, engine, options);
+        return (raw.ToDictionary(p => p.Key, p => TextOf(p.Value), StringComparer.OrdinalIgnoreCase), error);
+    }
+
+    /// <summary>Like <see cref="Evaluate"/>, but each variable's value as the typed value its formula returned (text, number, true/false, date), which is what a
+    /// condition with a variable on its left side is compared with.</summary>
+    public static (IReadOnlyDictionary<string, object?> Values, string? Error) EvaluateTyped(IReadOnlyList<ImportVariable> variables, FormulaEngine engine, EvaluationOptions options)
+    {
+        var values = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
         if (variables.Count == 0) return (values, null);
 
         var (resolved, error) = ImportVirtual.Resolve(AsColumns(variables), [], engine);
@@ -118,7 +126,7 @@ public static class ImportVariables
             try { raw = v.Formula is null ? v.Text : FormulaRawValue.ToRaw(engine.Evaluate(v.Formula, context, options)); }
             catch (Exception ex) when (ex is not OperationCanceledException) { return (values, $"The variable '{v.Field.Name}' could not be calculated: {ex.Message}"); }
             row[v.Column] = raw;
-            values[v.Field.Name] = TextOf(raw);
+            values[v.Field.Name] = raw;
         }
         return (values, null);
     }
@@ -189,7 +197,7 @@ public static class ImportVariables
     }
 
     /// <summary>The messages the virtual column code gives, said for a variable.</summary>
-    private static string Wording(string message) => message.Replace("virtual columns", "variables").Replace("virtual column", "variable");
+    internal static string Wording(string message) => message.Replace("virtual columns", "variables").Replace("virtual column", "variable");
 
     private static string Shown(string name) => name.Length <= 30 ? name : name[..30] + "...";
 }

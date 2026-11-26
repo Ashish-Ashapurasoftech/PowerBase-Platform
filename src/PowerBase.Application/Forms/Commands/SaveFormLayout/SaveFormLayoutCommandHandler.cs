@@ -182,7 +182,7 @@ public class SaveFormLayoutCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Updated, AuditEntityTypes.Form, form.Id.ToString(),
-            ct: ct);
+            ct: ct, tableId: form.AppTableId);
 
         // The form's elements, and its rules' action targets (which resolve through this layout).
         await _refIndexer.ReindexFormAsync(command.FormPublicId, ct);

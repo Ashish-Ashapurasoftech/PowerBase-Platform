@@ -587,6 +587,79 @@ public class QblToPblConverterTests
     }
 
     [Fact]
+    public void Convert_SummaryLabelledLikeABuiltInField_IsNumberedSoTheAppStillValidates()
+    {
+        // M Kohn and Co: a Summary the app labelled "Record ID#" sits next to the table's own built-in Record ID#. PblValidator reserves the
+        // five system field names on every table, so the Summary must be numbered by the converter or DUPLICATE_FIELD_NAME blocks the whole app.
+        const string yaml = """
+        Version: '0.12'
+        Resources:
+          $App_Test:
+            Type: QB::Application
+            Properties:
+              Name: Test App
+            Tables:
+              $Table_Departments:
+                Type: QB::Table
+                Properties:
+                  Name: Departments
+                Fields:
+                  $Field_Dept_Name:
+                    Type: QB::Field::Text
+                    Properties:
+                      Label: Department Name
+                  $Field_Record_ID:
+                    Type: QB::Field::RecordID
+                    Properties:
+                      Label: Record ID#
+                  $Field_Latest_Employee:
+                    Type: QB::Field::Summary
+                    Properties:
+                      Label: Record ID#
+                      Summary:
+                        ReferenceField: !Ref
+                          Table: $Table_Employees
+                          Field: $Field_Related_Department
+                        FieldToSummarize: !Ref
+                          Table: $Table_Employees
+                          Field: $Field_Employee_Name
+                        Function: Maximum
+                Relationships:
+                  $Relationship_to_Departments_1:
+                    Type: QB::Relationship::Parent
+              $Table_Employees:
+                Type: QB::Table
+                Properties:
+                  Name: Employees
+                Fields:
+                  $Field_Employee_Name:
+                    Type: QB::Field::Text
+                    Properties:
+                      Label: Employee Name
+                  $Field_Related_Department:
+                    Type: QB::Field::Reference
+                    Properties:
+                      Label: Related Department
+                      Reference:
+                        Relationship: !Ref
+                          Relationship: $Relationship_to_Departments
+                Relationships:
+                  $Relationship_to_Departments:
+                    Type: QB::Relationship::Child
+                    Properties:
+                      Parent: !Ref
+                        Table: $Table_Departments
+                        Relationship: $Relationship_to_Departments_1
+        """;
+
+        var result = Convert(yaml);
+
+        result.Document.Relationships.Single().Summaries.Should().ContainSingle().Which.Name.Should().Be("Record ID# (2)");
+        new PowerBase.Application.Import.Pbl.PblValidator().Validate(result.Document).Issues
+            .Should().NotContain(i => i.Code == "DUPLICATE_FIELD_NAME");
+    }
+
+    [Fact]
     public void Convert_Relationship_ResolvesParentChildReferenceLookupAndSummary()
     {
         // Mirrors the confirmed real shape: the Child relationship node lives on the child
@@ -1190,6 +1263,322 @@ public class QblToPblConverterTests
         action.ActionType.Should().Be("Require");
         action.TargetType.Should().Be("Field");
         action.TargetElementRef.Should().Be("$Table_Clients::$FormV2_Main_Form::$FormV2Section_1::$FormV2Column_1::$FormV2Element_1");
+    }
+
+    [Fact]
+    public void Convert_FormElementWidth_PercentAndPixelWidthsBecomeCustomWidths_DefaultStaysAutomatic()
+    {
+        var result = Convert(TableWithForm("""
+          $FormV2_Main_Form:
+            Type: QB::FormV2
+            Properties:
+              Name: Main Form
+            Pages:
+              $FormV2Page_1:
+                Type: QB::FormV2::Page
+                Sections:
+                  $FormV2Section_1:
+                    Type: QB::FormV2::Section
+                    Columns:
+                      $FormV2Column_1:
+                        Type: QB::FormV2::Column
+                        Elements:
+                          $FormV2Element_Percent:
+                            Type: QB::FormV2::Element::Field
+                            Properties:
+                              Width: 28%
+                              Field: !Ref
+                                Field: $Field_Name
+                          $FormV2Element_Pixels:
+                            Type: QB::FormV2::Element::Field
+                            Properties:
+                              Width: 400px
+                              Field: !Ref
+                                Field: $Field_Name
+                          $FormV2Element_Default:
+                            Type: QB::FormV2::Element::Field
+                            Properties:
+                              Width: Default
+                              Field: !Ref
+                                Field: $Field_Name
+        """));
+
+        var elements = result.Document.Forms[0].Sections[0].Blocks[0].Elements;
+        elements.Should().HaveCount(3);
+        elements[0].ContentWidthMode.Should().Be("custom");
+        elements[0].ContentWidthValue.Should().Be(28);
+        elements[0].ContentWidthUnit.Should().Be("%");
+        elements[1].ContentWidthMode.Should().Be("custom");
+        elements[1].ContentWidthValue.Should().Be(400);
+        elements[1].ContentWidthUnit.Should().Be("px");
+        elements[2].ContentWidthMode.Should().BeNull();
+        elements[2].ContentWidthValue.Should().BeNull();
+    }
+
+    private const string TwoSectionFormWithRule = """
+          $FormV2_Main_Form:
+            Type: QB::FormV2
+            Properties:
+              Name: Main Form
+            Pages:
+              $FormV2Page_1:
+                Type: QB::FormV2::Page
+                Sections:
+                  $FormV2Section_1:
+                    Type: QB::FormV2::Section
+                    Properties:
+                      Title: Top
+                    Columns:
+                      $FormV2Column_1:
+                        Type: QB::FormV2::Column
+                        Elements:
+                          $FormV2Element_Caption:
+                            Type: QB::FormV2::Element::RichText
+                            Properties:
+                              Content: Caption
+                          $FormV2Element_1:
+                            Type: QB::FormV2::Element::Field
+                            Properties:
+                              Field: !Ref
+                                Field: $Field_Name
+                  $FormV2Section_2:
+                    Type: QB::FormV2::Section
+                    Properties:
+                      Title: Bottom
+                    Columns:
+                      $FormV2Column_1:
+                        Type: QB::FormV2::Column
+                        Elements:
+                          $FormV2Element_2:
+                            Type: QB::FormV2::Element::Field
+                            Properties:
+                              Field: !Ref
+                                Field: $Field_Name
+            Rules:
+              $FormV2Rule_Test:
+                Type: QB::FormV2::Rule
+                Properties:
+                  Name: Test
+                  RunOn: RecordOpenSaveOrChange
+                When:
+                  - Type: QB::FormV2::Rule::Condition::Group
+                    When:
+                      - Type: QB::FormV2::Rule::Condition::Field
+                        Properties:
+                          Field: !Ref
+                            Field: $Field_Name
+                          Comparison: IsEqualTo
+                          Value: '1'
+                Actions:
+        __ACTIONS__
+        """;
+
+    [Fact]
+    public void Convert_FormRule_ShowActionTargetingOneElement_TargetsTheElementNotItsSection()
+    {
+        // Quickbase writes an element target as section + column + element. The element is the target; the section and column are its address.
+        var result = Convert(TableWithForm(TwoSectionFormWithRule.Replace("__ACTIONS__", """
+                  - Type: QB::FormV2::Rule::Action::Show
+                    Properties:
+                      Target: !Ref
+                        FormV2Section: $FormV2Section_1
+                        FormV2Column: $FormV2Column_1
+                        FormV2Element: $FormV2Element_Caption
+        """)));
+
+        var action = result.Document.Forms[0].Rules.Should().ContainSingle().Subject.Actions.Should().ContainSingle().Subject;
+        action.ActionType.Should().Be("Show");
+        action.TargetType.Should().Be("Field");
+        action.TargetElementRef.Should().Be("$Table_Clients::$FormV2_Main_Form::$FormV2Section_1::$FormV2Column_1::$FormV2Element_Caption");
+        action.TargetSectionRef.Should().BeNull();
+        action.TargetBlockRef.Should().BeNull();
+    }
+
+    [Fact]
+    public void Convert_FormRule_ActionTargetingAColumn_TargetsThatSectionsColumn()
+    {
+        // "$FormV2Column_1" exists in both sections; the section in the target says which one is meant (and must not widen it to the section).
+        var result = Convert(TableWithForm(TwoSectionFormWithRule.Replace("__ACTIONS__", """
+                  - Type: QB::FormV2::Rule::Action::MakeReadonly
+                    Properties:
+                      Target: !Ref
+                        FormV2Section: $FormV2Section_1
+                        FormV2Column: $FormV2Column_1
+        """)));
+
+        var action = result.Document.Forms[0].Rules.Should().ContainSingle().Subject.Actions.Should().ContainSingle().Subject;
+        action.TargetType.Should().Be("Block");
+        action.TargetBlockRef.Should().Be("$Table_Clients::$FormV2_Main_Form::$FormV2Section_1::$FormV2Column_1");
+        action.TargetSectionRef.Should().BeNull();
+    }
+
+    [Fact]
+    public void Convert_FormRule_ActionTargetingAnElementThatWasNotImported_IsSkippedNotWidenedToTheSection()
+    {
+        var result = Convert(TableWithForm(TwoSectionFormWithRule.Replace("__ACTIONS__", """
+                  - Type: QB::FormV2::Rule::Action::Show
+                    Properties:
+                      Target: !Ref
+                        FormV2Section: $FormV2Section_1
+                        FormV2Column: $FormV2Column_1
+                        FormV2Element: $FormV2Element_Missing
+                  - Type: QB::FormV2::Rule::Action::Require
+                    Properties:
+                      Target: !Ref
+                        Field: $Field_Name
+        """)));
+
+        var actions = result.Document.Forms[0].Rules.Should().ContainSingle().Subject.Actions;
+        actions.Should().ContainSingle().Which.ActionType.Should().Be("Require");
+        result.Issues.Should().Contain(i => i.Code == "QBL_FORM_RULE_ACTION_TARGET_UNAVAILABLE");
+    }
+
+    [Fact]
+    public void Convert_FormRule_ActionTargetingAFieldThatIsNotOnTheForm_IsKeptAsAMissingTarget()
+    {
+        var yaml = TableWithForm(TwoSectionFormWithRule.Replace("__ACTIONS__", """
+                  - Type: QB::FormV2::Rule::Action::Hide
+                    Properties:
+                      Target: !Ref
+                        Field: $Field_Hidden
+        """)).Replace("Label: Company Name", "Label: Company Name\n          $Field_Hidden:\n            Type: QB::Field::Checkbox\n            Properties:\n              Label: Hidden Thing");
+
+        var result = Convert(yaml);
+
+        var action = result.Document.Forms[0].Rules.Should().ContainSingle().Subject.Actions.Should().ContainSingle().Subject;
+        action.ActionType.Should().Be("Hide");
+        action.TargetType.Should().Be("Field");
+        action.TargetElementRef.Should().BeNull();
+        action.TargetFieldName.Should().Be("Hidden Thing");
+        result.Issues.Should().Contain(i => i.Code == "QBL_FORM_RULE_TARGET_FIELD_NOT_ON_FORM");
+        result.Issues.Should().NotContain(i => i.Code == "QBL_FORM_RULE_ACTION_TARGET_UNAVAILABLE");
+    }
+
+    private const string TwoAppsWithReportLink = """
+        Version: '0.12'
+        Resources:
+          $App_Billing:
+            Type: QB::Application
+            Properties:
+              Name: Billing App
+            Tables:
+              $Table_Sessions:
+                Type: QB::Table
+                Properties:
+                  Name: Sessions
+                Fields:
+                  $Field_Session_ID:
+                    Type: QB::Field::RecordID
+                    Properties:
+                      Label: Record ID#
+                  $Field_Note_Records:
+                    Type: QB::Field::ReportLink
+                    Properties:
+                      LinkText: Notes
+                      FieldRelationship:
+                        Source: !Ref
+                          Field: $Field_Session_ID
+                        Target: __TARGET__
+                      Label: Note Records
+          $App_Aux:
+            Type: QB::Application
+            Properties:
+              Name: Aux App
+            Tables:
+              $Table_Notes:
+                Type: QB::Table
+                Properties:
+                  Name: Notes
+                Fields:
+                  $Field_Related_Session:
+                    Type: QB::Field::Text
+                    Properties:
+                      Label: Related Session
+        """;
+
+    [Fact]
+    public void Convert_ReportLink_OpeningATableOfAnotherApp_KeepsTheOtherAppAndTable()
+    {
+        var yaml = TwoAppsWithReportLink.Replace("__TARGET__", "!Ref\n                          App: $App_Aux\n                          Table: $Table_Notes\n                          Field: $Field_Related_Session");
+
+        var result = QblToPblConverter.ConvertAll(QblSerializer.Deserialize(yaml))[0];
+
+        var link = result.Document.Tables.Single(t => t.Name == "Sessions").ReportLinks.Should().ContainSingle().Subject;
+        link.TargetAppName.Should().Be("Aux App");
+        link.TargetTableName.Should().Be("Notes");
+        link.TargetFieldName.Should().Be("Related Session");
+        link.SourceFieldName.Should().BeNull();
+        result.Issues.Should().NotContain(i => i.Code == "QBL_REPORT_LINK_TARGET_UNAVAILABLE");
+    }
+
+    [Fact]
+    public void Convert_ReportLink_WithADefaultTarget_StaysAReportLinkWithNoTarget()
+    {
+        var yaml = TwoAppsWithReportLink.Replace("__TARGET__", "Default");
+
+        var result = QblToPblConverter.ConvertAll(QblSerializer.Deserialize(yaml))[0];
+
+        var sessions = result.Document.Tables.Single(t => t.Name == "Sessions");
+        sessions.Fields.Should().NotContain(f => f.Label == "Note Records");
+        var kept = sessions.ReportLinks.Should().ContainSingle().Subject;
+        kept.NoTarget.Should().BeTrue();
+        kept.Label.Should().Be("Note Records");
+        result.Issues.Should().Contain(i => i.Code == "QBL_REPORT_LINK_TARGET_UNAVAILABLE" && i.Message.Contains("'Default'"));
+    }
+
+    [Fact]
+    public void Convert_FormGroup_WithAFieldAndARichTextBlock_KeepsBothInTheGroup()
+    {
+        var result = Convert(TableWithForm("""
+              $FormV2_Main_Form:
+                Type: QB::FormV2
+                Properties:
+                  Name: Main Form
+                Pages:
+                  $FormV2Page_1:
+                    Type: QB::FormV2::Page
+                    Sections:
+                      $FormV2Section_1:
+                        Type: QB::FormV2::Section
+                        Columns:
+                          $FormV2Column_1:
+                            Type: QB::FormV2::Column
+                            Elements:
+                              $FormV2Element_Group:
+                                Type: QB::FormV2::Element::Group
+                                Elements:
+                                  $FormV2Element_1:
+                                    Type: QB::FormV2::Element::Field
+                                    Properties:
+                                      Field: !Ref
+                                        Field: $Field_Name
+                                  $FormV2Element_Spacer:
+                                    Type: QB::FormV2::Element::RichText
+                                    Properties:
+                                      LabelOverride: Spacer
+                                      Content:
+                                      Width: Default
+        """));
+
+        var elements = result.Document.Forms[0].Sections.SelectMany(s => s.Blocks).SelectMany(b => b.Elements).ToList();
+        elements.Should().HaveCount(2);
+        elements.Select(e => e.GroupRef).Should().OnlyContain(g => g != null).And.AllBeEquivalentTo(elements[0].GroupRef);
+        elements.Should().Contain(e => e.ElementType == "StaticText" && e.Name == "Spacer");
+    }
+
+    [Fact]
+    public void Convert_FormRule_ActionTargetingASection_StillTargetsTheSection()
+    {
+        var result = Convert(TableWithForm(TwoSectionFormWithRule.Replace("__ACTIONS__", """
+                  - Type: QB::FormV2::Rule::Action::MakeReadonly
+                    Properties:
+                      Target: !Ref
+                        FormV2Section: $FormV2Section_2
+        """)));
+
+        var action = result.Document.Forms[0].Rules.Should().ContainSingle().Subject.Actions.Should().ContainSingle().Subject;
+        action.TargetType.Should().Be("Section");
+        action.TargetSectionRef.Should().Be("$Table_Clients::$FormV2_Main_Form::$FormV2Section_2");
     }
 
     [Fact]

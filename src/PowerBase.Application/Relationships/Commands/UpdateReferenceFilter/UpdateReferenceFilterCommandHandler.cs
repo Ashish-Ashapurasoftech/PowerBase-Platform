@@ -115,7 +115,7 @@ public class UpdateReferenceFilterCommandHandler
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, referenceField.Id.ToString(),
             $"Dependent dropdown filter updated on {child.Name}.{referenceField.Label ?? referenceField.Name} ({conditions.Count} condition(s), {(tree is null ? "no" : "a")} filter tree"
                 + $"{(settings.FilterDisabled == true ? ", switched off" : "")}{(settings.ShowAllWhenBlank == true ? ", shows all while blank" : "")})",
-            appId: child.AppId, ct: ct);
+            appId: child.AppId, ct: ct, tableId: child.Id);
 
         return await _queries.GetAsync(rel.PublicId, ct);
     }

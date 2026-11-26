@@ -238,7 +238,10 @@ public class SearchIndexerWorker : BackgroundService
         var slotReleases = new List<(ServiceBusReceivedMessage Owner, long TenantId, long TableId, long Fid, string Slot)>();
         var versionChecks = new List<(long TenantId, long TableId, long AppId, IReadOnlyDictionary<Guid, long> Before, List<PendingUpsert> Upserts)>();
         // Pages of recorded field jobs: the job moves from FromAfterId to the next page's start (Next), or ends (Next null).
-        var jobSteps = new List<(ServiceBusReceivedMessage Owner, long TenantId, long JobId, long FromAfterId, SearchIndexMessage? Next)>();
+        // TableId / Fid: the field the job is about. Wrote: this page wrote the field's values (a backfill with a column to write), so the
+        // job's last page is when a stored field is fully in the index.
+        var jobSteps = new List<(ServiceBusReceivedMessage Owner, long TenantId, long JobId, long FromAfterId, SearchIndexMessage? Next,
+            long TableId, long Fid, bool Wrote)>();
         // Changes this batch settles, to be confirmed to the outbox once the index really holds them.
         var pendingAcks = new List<(long TenantId, long TableId, SearchOutboxAck Ack, ServiceBusReceivedMessage Owner)>();
 
@@ -331,7 +334,7 @@ public class SearchIndexerWorker : BackgroundService
                         // A recorded job moves forward (or ends) only once this page is in the index; with no column left to write
                         // it simply ends.
                         if (message.JobId is long jobId)
-                            jobSteps.Add((sbMessage, message.TenantId, jobId, message.AfterId ?? 0, next));
+                            jobSteps.Add((sbMessage, message.TenantId, jobId, message.AfterId ?? 0, next, message.TableId, fid, !isNullify && plan.HasTarget));
                         else if (next != null)
                             continuations.Add((sbMessage, next));
                     }
@@ -520,14 +523,18 @@ public class SearchIndexerWorker : BackgroundService
             // Recorded field jobs: compare-and-set from the page's start, so a job the relay re-sent and its original never both carry on
             // (the run that loses stops here). A failure throws out to the batch retry; if the job moved but its next page was not sent,
             // the relay re-sends it from there once its progress has stopped.
-            foreach (var (owner, tenantId, jobId, fromAfterId, next) in jobSteps)
+            foreach (var (owner, tenantId, jobId, fromAfterId, next, jobTableId, jobFid, wrote) in jobSteps)
             {
                 if (!messagesToComplete.Contains(owner)) continue;
                 using var scope = _serviceProvider.CreateScope();
                 scope.ServiceProvider.GetRequiredService<IQueryContext>().SetTenantId(tenantId);
                 var jobs = scope.ServiceProvider.GetRequiredService<ISearchFieldJobs>();
                 if (next == null)
+                {
+                    // Before the job row is removed (the check reads its CreatedOn): a stored field waiting for this job is now in the index.
+                    await MarkStoredFieldAsync(scope.ServiceProvider, tenantId, jobTableId, jobFid, jobId, fromAfterId, wrote, stoppingToken);
                     await jobs.CompleteAsync(jobId, fromAfterId, stoppingToken);
+                }
                 else if (await jobs.AdvanceAsync(jobId, fromAfterId, next.AfterId!.Value, stoppingToken))
                     await scope.ServiceProvider.GetRequiredService<IMessagePublisher>().PublishAsync(next, stoppingToken);
             }
@@ -626,6 +633,50 @@ public class SearchIndexerWorker : BackgroundService
         {
             _logger.LogWarning(ex, "Could not dead-letter message {MessageId} ({Reason}).", message.MessageId, reason);
         }
+    }
+
+    /// <summary>
+    /// The last page of a field job is in the index: a stored Lookup / Summary / Formula that was waiting for this job becomes Indexed (its
+    /// values may now be read from the index), or Failed when the job had no column to write it to. Does nothing for a normal field. Never
+    /// throws: the field simply stays Indexing (read from SQL), which is always correct, and the job still completes.
+    /// </summary>
+    private async Task MarkStoredFieldAsync(IServiceProvider services, long tenantId, long tableId, long fid, long jobId, long fromAfterId, bool wrote, CancellationToken ct)
+    {
+        if (services.GetService<ISearchIndexStates>() is not { } states) return;
+        try
+        {
+            if (!wrote)
+            {
+                await states.MarkNotIndexedAsync(tableId, fid, jobId, ct);
+                return;
+            }
+            if (await states.MarkIndexedAsync(tableId, fid, jobId, fromAfterId, ct) is { } indexed)
+                _ = CheckExactInBackgroundAsync(tenantId, indexed, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Could not record that field {Fid} of table {TableId} is in the search index; it keeps being read from SQL.", fid, tableId);
+        }
+    }
+
+    /// <summary>
+    /// Decision Q2: the digit check reads one column of the whole table, so it runs after the batch, in its own scope, and never holds up the
+    /// messages (their locks would run out). Until it finishes the field stays SearchExact = 0: filters use the index, sort and shown value SQL.
+    /// </summary>
+    private async Task CheckExactInBackgroundAsync(long tenantId, SearchIndexedField field, CancellationToken ct)
+    {
+        await Task.Yield();
+        try
+        {
+            using var scope = _serviceProvider.CreateScope();
+            scope.ServiceProvider.GetRequiredService<IQueryContext>().SetTenantId(tenantId);
+            await scope.ServiceProvider.GetRequiredService<ISearchIndexStates>().CheckExactAsync(field, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Could not check the digits of stored field {FieldId}; its sort and shown values stay on SQL.", field.FieldId);
+        }
+        catch (OperationCanceledException) { /* shutting down: stays not exact, which is safe */ }
     }
 
     private static string Truncate(string value, int max) =>

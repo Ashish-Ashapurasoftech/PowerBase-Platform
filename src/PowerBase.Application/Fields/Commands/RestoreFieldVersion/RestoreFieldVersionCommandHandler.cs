@@ -134,6 +134,13 @@ public class RestoreFieldVersionCommandHandler
         if (target.IsUnique || existing.IsUnique)
             await _schemaEngine.SetUniqueAsync(table, existing, target.IsUnique, ct);
 
+        // A Lookup / Summary / Formula is always Searchable and Filterable (decision Q4), also when an older version had them off.
+        target = target with
+        {
+            IsSearchable = PowerBase.Domain.Constants.ComputedFieldSearch.Apply(target.IsSearchable, existing.TypeCode, existing.IsHidden, existing.IsSystem),
+            IsFilterable = PowerBase.Domain.Constants.ComputedFieldSearch.Apply(target.IsFilterable, existing.TypeCode, existing.IsHidden, existing.IsSystem),
+        };
+
         bool wasSearchable = existing.IsSearchable;
         bool wasFilterable = existing.IsFilterable;
         bool wasEligible = wasSearchable || wasFilterable;
@@ -186,7 +193,7 @@ public class RestoreFieldVersionCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, existing.PublicId.ToString(),
-            $"Field '{label}' restored to version {command.VersionToRestore} In TableName : {table.Name}", appId: table.AppId, ct: ct);
+            $"Field '{label}' restored to version {command.VersionToRestore} In TableName : {table.Name}", appId: table.AppId, ct: ct, tableId: table.Id);
 
         // A restored version can change the formula/settings AND the label other formulas bind to.
         await _refIndexer.ReindexTableFieldsAsync(table.Id, ct);

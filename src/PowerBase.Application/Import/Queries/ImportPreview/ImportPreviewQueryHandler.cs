@@ -3,6 +3,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Import.Commands.ImportAppFromPbl;
 using PowerBase.Application.Import.Pbl;
 using PowerBase.Application.Import.Qbl;
+using PowerBase.Application.Import.Quickbase;
 using PowerBase.Application.Import.Reporting;
 using YamlDotNet.Core;
 
@@ -14,11 +15,14 @@ public class ImportPreviewQueryHandler
     private readonly IAppRepository _appRepo;
 
     private readonly PowerBase.Application.Import.Services.PipelineOnlyImportService? _pipelineOnly;
+    private readonly QuickbaseIdResolver? _qbResolver;
 
     public ImportPreviewQueryHandler(PblValidator validator, IAppRepository appRepo,
-        PowerBase.Application.Import.Services.PipelineOnlyImportService? pipelineOnly = null)
+        PowerBase.Application.Import.Services.PipelineOnlyImportService? pipelineOnly = null,
+        QuickbaseIdResolver? qbResolver = null)
     {
         _pipelineOnly = pipelineOnly;
+        _qbResolver = qbResolver;
         _validator = validator;
         _appRepo = appRepo;
     }
@@ -64,6 +68,12 @@ public class ImportPreviewQueryHandler
             foreach (var dup in group.Skip(1))
                 dup.Warnings.Add(new PblIssueDto { Code = "APP_NAME_DUPLICATED_IN_FILE", Message = $"Another application in this file is also named '{dup.AppName}'. Rename one of them to import both.", ElementRef = dup.AppRef });
 
+        // Quickbase ids (app id from the catalog, table ids from Quickbase's API) — one app after another: the apps of one file
+        // usually share a user token, and parallel calls on one token can hit Quickbase's rate limit.
+        if (_qbResolver is not null)
+            for (var i = 0; i < apps.Count; i++)
+                await ResolveQuickbaseIdsAsync(apps[i], parsed[i], ct);
+
         // Built last, once every per-app warning (including the cross-app duplicate-name one above) is final.
         for (var i = 0; i < apps.Count; i++)
             apps[i].Issues = ImportIssueReportBuilder.BuildFromPreview(apps[i].AppName, apps[i].Errors, apps[i].Warnings, parsed[i].Document);
@@ -95,6 +105,7 @@ public class ImportPreviewQueryHandler
                 LogicalRef = f.LogicalRef,
                 Name = f.Name,
                 TypeCode = f.TypeCode,
+                ResultTypeCode = PowerBase.Application.Relationships.RelationshipTypeLabel.ValueType(f.TypeCode, f.Settings),
                 IsSupported = PblValidator.IsCreatableFieldType(f.TypeCode),
                 IsPendingValidation = string.Equals(f.TypeCode, PblValidator.FormulaTypeCode, StringComparison.OrdinalIgnoreCase),
             }).ToList(),
@@ -153,6 +164,16 @@ public class ImportPreviewQueryHandler
             Pipelines = mode == ImportMode.CreateNewApp ? (parsed.Pipelines ?? []).Select(ToPipelineItem).ToList() : [],
         };
     }
+
+    private async Task ResolveQuickbaseIdsAsync(ImportPreviewAppItem item, ParsedApp parsed, CancellationToken ct)
+    {
+        var logicalId = string.IsNullOrWhiteSpace(parsed.Document.App?.LogicalRef) ? parsed.AppRef : parsed.Document.App!.LogicalRef;
+        item.Quickbase = await _qbResolver!.ResolveAsync(logicalId, QuickbaseFileTables(parsed.Document), ct: ct);
+    }
+
+    /// <summary>The file's tables as the Quickbase id resolver needs them.</summary>
+    public static List<QuickbaseFileTable> QuickbaseFileTables(PblDocument document) =>
+        (document.Tables ?? []).Select(t => new QuickbaseFileTable(t.LogicalRef, t.Name, t.AliasHint)).ToList();
 
     private static ImportPreviewPipelineItem ToPipelineItem(PblPipeline pipeline) => new()
     {
@@ -227,7 +248,7 @@ public class ImportPreviewQueryHandler
             }).ToList(),
         };
         var built = ImportIssueReportBuilder.BuildFromImportReport(item.AppName, report, document: null);
-        var issues = built.Issues.Select(i => i.ElementType != "Pipeline" ? i : new ImportIssue
+        var issues = built.Issues.Select(i => i.ElementType != "Pipeline" ? Regrouped(i) : new ImportIssue
         {
             Severity = i.Severity,
             ApplicationName = i.ApplicationName,
@@ -250,6 +271,29 @@ public class ImportPreviewQueryHandler
                 InformationCount = built.Summary.InformationCount,
                 AffectedFieldCount = issues.Where(i => i.Severity != ImportIssueSeverity.Information).Select(i => (i.TableName, i.FieldName)).Distinct().Count(),
             },
+        };
+    }
+
+    /// <summary>A file-level entry in a group of its own instead of one long "General" list: a PowerFlow left out gets its
+    /// PowerFlow's group (like the step issues of the imported ones), an unmatched Quickbase table the tables' group.</summary>
+    private static ImportIssue Regrouped(ImportIssue i)
+    {
+        const string PREFIX = "PowerFlow '", MIDDLE = "' is not imported: ";
+        // The report builder drops the code of these entries, so they are told apart by their (fixed) message.
+        (string? table, string? field) = i.Description switch
+        {
+            var d when d.StartsWith(PREFIX, StringComparison.Ordinal) && d.IndexOf(MIDDLE, StringComparison.Ordinal) is var end and > 0
+                => ($"PowerFlow: {d[PREFIX.Length..end]}", "Not imported"),
+            var d when d.StartsWith("No existing table matches Quickbase table '", StringComparison.Ordinal)
+                => ("Quickbase tables not found", "Table"),
+            _ => (null, null),
+        };
+        if (table is null) return i;
+        return new ImportIssue
+        {
+            Severity = i.Severity, ApplicationName = i.ApplicationName, TableName = table, FieldName = field,
+            ElementType = i.ElementType, Description = i.Description, OriginalConfiguration = i.OriginalConfiguration,
+            RecommendedAction = i.RecommendedAction, Code = i.Code, TechnicalDetail = i.TechnicalDetail,
         };
     }
 

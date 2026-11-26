@@ -81,6 +81,9 @@ public static class PipelineFilterEvaluator
         if (PowerBase.Application.Formulas.FormulaTypeMap.IsFormulaComputed(field.TypeCode, field.Settings)
             || field.TypeCode is "Lookup" or "Summary")
         {
+            // A Lookup of a Reference field pulls down the parent's record id — a number in Quickbase
+            // (e.g. "Next Related Task Type greater than 0"), so it compares as a number, not text.
+            if (field.TypeCode == "Lookup" && LookupResultIsReference(field.Settings)) return "NUMBER";
             return PowerBase.Application.Formulas.FormulaTypeMap.FieldType(field.TypeCode, field.Settings) switch
             {
                 PowerBase.Formula.Types.FormulaType.Number or PowerBase.Formula.Types.FormulaType.Duration => "NUMBER",
@@ -91,6 +94,18 @@ public static class PipelineFilterEvaluator
             };
         }
         return GetTypeCategory(field.TypeCode);
+    }
+
+    private static bool LookupResultIsReference(string? settings)
+    {
+        if (string.IsNullOrWhiteSpace(settings)) return false;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(settings);
+            return doc.RootElement.TryGetProperty("resultTypeCode", out var r) && r.ValueKind == System.Text.Json.JsonValueKind.String
+                && string.Equals(r.GetString(), "Reference", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (System.Text.Json.JsonException) { return false; }
     }
 
     public static string GetTypeCategory(string typeCode)

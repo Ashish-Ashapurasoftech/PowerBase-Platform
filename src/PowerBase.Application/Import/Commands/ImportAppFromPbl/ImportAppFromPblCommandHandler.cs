@@ -17,6 +17,7 @@ using PowerBase.Application.Import.FormulaTranslation;
 using PowerBase.Application.Import.Mapping;
 using PowerBase.Application.Import.Pbl;
 using PowerBase.Application.Import.Qbl;
+using PowerBase.Application.Import.Quickbase;
 using PowerBase.Application.Import.Reporting;
 using PowerBase.Application.Import.Services;
 using PowerBase.Application.Relationships;
@@ -107,6 +108,7 @@ public class ImportAppFromPblCommandHandler
     private readonly PipelineOnlyImportService? _pipelineOnlyImport;
     private readonly IAuditRepository? _auditRepo;
     private readonly ImportFieldNoteRecorder? _fieldNoteRecorder;
+    private readonly IQuickbaseCatalogRepository? _quickbaseCatalog;
 
     public ImportAppFromPblCommandHandler(
         PblValidator validator,
@@ -142,8 +144,10 @@ public class ImportAppFromPblCommandHandler
         PipelineOnlyImportService? pipelineOnlyImport = null,
         PendingConnectedTableResolver? pendingConnectedTableResolver = null,
         IAuditRepository? auditRepo = null,
-        ImportFieldNoteRecorder? fieldNoteRecorder = null)
+        ImportFieldNoteRecorder? fieldNoteRecorder = null,
+        IQuickbaseCatalogRepository? quickbaseCatalog = null)
     {
+        _quickbaseCatalog = quickbaseCatalog;
         _pipelineOnlyImport = pipelineOnlyImport;
         _fieldNoteRecorder = fieldNoteRecorder;
         _auditRepo = auditRepo;
@@ -235,7 +239,7 @@ public class ImportAppFromPblCommandHandler
         var apps = ParseUploaded(command.PblJson);
         if (apps.Count > 1)
             throw new BadRequestException("IMPORT_MULTIPLE_APPS", "This file contains several applications; import it with the multi-application import.");
-        var single = await ImportOneAsync(apps[0], command.Mapping?.ExcludedTableRefs, null, ct);
+        var single = await ImportOneAsync(apps[0], command.Mapping?.ExcludedTableRefs, null, ct, command.Mapping?.ForApp(apps[0].AppRef));
         if (_connectedTablesApplier is not null)
             await _connectedTablesApplier.ApplyAsync([(apps[0].Document, single)], ct); // resolved against every app the tenant has, this one included
         await ResolvePendingConnectedTablesAsync(ct);
@@ -288,7 +292,7 @@ public class ImportAppFromPblCommandHandler
             ImportProgress.BeginApp(i, included.Count, nameOverride ?? app.Document.App?.Name ?? app.AppRef);
             try
             {
-                var report = await ImportOneAsync(app, excluded, nameOverride, ct);
+                var report = await ImportOneAsync(app, excluded, nameOverride, ct, entry);
                 batch.Apps.Add(report);
                 importedDocuments.Add((app.Document, report));
                 importedApps.Add((app, report));
@@ -518,16 +522,13 @@ public class ImportAppFromPblCommandHandler
 
             var existing = await _fieldRepo.ListByTableAsync(table.Id, ct);
             var usedLabels = existing.Select(f => (f.Label ?? "").Trim()).Where(l => l.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var usedNames = existing.Select(f => f.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             var items = new List<(PlaceholderWanted W, BulkCreateFieldItem Item)>();
             foreach (var w in group)
             {
                 // The field exists already (it was created after all - an earlier warning about it does not mean it failed): nothing to stand in for.
-                if (usedNames.Contains(w.Name))
-                    continue;
-                // Same for a reference field whose relationship was created after all (only part of it failed).
-                if (w.Code == "REFERENCE_NOT_CREATED" && usedLabels.Contains((w.Label ?? w.Name).Trim()))
+                // A real summary or lookup carries a generated Name, so it is recognised by its field number or label (see ImportStandIns).
+                if (!ImportStandIns.IsNeeded(w.Code, w.Name, w.Label, w.Fid, existing))
                     continue;
                 var label = UniqueLabel((w.Label ?? w.Name).Trim(), usedLabels);
                 items.Add((w, new BulkCreateFieldItem(w.TypeCode, label, Description: string.IsNullOrWhiteSpace(w.Description) ? null : w.Description,
@@ -783,7 +784,8 @@ public class ImportAppFromPblCommandHandler
         _ => "The application could not be imported because of an unexpected error.",
     };
 
-    private async Task<ImportReport> ImportOneAsync(ParsedApp parsed, IReadOnlyCollection<string>? excludedTableRefs, string? nameOverride, CancellationToken ct)
+    private async Task<ImportReport> ImportOneAsync(ParsedApp parsed, IReadOnlyCollection<string>? excludedTableRefs, string? nameOverride, CancellationToken ct,
+        ImportMappingApp? quickbaseIds = null)
     {
         var document = parsed.Document;
         var conversionIssues = parsed.Issues;
@@ -961,6 +963,7 @@ public class ImportAppFromPblCommandHandler
             await _settingsApplier.ApplyParentLinksAsync(document, createResult.PublicId, skipped, ct);
             ImportRuntime.Variables = await LoadVariableSchemaAsync(createResult.PublicId, ct); // the value set inside ApplyDocumentAsync does not reach this method
             await _settingsApplier.ApplyCustomDataRulesAsync(document, createResult.PublicId, skipped, ct);
+            await StoreQuickbaseIdsAsync(document, parsed.AppRef, createResult.PublicId, quickbaseIds, onlyWhereEmpty: false, skipped, ct);
         }
         catch (Exception ex)
         {
@@ -1012,6 +1015,51 @@ public class ImportAppFromPblCommandHandler
             Skipped = skipped,
             FormulaTranslations = formulaTranslations,
         };
+    }
+
+    /// <summary>
+    /// Stores the Quickbase source ids on the app and its tables (meta.App.QBAppID/QBAppLogicalID, meta.AppTable.QBTableID/QBTableLogicalID).
+    /// The app id is the one the wizard resolved, else the meta.QuickbaseAppCatalog entry for the app's logical id;
+    /// table ids come from the wizard (Quickbase API, matched on alias). Logical ids always come from the file. Never fails the import.
+    /// </summary>
+    internal async Task StoreQuickbaseIdsAsync(PblDocument document, string appRef, Guid appPublicId, ImportMappingApp? quickbaseIds,
+        bool onlyWhereEmpty, List<ImportSkippedItem> skipped, CancellationToken ct)
+    {
+        try
+        {
+            var appLogicalId = string.IsNullOrWhiteSpace(document.App?.LogicalRef) ? appRef : document.App!.LogicalRef;
+            var qbAppId = !string.IsNullOrWhiteSpace(quickbaseIds?.QbAppId) ? quickbaseIds!.QbAppId!.Trim()
+                : _quickbaseCatalog is not null && !string.IsNullOrWhiteSpace(appLogicalId)
+                    ? (await _quickbaseCatalog.FindAppByLogicalIdAsync(appLogicalId, ct))?.QbAppId
+                    : null;
+            var tableIds = quickbaseIds?.QbTableIds ?? [];
+
+            var appId = await _appRepo.GetIdByPublicIdAsync(appPublicId, ct);
+            var created = (await _tableRepo.ListByAppAsync(appId, ct)).ToDictionary(t => t.Name, StringComparer.OrdinalIgnoreCase);
+            var tables = new List<(long TableId, string? QbTableId, string? QbTableLogicalId)>();
+            foreach (var table in document.Tables ?? [])
+            {
+                if (!created.TryGetValue(table.Name, out var row)) continue;
+                tableIds.TryGetValue(table.LogicalRef, out var qbTableId);
+                tables.Add((row.Id, string.IsNullOrWhiteSpace(qbTableId) ? null : qbTableId.Trim(),
+                    string.IsNullOrWhiteSpace(table.LogicalRef) ? null : table.LogicalRef));
+            }
+
+            await _appRepo.SetQuickbaseIdsAsync(appId, qbAppId, string.IsNullOrWhiteSpace(appLogicalId) ? null : appLogicalId, tables, onlyWhereEmpty, ct);
+
+            if (qbAppId is null)
+                skipped.Add(new ImportSkippedItem { LogicalRef = appLogicalId ?? "", Name = "Quickbase app id", Code = "QB_APP_ID_MISSING",
+                    Reason = "No Quickbase app id was stored for this app: it is not in the Quickbase app list and none was entered." });
+            var missing = tables.Count(t => t.QbTableId is null);
+            if (missing > 0)
+                skipped.Add(new ImportSkippedItem { LogicalRef = appLogicalId ?? "", Name = "Quickbase table ids", Code = "QB_TABLE_ID_MISSING",
+                    Reason = $"{missing} of {tables.Count} table(s) have no Quickbase table id: no Quickbase table with the same alias was found." });
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            skipped.Add(new ImportSkippedItem { LogicalRef = "", Name = "Quickbase ids", Code = "QB_IDS_NOT_STORED",
+                Reason = $"The app was imported, but its Quickbase app/table ids could not be saved ({ex.Message})." });
+        }
     }
 
     /// <summary>Stores the field-level import notes (stand-in fields with their complete original definition, rewritten formulas, anything else
@@ -2109,8 +2157,50 @@ public class ImportAppFromPblCommandHandler
                     continue;
                 }
 
-                if (!tableByName.TryGetValue(table.Name, out var ownTable)
-                    || !tableNameByRef.TryGetValue(link.TargetTableRef, out var targetName) || !tableByName.TryGetValue(targetName, out var targetTable))
+                if (!tableByName.TryGetValue(table.Name, out var ownTable))
+                {
+                    skipped.Add(new ImportSkippedItem { LogicalRef = link.LogicalRef, Name = link.Name, Reason = "Report link not created: the table it sits on was not created." });
+                    continue;
+                }
+
+                if (link.NoTarget)
+                {
+                    try
+                    {
+                        await _reportLinkFactory.CreateAsync(ownTable, nameof(PowerBase.Domain.Enums.FieldTypeCode.ReportLink), (link.Label ?? link.Name).Trim(), false,
+                            new ReportLinkSettings { LinkText = string.IsNullOrWhiteSpace(link.LinkText) ? (link.Label ?? link.Name) : link.LinkText.Trim(), OpenInNewWindow = false },
+                            ct, explicitFid: link.SourceId);
+                        created++;
+                    }
+                    catch (DomainException ex)
+                    {
+                        skipped.Add(new ImportSkippedItem { LogicalRef = link.LogicalRef, Name = link.Name, Reason = $"Report link not created: {ex.Message}" });
+                    }
+                    continue;
+                }
+
+                var targetAppPublicId = appPublicId;
+                AppTable? targetTable;
+                string? targetName;
+                if (!string.IsNullOrWhiteSpace(link.TargetAppName))
+                {
+                    // The link opens a table of another app: find that app by name among the tenant's apps (it has to be imported already).
+                    var otherApp = (await _appRepo.ListAllAsync(ct)).FirstOrDefault(a => a.PublicId != appPublicId && string.Equals(a.Name, link.TargetAppName, StringComparison.OrdinalIgnoreCase));
+                    if (otherApp is null)
+                    {
+                        skipped.Add(new ImportSkippedItem { LogicalRef = link.LogicalRef, Name = link.Name, Reason = $"Report link not created: the app '{link.TargetAppName}' it opens is not in this tenant yet. Import that app, then add the link." });
+                        continue;
+                    }
+                    targetTable = (await _tableRepo.ListByAppAsync(otherApp.Id, ct)).FirstOrDefault(t => string.Equals(t.Name, link.TargetTableName, StringComparison.OrdinalIgnoreCase));
+                    if (targetTable is null)
+                    {
+                        skipped.Add(new ImportSkippedItem { LogicalRef = link.LogicalRef, Name = link.Name, Reason = $"Report link not created: the table '{link.TargetTableName}' it opens was not found in the app '{link.TargetAppName}'." });
+                        continue;
+                    }
+                    targetAppPublicId = otherApp.PublicId;
+                    targetName = $"{link.TargetAppName} / {targetTable.Name}";
+                }
+                else if (!tableNameByRef.TryGetValue(link.TargetTableRef, out targetName) || !tableByName.TryGetValue(targetName, out targetTable))
                 {
                     skipped.Add(new ImportSkippedItem { LogicalRef = link.LogicalRef, Name = link.Name, Reason = "Report link not created: the table it opens was not created." });
                     continue;
@@ -2142,7 +2232,7 @@ public class ImportAppFromPblCommandHandler
                     await _reportLinkFactory.CreateAsync(ownTable, nameof(PowerBase.Domain.Enums.FieldTypeCode.ReportLink), (link.Label ?? link.Name).Trim(), false,
                         new ReportLinkSettings
                         {
-                            TargetAppPublicId = appPublicId.ToString(),
+                            TargetAppPublicId = targetAppPublicId.ToString(),
                             TargetTablePublicId = targetTable.PublicId.ToString(),
                             TargetFid = (int)targetFid,
                             SourceFid = sourceFid,
@@ -2462,6 +2552,13 @@ public class ImportAppFromPblCommandHandler
             {
                 var blockLayouts = new List<FormBlockLayout>();
 
+                // A column's width is a share of the section's 12-column grid (Quickbase: 6 = half the row, the rest left empty).
+                // Without a stored position the designer re-spreads the widths over the whole row, stretching a lone half-width column
+                // to full width, so save where each column sits: left to right, each as wide as its width. Widths that are missing or
+                // add up to more than the grid keep the old proportional layout.
+                var widthsUsable = section.Blocks.Count > 0 && section.Blocks.All(b => b.Width is > 0) && section.Blocks.Sum(b => b.Width!.Value) <= FormGridColumns;
+                var nextColumnStart = 1;
+
                 foreach (var block in section.Blocks)
                 {
                     var elementLayouts = new List<FormElementLayout>();
@@ -2508,12 +2605,18 @@ public class ImportAppFromPblCommandHandler
                             elementGuid, appFieldId, element.ElementType, elementContent,
                             element.LabelMode, Fit(element.CustomLabel, FormTextMaxLength), element.ShowOnAdd, element.ShowOnEdit, element.ShowOnView,
                             element.WidthMode, element.WidthValue, element.HelpTextOverride, element.IsReadOnly, element.IsRequired, element.DisplayAs,
-                            GroupId: groupId));
+                            GroupId: groupId,
+                            ContentWidthMode: element.ContentWidthMode, ContentWidthValue: element.ContentWidthValue, ContentWidthUnit: element.ContentWidthUnit,
+                            Name: string.Equals(element.ElementType, "StaticText", StringComparison.OrdinalIgnoreCase) ? Fit(element.Name, FormTextMaxLength) : null));
                     }
 
                     var blockGuid = Guid.NewGuid();
                     blockGuidByRef[block.LogicalRef] = blockGuid;
-                    blockLayouts.Add(new FormBlockLayout(blockGuid, Fit(block.Heading, FormTextMaxLength), block.BackgroundColor, block.Width, elementLayouts));
+                    var blockColStart = widthsUsable ? nextColumnStart : (int?)null;
+                    var blockColSpan = widthsUsable ? block.Width : null;
+                    if (widthsUsable) nextColumnStart += block.Width!.Value;
+                    blockLayouts.Add(new FormBlockLayout(blockGuid, Fit(block.Heading, FormTextMaxLength), block.BackgroundColor, block.Width, elementLayouts,
+                        ColStart: blockColStart, ColSpan: blockColSpan));
                 }
 
                 var sectionGuid = Guid.NewGuid();
@@ -2703,10 +2806,19 @@ public class ImportAppFromPblCommandHandler
                         continue;
                     }
 
+                    Guid? missingTargetPublicId = null;
+                    long? targetFieldId = null;
                     if (action.TargetType == "Field" && action.TargetElementRef is not null &&
                         layout.ElementGuidByRef.TryGetValue(action.TargetElementRef, out var eg) && elementDbIdByPublicId.TryGetValue(eg, out var elementDbId))
                     {
                         targetElementId = elementDbId;
+                        ok = true;
+                    }
+                    else if (action.TargetType == "Field" && action.TargetElementRef is null && !string.IsNullOrWhiteSpace(action.TargetFieldName))
+                    {
+                        // A field of the table that is not on this form: the action stays aimed at the FIELD (TargetFieldId), with no element
+                        // (a GUID that matches none), so the designer shows it as missing from the form and a rule run ignores it.
+                        missingTargetPublicId = Guid.NewGuid();
                         ok = true;
                     }
                     else if (action.TargetType == "Section" && action.TargetSectionRef is not null &&
@@ -2735,6 +2847,16 @@ public class ImportAppFromPblCommandHandler
                         break;
                     }
 
+                    if (action.TargetType == "Field" && !string.IsNullOrWhiteSpace(action.TargetFieldName))
+                    {
+                        if (!fidByName.TryGetValue(action.TargetFieldName, out var targetFid))
+                        {
+                            unresolvedAction = true;
+                            break;
+                        }
+                        targetFieldId = targetFid;
+                    }
+
                     long? sourceFieldId = null;
                     if (action.ValueSource == "field")
                     {
@@ -2748,8 +2870,10 @@ public class ImportAppFromPblCommandHandler
 
                     actionSpecs.Add(new FormRuleActionSpec(
                         action.ActionType, action.TargetType, targetElementId, targetSectionId, targetBlockId, action.ActionValue, action.DisplayOrder,
+                        TargetElementPublicId: missingTargetPublicId,
                         TargetPagePublicId: targetPagePublicId,
-                        ValueSource: action.ValueSource, SourceFieldId: sourceFieldId, MessageType: action.MessageType, MessageSeverity: action.MessageSeverity));
+                        ValueSource: action.ValueSource, SourceFieldId: sourceFieldId, MessageType: action.MessageType, MessageSeverity: action.MessageSeverity,
+                        TargetFieldId: targetFieldId));
                 }
 
                 if (unresolvedAction || actionSpecs.Count == 0)
@@ -2873,6 +2997,9 @@ public class ImportAppFromPblCommandHandler
     /// <summary>Form names, section/block headings, element labels and rule names are stored in 200-character columns; a longer
     /// source text (real exports have 200+ character labels) is cut to fit instead of failing the whole import.</summary>
     private const int FormTextMaxLength = 200;
+
+    /// <summary>Columns in a form section's grid (the save handler's own default for <c>GridCols</c>).</summary>
+    private const int FormGridColumns = 12;
 
     private static string? Fit(string? text, int max) =>
         text is null || text.Length <= max ? text : text[..(max - 1)].TrimEnd() + "…";

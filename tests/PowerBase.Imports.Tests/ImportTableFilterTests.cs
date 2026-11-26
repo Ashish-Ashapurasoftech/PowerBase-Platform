@@ -215,7 +215,7 @@ public class ImportTableFilterTests
     public async Task Abort_if_any_issue_looks_only_at_the_rows_each_table_is_given()
     {
         // Row 9 breaks the first table (bad Qty), but the first table's filter leaves it out: nothing is wrong, so everything is imported.
-        var cfg = Config(c => { c.ConstraintPolicy = ImportConstraintPolicy.AbortIfAnyIssue; c.TableConditions = Cond(6, "ne", "n9"); });
+        var cfg = Config(c => { c.ErrorPolicy = ImportErrorPolicy.AllOrNothing; c.TableConditions = Cond(6, "ne", "n9"); });
         var h = ImportHarness.Create(cfg, Source(row: id => id == 9 ? Row(id, qty: "many") : Row(id)));
 
         await h.RunAsync();
@@ -226,22 +226,22 @@ public class ImportTableFilterTests
     }
 
     [Fact]
-    public async Task Abort_if_any_issue_still_stops_when_a_row_a_table_is_given_has_a_problem()
+    public async Task Abort_if_any_issue_still_stops_that_table_when_a_row_it_is_given_has_a_problem()
     {
-        var cfg = Config(c => { c.ConstraintPolicy = ImportConstraintPolicy.AbortIfAnyIssue; c.TableConditions = Cond(6, "startsWith", "n9"); });
+        var cfg = Config(c => { c.ErrorPolicy = ImportErrorPolicy.AllOrNothing; c.TableConditions = Cond(6, "startsWith", "n9"); });
         var h = ImportHarness.Create(cfg, Source(row: id => id == 9 ? Row(id, qty: "many") : Row(id)));
 
         await h.RunAsync();
 
-        h.Completion!.Value.Status.Should().Be(ImportRunStatus.Failed);
-        h.Store.Inserted.Should().BeEmpty();
+        h.Store.InsertedByTable.Should().NotContainKey(11, "the first table was given the bad row, so it imports nothing");
+        h.Store.InsertedByTable[ContactsId].Should().HaveCount(40, "the second table's setting looks only at its own rows, and they are fine");
     }
 
     [Fact]
     public async Task Duplicate_groups_are_looked_for_among_the_rows_a_table_is_given()
     {
         // Rows 6 and 7 share a Name, which Contacts takes as its unique Code. Contacts' filter leaves row 7 out, so there is no duplicate there.
-        var cfg = WithContactsFilter(Cond(6, "ne", "dup"), c => c.ConstraintPolicy = ImportConstraintPolicy.ExcludeDuplicateGroups);
+        var cfg = WithContactsFilter(Cond(6, "ne", "dup"), c => c.DuplicatePolicy = ImportDuplicatePolicy.ExcludeAll);
         var h = ImportHarness.Create(cfg, Source(row: id => id is 6 or 7 ? Row(id, name: id == 6 ? "n6" : "dup") : Row(id)));
 
         await h.RunAsync();

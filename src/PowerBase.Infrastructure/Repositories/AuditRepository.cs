@@ -65,8 +65,8 @@ public class AuditRepository : IAuditRepository
         """;
 
     private const string InsertActivityLogSql = """
-        INSERT INTO audit.ActivityLog (UserId, UserName, UserEmail, Action, EntityType, EntityId, EntityTitle, AppId, OldValues, NewValues, IpAddress, OccurredOn)
-        VALUES (@userId, @userName, @userEmail, @action, @entityType, @entityId, @entityTitle, @appId, @oldValues, @newValues, @ipAddress, SYSUTCDATETIME())
+        INSERT INTO audit.ActivityLog (UserId, UserName, UserEmail, Action, EntityType, EntityId, EntityTitle, AppId, TableId, RecordNumber, OldValues, NewValues, IpAddress, OccurredOn)
+        VALUES (@userId, @userName, @userEmail, @action, @entityType, @entityId, @entityTitle, @appId, @tableId, @recordNumber, @oldValues, @newValues, @ipAddress, SYSUTCDATETIME())
         """;
 
     public AuditRepository(
@@ -178,20 +178,27 @@ public class AuditRepository : IAuditRepository
         long? appId = null,
         string? oldValues = null,
         string? newValues = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        long? tableId = null,
+        long? recordNumber = null)
     {
+        entityTitle = WithRecordNumber(entityTitle, recordNumber);
         await using var connection = await _tenantFactory.CreateAsync(ct);
         await connection.ExecuteAsync(new CommandDefinition(InsertActivityLogSql, new
         {
             userId    = _queryContext.UserId,
             userName  = _queryContext.UserName,
             userEmail = _queryContext.UserEmail,
-            action, entityType, entityId, entityTitle, appId, oldValues, newValues,
+            action, entityType, entityId, entityTitle, appId, tableId, recordNumber, oldValues, newValues,
             ipAddress = _queryContext.IpAddress,
         }, cancellationToken: ct));
     }
 
-    // 8 shared parameters + 1 per row, well under SQL Server's 2,100 limit.
+    /// <summary>"Record modified in Clients" → "Record modified in Clients (Record ID# 125)": the number users know the record by.</summary>
+    private static string? WithRecordNumber(string? title, long? recordNumber) =>
+        recordNumber is long n ? $"{(string.IsNullOrWhiteSpace(title) ? "Record" : title)} (Record ID# {n})" : title;
+
+    // 9 shared parameters + up to 3 per row (id, Record ID#, title), well under SQL Server's 2,100 limit.
     private const int ActivityLogChunk = 500;
 
     public async Task LogActivitiesAsync(
@@ -201,30 +208,45 @@ public class AuditRepository : IAuditRepository
         string? entityTitle = null,
         long? appId = null,
         System.Data.IDbTransaction? transaction = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        long? tableId = null,
+        IReadOnlyList<long>? recordNumbers = null)
     {
         if (entityIds.Count == 0) return;
+        if (recordNumbers is not null && recordNumbers.Count != entityIds.Count)
+            throw new ArgumentException("One Record ID# is needed per entity id.", nameof(recordNumbers));
+        var ids = entityIds as IReadOnlyList<string> ?? entityIds.ToList();
         var connection = transaction?.Connection ?? await _tenantFactory.CreateAsync(ct);
         var ownConnection = transaction is null;
         try
         {
-            foreach (var chunk in entityIds.Chunk(ActivityLogChunk))
+            for (var offset = 0; offset < ids.Count; offset += ActivityLogChunk)
             {
+                var size = Math.Min(ActivityLogChunk, ids.Count - offset);
                 var parameters = new DynamicParameters(new
                 {
                     userId    = _queryContext.UserId,
                     userName  = _queryContext.UserName,
                     userEmail = _queryContext.UserEmail,
-                    action, entityType, entityTitle, appId,
+                    action, entityType, entityTitle, appId, tableId,
                     ipAddress = _queryContext.IpAddress,
                 });
-                var tuples = new string[chunk.Length];
-                for (var i = 0; i < chunk.Length; i++)
+                var tuples = new string[size];
+                for (var i = 0; i < size; i++)
                 {
-                    tuples[i] = $"(@userId, @userName, @userEmail, @action, @entityType, @e{i}, @entityTitle, @appId, NULL, NULL, @ipAddress, SYSUTCDATETIME())";
-                    parameters.Add("e" + i, chunk[i]);
+                    parameters.Add("e" + i, ids[offset + i]);
+                    if (recordNumbers is null)
+                    {
+                        tuples[i] = $"(@userId, @userName, @userEmail, @action, @entityType, @e{i}, @entityTitle, @appId, @tableId, NULL, NULL, NULL, @ipAddress, SYSUTCDATETIME())";
+                    }
+                    else
+                    {
+                        tuples[i] = $"(@userId, @userName, @userEmail, @action, @entityType, @e{i}, @t{i}, @appId, @tableId, @r{i}, NULL, NULL, @ipAddress, SYSUTCDATETIME())";
+                        parameters.Add("r" + i, recordNumbers[offset + i]);
+                        parameters.Add("t" + i, WithRecordNumber(entityTitle, recordNumbers[offset + i]));
+                    }
                 }
-                var sql = "INSERT INTO audit.ActivityLog (UserId, UserName, UserEmail, Action, EntityType, EntityId, EntityTitle, AppId, OldValues, NewValues, IpAddress, OccurredOn) VALUES "
+                var sql = "INSERT INTO audit.ActivityLog (UserId, UserName, UserEmail, Action, EntityType, EntityId, EntityTitle, AppId, TableId, RecordNumber, OldValues, NewValues, IpAddress, OccurredOn) VALUES "
                     + string.Join(",", tuples);
                 await connection.ExecuteAsync(new CommandDefinition(sql, parameters, transaction, cancellationToken: ct));
             }
@@ -249,7 +271,7 @@ public class AuditRepository : IAuditRepository
 
         var dataSql = $"""
             SELECT a.Id, a.UserId, a.UserName, a.UserEmail,
-                   a.Action, a.EntityType, a.EntityId, a.EntityTitle, a.AppId, a.OldValues, a.NewValues, a.IpAddress, a.UserAgent, a.OccurredOn
+                   a.Action, a.EntityType, a.EntityId, a.EntityTitle, a.AppId, a.TableId, a.RecordNumber, a.OldValues, a.NewValues, a.IpAddress, a.UserAgent, a.OccurredOn
             FROM audit.ActivityLog a
             {where}
             ORDER BY a.OccurredOn DESC
@@ -269,7 +291,7 @@ public class AuditRepository : IAuditRepository
 
         var sql = $"""
             SELECT a.Id, a.UserId, a.UserName, a.UserEmail,
-                   a.Action, a.EntityType, a.EntityId, a.EntityTitle, a.AppId, a.OldValues, a.NewValues, a.IpAddress, a.UserAgent, a.OccurredOn
+                   a.Action, a.EntityType, a.EntityId, a.EntityTitle, a.AppId, a.TableId, a.RecordNumber, a.OldValues, a.NewValues, a.IpAddress, a.UserAgent, a.OccurredOn
             FROM audit.ActivityLog a
             {where}
             ORDER BY a.OccurredOn DESC
@@ -289,6 +311,10 @@ public class AuditRepository : IAuditRepository
         if (!string.IsNullOrWhiteSpace(filter.EntityType)) conditions.Add("a.EntityType = @entityType");
         if (!string.IsNullOrWhiteSpace(filter.EntityId)) conditions.Add("a.EntityId = @entityId");
         if (!string.IsNullOrWhiteSpace(filter.Action)) conditions.Add("a.Action = @action");
+        // Rows written before migration 100 have no TableId; "App Table" rows still match by their EntityId (the table's public id).
+        if (filter.TableId.HasValue)
+            conditions.Add("(a.TableId = @tableId OR (a.TableId IS NULL AND a.EntityType = 'AppTable' AND a.EntityId = @tablePublicId))");
+        if (filter.RecordNumber.HasValue) conditions.Add("a.RecordNumber = @recordNumber");
 
         var clause = "WHERE " + string.Join(" AND ", conditions);
         var parameters = new
@@ -300,6 +326,9 @@ public class AuditRepository : IAuditRepository
             entityType = filter.EntityType,
             entityId = filter.EntityId,
             action = filter.Action,
+            tableId = filter.TableId,
+            tablePublicId = filter.TablePublicId?.ToString(),
+            recordNumber = filter.RecordNumber,
         };
         return (clause, parameters);
     }

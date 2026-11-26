@@ -546,6 +546,9 @@ public class ReportsController : ControllerBase
             request.GroupByDesc,
             request.ClearGrouping,
             request.AskAnswers,
+            request.PageSummary,
+            request.SummarySortKey,
+            request.SummarySortDesc,
             request.SkipCount), ct);
         return Ok(new ApiResponse<ReportRunResponse>(ToRunResponse(result)));
     }
@@ -647,6 +650,7 @@ public class ReportsController : ControllerBase
             kv => new ReportColumnTotalDto { Sum = kv.Value.Sum, NonBlankCount = kv.Value.NonBlankCount, RowCount = kv.Value.RowCount }),
         InMemoryRowLimit = result.InMemoryRowLimit,
         TotalsIncomplete = result.TotalsIncomplete,
+        SummaryTotals = result.SummaryTotals,
     };
 
     /// <summary>Export report results as CSV. Optional dynamicFilters=fieldId:value (repeatable), same as run.</summary>

@@ -112,6 +112,8 @@ public static class PipelineFormulaValue
         "number" or "numeric" or "currency" or "percent" or "rating" or "recordid" => "Number",
         "date" => "Date",
         "datetime" or "date_time" or "timestamp" => "DateTime",
+        // A Time field (time of day) reads as a formula Time, so ToTimeOfDay / Hour / Minute and time arithmetic work on it.
+        "time" or "time_of_day" or "timeofday" => "Time",
         "boolean" or "bool" or "checkbox" => "Boolean",
         _ => "Text",
     };
@@ -128,6 +130,10 @@ public static class PipelineFormulaValue
             case "Date":
             case "DateTime":
                 return DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var date) ? date : text;
+            case "Time":
+                if (TimeOnly.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out var time)) return time;
+                // A full timestamp mapped from a Date & Time value keeps its time of day.
+                return DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out var stamp) ? TimeOnly.FromDateTime(stamp) : text;
             case "Boolean":
                 return text.ToLowerInvariant() switch { "true" or "1" or "yes" or "y" => true, "false" or "0" or "no" or "n" => false, _ => text };
             default:

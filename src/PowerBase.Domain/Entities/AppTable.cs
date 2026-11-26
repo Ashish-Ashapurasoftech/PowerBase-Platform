@@ -42,6 +42,12 @@ public class AppTable
     public bool IsShowInBar { get; set; } = true;
     public bool IsSystem { get; set; }
     public int DisplayOrder { get; set; }
+
+    /// <summary>Quickbase table id (e.g. <c>bunx343yd</c>) this table was imported from. Set by the app import only (migration 098).</summary>
+    public string? QBTableID { get; set; }
+
+    /// <summary>The table's logical id in the imported QBL file (e.g. <c>$Table_Clients</c>).</summary>
+    public string? QBTableLogicalID { get; set; }
     public bool IsDeleted { get; set; }
     public DateTime CreatedOn { get; set; }
     public long CreatedBy { get; set; }

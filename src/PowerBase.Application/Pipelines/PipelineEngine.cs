@@ -3156,6 +3156,8 @@ public partial class PipelineEngine : IPipelineEngine
             var urlAttachments = config.ResolveUrlAttachments(value => EvaluateTokens(value, payloadJson, executionPath, allSteps));
             var storedAttachments = config.ResolveStoredAttachments(value => EvaluateTokens(value, payloadJson, executionPath, allSteps));
             var contentAttachments = new List<PipelineEmailContentAttachment>();
+            var sendsViaOutlook = subtype == "send-email-outlook" && config.OutlookConnectionGuid.HasValue;
+            var maxAttachmentBytes = sendsViaOutlook ? PipelineEmailLimits.OUTLOOK_MAX_ATTACHMENT_BYTES : PipelineEmailLimits.SMTP_MAX_ATTACHMENT_BYTES;
             if (storedAttachments.Count > 0)
             {
                 if (fileStorageService is not IFileStorageReadService readableStorage)
@@ -3167,8 +3169,8 @@ public partial class PipelineEngine : IPipelineEngine
                     using var buffer = new MemoryStream();
                     await stream.CopyToAsync(buffer, ct);
                     totalBytes += buffer.Length;
-                    if (totalBytes > 25L * 1024 * 1024)
-                        throw new InvalidOperationException("Email attachments exceed the 25 MB total size limit.");
+                    if (totalBytes > maxAttachmentBytes)
+                        throw new InvalidOperationException(PipelineEmailLimits.TooLargeMessage(maxAttachmentBytes));
                     contentAttachments.Add(new PipelineEmailContentAttachment(
                         string.IsNullOrWhiteSpace(attachment.Name) ? "attachment" : Path.GetFileName(attachment.Name),
                         attachment.ContentType, buffer.ToArray()));
@@ -3187,13 +3189,27 @@ public partial class PipelineEngine : IPipelineEngine
                 StoredAttachmentCount = contentAttachments.Count
             });
 
-            await _emailService.SendPipelineEmailAsync(new PipelineEmailMessage(
+            var emailMessage = new PipelineEmailMessage(
                 resolvedTo, resolvedSubject, resolvedBody, resolvedCc, resolvedBcc, resolvedFrom,
                 EvaluateTokens(config.SharedMailbox, payloadJson, executionPath, allSteps),
                 EvaluateTokens(config.ContentType ?? "HTML", payloadJson, executionPath, allSteps),
                 EvaluateTokens(config.Importance ?? "Normal", payloadJson, executionPath, allSteps),
                 EvaluateTokens(config.SaveToSentItems ?? "Yes", payloadJson, executionPath, allSteps),
-                resolvedAttachments, urlAttachments, contentAttachments, RequireContent: subtype == "send-email-outlook"), ct);
+                resolvedAttachments, urlAttachments, contentAttachments, RequireContent: subtype == "send-email-outlook",
+                MaxAttachmentBytes: maxAttachmentBytes);
+
+            if (sendsViaOutlook && config.OutlookConnectionGuid is Guid outlookConnectionId)
+            {
+                // Quickbase parity: send through the Microsoft Outlook account selected on the step.
+                var owner = contextDict.GetValueOrDefault("_CreatedBy") is long ownerId ? ownerId : _queryContext.UserId;
+                var outlook = _serviceProvider.GetService(typeof(PowerBase.Application.Pipelines.Outlook.IOutlookConnectionService)) as PowerBase.Application.Pipelines.Outlook.IOutlookConnectionService
+                    ?? throw new InvalidOperationException("Microsoft Outlook sending is not available on this server.");
+                await outlook.SendAsync(outlookConnectionId, owner, emailMessage, ct);
+                return JsonSerializer.Serialize(new { SentTo = resolvedTo, Subject = resolvedSubject, SentVia = "Microsoft Outlook" });
+            }
+
+            // Steps without a selected Outlook account (legacy steps, plain "send-email") keep the platform SMTP path.
+            await _emailService.SendPipelineEmailAsync(emailMessage, ct);
 
             return JsonSerializer.Serialize(new { SentTo = resolvedTo, Subject = resolvedSubject });
         }

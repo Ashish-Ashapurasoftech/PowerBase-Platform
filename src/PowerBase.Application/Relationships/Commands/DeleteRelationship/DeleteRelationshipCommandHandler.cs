@@ -161,7 +161,7 @@ public class DeleteRelationshipCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, rel.Id.ToString(),
-            $"Relationship deleted: {child.Name} → {parent.Name}", appId: rel.AppId, ct: ct);
+            $"Relationship deleted: {child.Name} → {parent.Name}", appId: rel.AppId, ct: ct, tableId: child.Id);
     }
 
     /// <summary>

@@ -16,6 +16,10 @@ public class FormRuleAction
     public Guid? TargetBlockPublicId { get; set; }
     /// <summary>TargetType "Page" — a form page (no numeric id exists for it on this table).</summary>
     public Guid? TargetPagePublicId { get; set; }
+    /// <summary>TargetType "Field": the Fid of the table field the action is aimed at (migration 096). The field is the real target; the
+    /// element GUID above only says where it sat. When the field is taken off the form the element goes but this stays, so the rule
+    /// shows a missing target, and putting the field back on the form makes the rule work again.</summary>
+    public long? TargetFieldId { get; set; }
     public string? ActionValue { get; set; }
     /// <summary>ChangeValue only — "Run this action when the condition changes from false to
     /// true." See migration 059_formruleaction_add_run_once_on_activation.sql for the full

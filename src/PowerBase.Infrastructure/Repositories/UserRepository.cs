@@ -36,9 +36,18 @@ public class UserRepository : ControlRepositoryBase, IUserRepository
         """;
 
     private const string InsertSql = """
-        INSERT INTO core.[User] (Email, EmailNormalized, HashedPassword, Name, FirstName, LastName, IsEmailVerified, IsActive, IsDeleted, CreatedOn, CreatedBy)
-        OUTPUT INSERTED.Id
-        VALUES (@email, @emailNormalized, @hashedPassword, @name, @firstName, @lastName, 0, @isActive, 0, SYSUTCDATETIME(), 0)
+        MERGE core.[User] AS target
+        USING (VALUES (@email, @emailNormalized)) AS source (Email, EmailNormalized)
+        ON target.Email = source.Email
+        WHEN MATCHED AND target.IsDeleted = 1 THEN
+            UPDATE SET IsDeleted = 0, DeletedOn = NULL, DeletedBy = NULL,
+                       HashedPassword = @hashedPassword, Name = @name,
+                       FirstName = @firstName, LastName = @lastName,
+                       IsActive = @isActive, ModifiedOn = SYSUTCDATETIME()
+        WHEN NOT MATCHED THEN
+            INSERT (Email, EmailNormalized, HashedPassword, Name, FirstName, LastName, IsEmailVerified, IsActive, IsDeleted, CreatedOn, CreatedBy)
+            VALUES (@email, @emailNormalized, @hashedPassword, @name, @firstName, @lastName, 0, @isActive, 0, SYSUTCDATETIME(), 0)
+        OUTPUT INSERTED.Id;
         """;
 
     private const string ActivateSql = """

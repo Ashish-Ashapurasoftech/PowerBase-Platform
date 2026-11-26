@@ -20,7 +20,8 @@ public sealed class ComputeSchemaRepository : TenantRepositoryBase
     private const string FieldsSql = """
         SELECT af.Id, af.AppTableId, ft.Code AS TypeCode, af.Fid, af.Name, af.Label, af.Settings, af.IsEncrypted, af.IsSystem, af.PhysicalColumnName,
                af.IsUnique, af.IsSearchable, af.IsFilterable,
-               af.MaterializeMode, af.MaterializeState, af.MaterializeVersion, af.MaterializedOn
+               af.MaterializeMode, af.MaterializeState, af.MaterializeVersion, af.MaterializedOn,
+               af.SearchIndexState, af.SearchIndexVersion, af.SearchIndexedOn, af.SearchExact
         FROM meta.AppField af
         JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
         JOIN meta.AppTable t ON t.Id = af.AppTableId AND t.IsDeleted = 0
@@ -95,14 +96,29 @@ public sealed class ComputeSchemaRepository : TenantRepositoryBase
         return changed;
     }
 
-    /// <summary>Building -> Ready in one statement, only if nobody changed the version meanwhile (the version fence).</summary>
+    /// <summary>
+    /// Building -> Ready in one statement, only if nobody changed the version meanwhile (the version fence). In the same statement a
+    /// Searchable / Filterable field starts Indexing this version (migration 101): the caller then sends the field job, and the field is read
+    /// from the search index only once that job has finished (Indexed). Earlier Indexed states need no reset anywhere else: a rebuild,
+    /// switch-off or stale definition bumps MaterializeVersion, so an older SearchIndexVersion no longer counts (see AppField.IsInSearchIndex).
+    /// </summary>
     public async Task<bool> MarkReadyAsync(long fieldId, int version, CancellationToken ct = default)
     {
         await using var connection = await OpenConnectionAsync(ct);
         var ready = await connection.ExecuteAsync(new CommandDefinition("""
-            UPDATE meta.AppField SET MaterializeState = @ready, MaterializedOn = SYSUTCDATETIME()
+            UPDATE meta.AppField
+            SET MaterializeState = @ready, MaterializedOn = SYSUTCDATETIME(),
+                SearchIndexState = CASE WHEN IsSearchable = 1 OR IsFilterable = 1 THEN @indexing ELSE @searchNone END,
+                SearchIndexVersion = CASE WHEN IsSearchable = 1 OR IsFilterable = 1 THEN @version END,
+                SearchIndexRequestedOn = SYSUTCDATETIME(),   -- migration 103: only a field job created from now on may mark it Indexed
+                SearchIndexedOn = NULL,
+                SearchExact = 1
             WHERE Id = @fieldId AND MaterializeVersion = @version AND MaterializeMode = @on AND MaterializeState = @building
-            """, new { fieldId, version, ready = MaterializeStates.Ready, on = MaterializeModes.On, building = MaterializeStates.Building },
+            """, new
+            {
+                fieldId, version, ready = MaterializeStates.Ready, on = MaterializeModes.On, building = MaterializeStates.Building,
+                indexing = SearchIndexStates.Indexing, searchNone = SearchIndexStates.None
+            },
             cancellationToken: ct)) == 1;
         if (ready) await ClearCheckpointAsync(fieldId, ct);
         return ready;

@@ -12,6 +12,7 @@ using PowerBase.Application.Compute;
 using PowerBase.Domain.Constants;
 using PowerBase.Infrastructure.Compute;
 using PowerBase.Infrastructure.Persistence;
+using PowerBase.Infrastructure.Repositories;
 using PowerBase.Infrastructure.Services;
 using Xunit;
 
@@ -140,6 +141,141 @@ public class StoredColumnRoundTripTests : IClassFixture<ComputeSqlFixture>, IAsy
     {
         await using var conn = await OpenAsync();
         return await conn.QuerySingleAsync<(byte, byte, int)>("SELECT MaterializeMode, MaterializeState, MaterializeVersion FROM meta.AppField WHERE Id = @fieldId", new { fieldId });
+    }
+
+    private async Task<(byte State, int? Version, DateTime? IndexedOn, bool Exact, int MaterializeVersion)> SearchStateAsync(long fieldId)
+    {
+        await using var conn = await OpenAsync();
+        return await conn.QuerySingleAsync<(byte, int?, DateTime?, bool, int)>(
+            "SELECT SearchIndexState, SearchIndexVersion, SearchIndexedOn, SearchExact, MaterializeVersion FROM meta.AppField WHERE Id = @fieldId", new { fieldId });
+    }
+
+    [Fact]
+    public async Task Build_ready_starts_indexing_its_version_only_for_searchable_or_filterable_fields()
+    {
+        await using (var conn = await OpenAsync())
+            await conn.ExecuteAsync("""
+                UPDATE meta.AppField SET IsSearchable = 1 WHERE Id = @total;
+                UPDATE meta.AppField SET IsFilterable = 1 WHERE Id = @count;
+                -- what a field left over from an earlier build looks like: an old Indexed state that must be replaced
+                UPDATE meta.AppField SET SearchIndexState = @indexed, SearchIndexVersion = 99, SearchIndexedOn = SYSUTCDATETIME(), SearchExact = 0 WHERE Id = @lookup;
+                """, new { total = _totalId, count = _countId, lookup = _nameLookupId, indexed = SearchIndexStates.Indexed });
+
+        var (builder, _) = Worker();
+        await builder.BuildPendingAsync(_options, CancellationToken.None);
+
+        var total = await SearchStateAsync(_totalId);
+        total.State.Should().Be(SearchIndexStates.Indexing, "a Searchable field is sent to the index once it is Ready");
+        total.Version.Should().Be(total.MaterializeVersion, "the index state is tied to the version just built");
+        total.IndexedOn.Should().BeNull();
+
+        var count = await SearchStateAsync(_countId);
+        count.State.Should().Be(SearchIndexStates.Indexing, "Filterable alone is enough");
+        count.Version.Should().Be(count.MaterializeVersion);
+
+        var lookup = await SearchStateAsync(_nameLookupId);
+        lookup.State.Should().Be(SearchIndexStates.None, "a field that is neither Searchable nor Filterable never goes to the index");
+        lookup.Version.Should().BeNull();
+        lookup.IndexedOn.Should().BeNull();
+        lookup.Exact.Should().BeTrue("a new build starts again from exact");
+
+        (await SearchStateAsync(_combinedId)).State.Should().Be(SearchIndexStates.None, "a refused field is never Ready");
+    }
+
+    private SearchIndexStateRepository SearchStates()
+    {
+        var (factory, context) = Tenant();
+        return new SearchIndexStateRepository(factory, context);
+    }
+
+    /// <summary>A recorded field job for Fid <paramref name="fid"/> of <paramref name="table"/>, created <paramref name="secondsAgo"/> ago.</summary>
+    private async Task<long> AddFieldJobAsync(long table, int fid, int secondsAgo = 0)
+    {
+        await using var conn = await OpenAsync();
+        return await conn.ExecuteScalarAsync<long>("""
+            INSERT INTO meta.SearchFieldJob (TableId, AppId, Action, FieldId, AfterId, CreatedOn)
+            OUTPUT inserted.Id VALUES (@table, 1, 2, @fid, 0, DATEADD(SECOND, -@secondsAgo, SYSUTCDATETIME()))
+            """, new { table, fid, secondsAgo });
+    }
+
+    [Fact]
+    public async Task Field_job_done_marks_the_field_indexed_then_the_digit_check_decides_exact()
+    {
+        await using var conn = await OpenAsync();
+        await conn.ExecuteAsync("DELETE FROM meta.SearchFieldJob; UPDATE meta.AppField SET IsSearchable = 1 WHERE Id = @total", new { total = _totalId });
+        var (builder, _) = Worker();
+        await builder.BuildPendingAsync(_options, CancellationToken.None);
+        var states = SearchStates();
+
+        // A job that was running for an earlier send (created before this field was sent) never counts.
+        var oldJob = await AddFieldJobAsync(Dept, 8, secondsAgo: 60);
+        (await states.MarkIndexedAsync(Dept, 8, oldJob, 0)).Should().BeNull("the job is older than the send of this build");
+        // Nor does a page that is not where the job stands.
+        var job = await AddFieldJobAsync(Dept, 8);
+        (await states.MarkIndexedAsync(Dept, 8, job, fromAfterId: 500)).Should().BeNull("the job has moved on from that page");
+
+        var indexed = await states.MarkIndexedAsync(Dept, 8, job, 0);
+        indexed.Should().NotBeNull();
+        indexed!.FieldId.Should().Be(_totalId);
+        var state = await SearchStateAsync(_totalId);
+        state.State.Should().Be(SearchIndexStates.Indexed);
+        state.Version.Should().Be(state.MaterializeVersion);
+        state.IndexedOn.Should().NotBeNull();
+        state.Exact.Should().BeFalse("not exact until the digits are checked");
+
+        // Salaries of a few thousand: every value comes back unchanged through a double.
+        (await states.CheckExactAsync(indexed)).Should().BeTrue();
+        (await SearchStateAsync(_totalId)).Exact.Should().BeTrue();
+
+        // One value of 20 significant digits: a double cannot hold it, so sort and shown values stay on SQL.
+        await conn.ExecuteAsync($"UPDATE TOP (1) data.t_{Dept} SET c_8 = 123456789012.12345678 WHERE c_8 IS NOT NULL");
+        (await states.CheckExactAsync(indexed)).Should().BeFalse();
+        (await SearchStateAsync(_totalId)).Exact.Should().BeFalse();
+
+        // Marking again does nothing (it is no longer Indexing), and a normal field is never touched.
+        (await states.MarkIndexedAsync(Dept, 8, job, 0)).Should().BeNull();
+        (await states.MarkIndexedAsync(Dept, 6, job, 0)).Should().BeNull("Name is a normal field");
+    }
+
+    [Fact]
+    public async Task A_rebuild_after_indexing_leaves_the_index_and_an_old_check_cannot_touch_it()
+    {
+        await using var conn = await OpenAsync();
+        await conn.ExecuteAsync("DELETE FROM meta.SearchFieldJob; UPDATE meta.AppField SET IsSearchable = 1 WHERE Id = @total", new { total = _totalId });
+        var (builder, _) = Worker();
+        await builder.BuildPendingAsync(_options, CancellationToken.None);
+        var states = SearchStates();
+        var indexed = (await states.MarkIndexedAsync(Dept, 8, await AddFieldJobAsync(Dept, 8), 0))!;
+
+        // The summary's definition changes: the field goes back to be built with a new version.
+        var (factory, context) = Tenant();
+        (await new ComputeSchemaRepository(factory, context).RequeueForRebuildAsync(_totalId)).Should().BeTrue();
+        var state = await SearchStateAsync(_totalId);
+        state.Version.Should().NotBe(state.MaterializeVersion, "the index holds the previous build");
+
+        // A digit check that was still running for the old version stores nothing.
+        await states.CheckExactAsync(indexed);
+        (await SearchStateAsync(_totalId)).Exact.Should().BeFalse();
+
+        // The new build is sent again: Indexing for the new version, and only a job created from now on can finish it.
+        await builder.BuildPendingAsync(_options, CancellationToken.None);
+        state = await SearchStateAsync(_totalId);
+        state.State.Should().Be(SearchIndexStates.Indexing);
+        state.Version.Should().Be(state.MaterializeVersion);
+        (await states.MarkIndexedAsync(Dept, 8, await AddFieldJobAsync(Dept, 8, secondsAgo: 30), 0)).Should().BeNull();
+        (await states.MarkIndexedAsync(Dept, 8, await AddFieldJobAsync(Dept, 8), 0)).Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Field_job_with_no_column_to_write_marks_the_field_failed()
+    {
+        await using var conn = await OpenAsync();
+        await conn.ExecuteAsync("DELETE FROM meta.SearchFieldJob; UPDATE meta.AppField SET IsFilterable = 1 WHERE Id = @count", new { count = _countId });
+        var (builder, _) = Worker();
+        await builder.BuildPendingAsync(_options, CancellationToken.None);
+
+        (await SearchStates().MarkNotIndexedAsync(Dept, 9, await AddFieldJobAsync(Dept, 9))).Should().BeTrue();
+        (await SearchStateAsync(_countId)).State.Should().Be(SearchIndexStates.Failed);
     }
 
     [Fact]

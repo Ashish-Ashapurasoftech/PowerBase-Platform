@@ -473,4 +473,42 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         if (affected == 0)
             throw new NotFoundException("App", publicId);
     }
+
+    public async Task SetQuickbaseIdsAsync(long appId, string? qbAppId, string? qbAppLogicalId,
+        IReadOnlyList<(long TableId, string? QbTableId, string? QbTableLogicalId)> tables, bool onlyWhereEmpty, CancellationToken ct = default)
+    {
+        // COALESCE keeps the stored value when the new one is null; onlyWhereEmpty also keeps a stored non-empty value.
+        var appSql = onlyWhereEmpty
+            ? """
+              UPDATE meta.App SET
+                  QBAppID        = CASE WHEN NULLIF(QBAppID, '') IS NULL THEN @qbAppId ELSE QBAppID END,
+                  QBAppLogicalID = CASE WHEN NULLIF(QBAppLogicalID, '') IS NULL THEN @qbAppLogicalId ELSE QBAppLogicalID END
+              WHERE Id = @appId
+              """
+            : """
+              UPDATE meta.App SET
+                  QBAppID        = COALESCE(@qbAppId, QBAppID),
+                  QBAppLogicalID = COALESCE(@qbAppLogicalId, QBAppLogicalID)
+              WHERE Id = @appId
+              """;
+        var tableSql = onlyWhereEmpty
+            ? """
+              UPDATE meta.AppTable SET
+                  QBTableID        = CASE WHEN NULLIF(QBTableID, '') IS NULL THEN @QbTableId ELSE QBTableID END,
+                  QBTableLogicalID = CASE WHEN NULLIF(QBTableLogicalID, '') IS NULL THEN @QbTableLogicalId ELSE QBTableLogicalID END
+              WHERE Id = @TableId AND AppId = @appId
+              """
+            : """
+              UPDATE meta.AppTable SET
+                  QBTableID        = COALESCE(@QbTableId, QBTableID),
+                  QBTableLogicalID = COALESCE(@QbTableLogicalId, QBTableLogicalID)
+              WHERE Id = @TableId AND AppId = @appId
+              """;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(appSql, new { appId, qbAppId, qbAppLogicalId }, cancellationToken: ct));
+        foreach (var t in tables)
+            await connection.ExecuteAsync(new CommandDefinition(tableSql,
+                new { appId, t.TableId, t.QbTableId, t.QbTableLogicalId }, cancellationToken: ct));
+    }
 }

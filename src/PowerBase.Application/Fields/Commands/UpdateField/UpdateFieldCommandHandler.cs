@@ -120,7 +120,11 @@ public class UpdateFieldCommandHandler
         var defaultValue = existing.IsSystem ? null : command.DefaultValue;
         var isUnique = existing.IsSystem ? false : command.IsUnique;
         var isSortable = existing.IsSystem ? false : command.IsSortable;
-        var isFilterable = existing.IsSystem ? false : command.IsFilterable;
+        // A Lookup / Summary / Formula is always Searchable and Filterable (decision Q4): an untick is ignored, so the search sync below
+        // never empties its column in the index.
+        var isFilterable = existing.IsSystem ? false
+            : ComputedFieldSearch.Apply(command.IsFilterable, existing.TypeCode, existing.IsHidden, existing.IsSystem);
+        var isSearchable = ComputedFieldSearch.Apply(command.IsSearchable, existing.TypeCode, existing.IsHidden, existing.IsSystem);
         var isAuditable = existing.IsSystem ? false : command.IsAuditable;
         var isEncrypted = existing.IsSystem || PowerBase.Domain.Constants.PhysicalNaming.IsEncryptionExemptTypeCode(existing.TypeCode)
             ? false
@@ -270,10 +274,10 @@ public class UpdateFieldCommandHandler
         bool wasSearchable = existing.IsSearchable;
         bool wasFilterable = existing.IsFilterable;
         bool wasEligible = wasSearchable || wasFilterable;
-        bool isEligible = command.IsSearchable || isFilterable;
+        bool isEligible = isSearchable || isFilterable;
 
         var after = new FieldSnapshot(
-            label, description, isRequired, defaultValue, command.IsSearchable, isSortable,
+            label, description, isRequired, defaultValue, isSearchable, isSortable,
             isFilterable, command.IsReportable, isAuditable, isUnique, isEncrypted, isAutoFill, settings,
             snapshotSourceFid, snapshotEditable, isSharedValues);
 
@@ -287,7 +291,7 @@ public class UpdateFieldCommandHandler
                 existing.PublicId, table.Id,
                 label, description,
                 isRequired, defaultValue,
-                command.IsSearchable, isSortable,
+                isSearchable, isSortable,
                 isFilterable, command.IsReportable, isAuditable,
                 isUnique, isEncrypted, isAutoFill, settings, ct, _uow.Transaction);
 
@@ -314,7 +318,11 @@ public class UpdateFieldCommandHandler
 
         // Lookups of this field save the type of value they show; they follow the switch (Number → Currency …).
         if (switchedToTypeCode is not null)
+        {
             await FieldValueTypes.RefreshLookupsOfAsync(existing, switchedToTypeCode, _relRepo, _fieldRepo, ct);
+            // When this field is a parent's key, the new-field References showing it follow the switch too.
+            await ReferenceResultTypeRefresher.RefreshForParentAsync(table, _relRepo, _fieldRepo, ct);
+        }
 
         // Backfill: when an optional field becomes required and a default is supplied, fill existing
         // rows whose value is NULL/empty so they remain valid.
@@ -327,7 +335,7 @@ public class UpdateFieldCommandHandler
 
         // Search Index Sync: when search eligibility (IsSearchable || IsFilterable) changes, trigger a backfill or nullify. Searchable
         // alone changing on a field that stays filterable also rewrites the records: it adds or removes the field's text in quick search.
-        if ((isEligible != wasEligible || (isEligible && command.IsSearchable != wasSearchable)) && existing.Fid.HasValue)
+        if ((isEligible != wasEligible || (isEligible && isSearchable != wasSearchable)) && existing.Fid.HasValue)
         {
             await SyncSearchIndexAsync(table, existing.Fid.Value, isNullify: !isEligible, ct);
         }
@@ -339,7 +347,7 @@ public class UpdateFieldCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, existing.PublicId.ToString(),
-            $"Field modified: {label} In TableName : {table.Name}", appId: table.AppId, ct: ct);
+            $"Field modified: {label} In TableName : {table.Name}", appId: table.AppId, ct: ct, tableId: table.Id);
 
         // "Initialize field for existing records": captures the snapshot for every record that already exists, as a background job.
         if (command.InitializeSnapshotForExisting && snapshotSourceFid.HasValue && _snapshotJobs is not null)
