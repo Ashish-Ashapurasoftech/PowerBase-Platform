@@ -86,7 +86,9 @@ public class ChangeAppUserRoleCommandHandler
             throw new DuplicateException("AppUser", $"User '{targetUserEmail}' already has the '{role.Name}' role in this application.");
         }
 
-        if (!_queryContext.IsSuperAdmin)
+        bool isAuthorized = _queryContext.IsSuperAdmin || _queryContext.IsTenantAdmin || (app != null && _queryContext.UserId == app.OwnerId);
+
+        if (!isAuthorized)
         {
             var actorRolePublicId = await _appUserRepo.GetUserRolePublicIdAsync(appId, _queryContext.UserId, ct);
             if (!actorRolePublicId.HasValue)

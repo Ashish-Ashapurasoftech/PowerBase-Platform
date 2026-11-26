@@ -60,6 +60,7 @@ public class InviteAppUserCommandHandler
             throw new ValidationException(new Dictionary<string, string[]> { ["Email"] = ["Email is required."] });
 
         var appId = await _appRepo.GetIdByPublicIdAsync(command.AppPublicId, ct);
+        var app = await _appRepo.GetByPublicIdAsync(command.AppPublicId, ct);
 
         // Resolve app role
         AppRole targetRole;
@@ -85,7 +86,9 @@ public class InviteAppUserCommandHandler
             };
         }
 
-        if (!_queryContext.IsSuperAdmin)
+        bool isAuthorized = _queryContext.IsSuperAdmin || _queryContext.IsTenantAdmin || (app != null && _queryContext.UserId == app.OwnerId);
+
+        if (!isAuthorized)
         {
             var actorRolePublicId = await _appUserRepo.GetUserRolePublicIdAsync(appId, _queryContext.UserId, ct);
             if (!actorRolePublicId.HasValue)

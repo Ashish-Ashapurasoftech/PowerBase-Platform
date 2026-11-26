@@ -36,6 +36,7 @@ public class AddAppUserCommandHandler
     public async Task HandleAsync(AddAppUserCommand command, CancellationToken ct = default)
     {
         var appId = await _appRepo.GetIdByPublicIdAsync(command.AppPublicId, ct);
+        var app = await _appRepo.GetByPublicIdAsync(command.AppPublicId, ct);
 
         var user = await _userRepo.GetByEmailAsync(command.Email)
             ?? throw new NotFoundException("User", command.Email);
@@ -69,7 +70,9 @@ public class AddAppUserCommandHandler
             throw new DuplicateException("AppUser", $"User '{user.Email}' already has the '{targetRole.Name}' role in this application.");
         }
 
-        if (!_queryContext.IsSuperAdmin)
+        bool isAuthorized = _queryContext.IsSuperAdmin || _queryContext.IsTenantAdmin || (app != null && _queryContext.UserId == app.OwnerId);
+
+        if (!isAuthorized)
         {
             var actorRolePublicId = await _appUserRepo.GetUserRolePublicIdAsync(appId, _queryContext.UserId, ct);
             if (!actorRolePublicId.HasValue)
