@@ -94,13 +94,17 @@ public class OutlookInviteEmailService : IEmailService
             return;
         }
 
+        var frontendBaseUrl = _config["Frontend:BaseUrl"] ?? "https://ambitious-pond-0ab96f20f.7.azurestaticapps.net";
+        var loginLink = $"{frontendBaseUrl.TrimEnd('/')}/auth/login";
+
         var subject = $"You've been invited to {tenantName} on PowerBase";
         var body = $"""
             Hi,
 
             {inviterName} has invited you to join the workspace "{tenantName}" on PowerBase.
 
-            Log in at your PowerBase account to access this workspace.
+            To access this workspace, log in to your PowerBase account here:
+            {loginLink}
 
             — The PowerBase Team
             """;
