@@ -15,9 +15,12 @@ public class SetTablesShowInBarCommandHandler
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppRepository _appRepo;
     private readonly IAuditRepository _auditRepo;
+    private readonly IAppAccessService? _access;
 
-    public SetTablesShowInBarCommandHandler(IAppTableRepository tableRepo, IAppRepository appRepo, IAuditRepository auditRepo)
+    public SetTablesShowInBarCommandHandler(IAppTableRepository tableRepo, IAppRepository appRepo, IAuditRepository auditRepo,
+        IAppAccessService? access = null)
     {
+        _access = access;
         _tableRepo = tableRepo;
         _appRepo = appRepo;
         _auditRepo = auditRepo;
@@ -37,7 +40,19 @@ public class SetTablesShowInBarCommandHandler
 
         // [RequireAppPermission] only verified TablesUpdate on the app in the URL, so the repository
         // scopes the UPDATE to that app - ids belonging to any other app are silently ignored.
-        var changed = await _tableRepo.SetShowInBarAsync(appId, command.PublicIds.Distinct().ToList(), command.IsShowInBar, ct);
+        // A role may hold Update Tables on some tables only (Roles > Advanced Permissions > Table selection): every table
+        // of this app in the request must allow it, or the whole request is refused (nothing is half-changed).
+        var ids = command.PublicIds.Distinct().ToList();
+        if (_access is not null)
+        {
+            foreach (var publicId in ids)
+            {
+                var table = await _tableRepo.GetByPublicIdAsync(publicId, ct);
+                if (table.AppId != appId) continue;
+                await _access.RequirePermissionByTablePublicIdAsync(publicId, PermissionCodes.TablesUpdate, ct);
+            }
+        }
+        var changed = await _tableRepo.SetShowInBarAsync(appId, ids, command.IsShowInBar, ct);
 
         foreach (var (publicId, _) in changed)
         {

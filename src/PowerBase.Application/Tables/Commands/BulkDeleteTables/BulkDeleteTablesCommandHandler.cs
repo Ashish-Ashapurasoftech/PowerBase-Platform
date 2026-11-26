@@ -18,12 +18,15 @@ public class BulkDeleteTablesCommandHandler
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppRepository _appRepo;
     private readonly DeleteTableCommandHandler _deleteTableHandler;
+    private readonly IAppAccessService? _access;
 
     public BulkDeleteTablesCommandHandler(
         IAppTableRepository tableRepo,
         IAppRepository appRepo,
-        DeleteTableCommandHandler deleteTableHandler)
+        DeleteTableCommandHandler deleteTableHandler,
+        IAppAccessService? access = null)
     {
+        _access = access;
         _tableRepo = tableRepo;
         _appRepo = appRepo;
         _deleteTableHandler = deleteTableHandler;
@@ -42,16 +45,23 @@ public class BulkDeleteTablesCommandHandler
             throw new NotFoundException("App", command.AppPublicId);
         }
 
-        var deletedCount = 0;
-        foreach (var publicId in command.PublicIds)
+        // [RequireAppPermission] on the controller only verified TablesDelete on command.AppPublicId — not on whichever
+        // app each table belongs to (anything outside that app is silently skipped), nor on each table: a role may hold
+        // Delete Tables on some tables only (Roles > Advanced Permissions > Table selection). Check every table FIRST and
+        // refuse the whole request if one is not allowed, so nothing is half-deleted.
+        var targets = new List<Guid>();
+        foreach (var publicId in command.PublicIds.Distinct())
         {
             var table = await _tableRepo.GetByPublicIdAsync(publicId, ct);
-
-            // [RequireAppPermission] on the controller only verified TablesDelete on
-            // command.AppPublicId — not on whichever app each individual table id actually
-            // belongs to. Silently skip anything outside that app rather than deleting it.
             if (table.AppId != appId) continue;
+            if (_access is not null)
+                await _access.RequirePermissionByTablePublicIdAsync(publicId, PowerBase.Domain.Constants.PermissionCodes.TablesDelete, ct);
+            targets.Add(publicId);
+        }
 
+        var deletedCount = 0;
+        foreach (var publicId in targets)
+        {
             await _deleteTableHandler.HandleAsync(new DeleteTableCommand(publicId), ct);
             deletedCount++;
         }
