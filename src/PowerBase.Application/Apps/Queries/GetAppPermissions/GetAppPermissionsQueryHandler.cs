@@ -1,4 +1,5 @@
 using System.Text.Json;
+using PowerBase.Application.Apps.RoleUi;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Common.Models;
 using PowerBase.Application.Reports;
@@ -39,7 +40,15 @@ public record AppPermissionsResult(
     // endpoint. The New Page dialog uses this to hide the "Code" page-type option outright,
     // distinct from the existing app-ROLE `pages:code` permission (which only gates whether a
     // member of this specific app can author Code pages once the tenant has them at all).
-    bool CodePagesEnabled = false);
+    bool CodePagesEnabled = false,
+    // The user's "User interface" settings, merged over all their roles (hidden only when every role hides it).
+    // UI only — the client hides tables / buttons / menus with it; data access is unaffected. Null = nothing hidden.
+    RoleUiSettings? UiSettings = null,
+    // Roles > Advanced Permissions > Table selection: builder permissions the user holds app-wide but NOT on these tables
+    // (every role of theirs that has the code excludes the table). The client uses it to hide builder screens/buttons.
+    IReadOnlyList<TableScopeDenial>? TableScopeDenials = null);
+
+public record TableScopeDenial(string Code, Guid TablePublicId);
 
 public class GetAppPermissionsQueryHandler
 {
@@ -49,6 +58,7 @@ public class GetAppPermissionsQueryHandler
     private readonly IUserRepository _userRepo;
     private readonly ITenantRepository _tenantRepo;
     private readonly IQueryContext _queryContext;
+    private readonly IAppRoleRepository _appRoleRepo;
 
     public GetAppPermissionsQueryHandler(
         IAppRepository appRepo,
@@ -56,8 +66,10 @@ public class GetAppPermissionsQueryHandler
         IAppRolePermissionRepository permRepo,
         IUserRepository userRepo,
         ITenantRepository tenantRepo,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IAppRoleRepository appRoleRepo)
     {
+        _appRoleRepo = appRoleRepo;
         _appRepo = appRepo;
         _appUserRepo = appUserRepo;
         _permRepo = permRepo;
@@ -210,7 +222,27 @@ public class GetAppPermissionsQueryHandler
             }
         }
 
-        return new AppPermissionsResult(roleName, permissions, mergedTablePerms, mergedFieldPerms, mergedFilters, _queryContext.UserId, currentUserPublicId, tenant.CodePagesEnabled);
+        var denials = await GetTableScopeDenialsAsync(roleIds, ct);
+
+        var uiJsons = await _appRoleRepo.GetUiSettingsJsonsAsync(roleIds.ToList(), ct);
+        var uiSettings = RoleUiSettings.Merge(roleIds.Select(id => RoleUiSettings.Parse(uiJsons.GetValueOrDefault(id))).ToList());
+
+        return new AppPermissionsResult(roleName, permissions, mergedTablePerms, mergedFieldPerms, mergedFilters, _queryContext.UserId, currentUserPublicId, tenant.CodePagesEnabled,
+            uiSettings.HidesAnything ? uiSettings : null, denials);
+    }
+
+    /// <summary>(code, table) pairs where every role holding the code excludes the table.</summary>
+    private async Task<IReadOnlyList<TableScopeDenial>> GetTableScopeDenialsAsync(IReadOnlyList<long> roleIds, CancellationToken ct)
+    {
+        var exclusions = await _permRepo.GetTableExclusionsAsync(roleIds.ToList(), ct);
+        if (exclusions.Count == 0) return [];
+        var codes = await _permRepo.GetRoleCodesAsync(roleIds.ToList(), ct);
+        var rolesByCode = codes.GroupBy(c => c.Code).ToDictionary(g => g.Key, g => g.Select(c => c.AppRoleId).ToHashSet());
+        return exclusions
+            .GroupBy(x => (x.Code, x.TablePublicId))
+            .Where(g => rolesByCode.TryGetValue(g.Key.Code, out var holders) && holders.All(r => g.Any(x => x.AppRoleId == r)))
+            .Select(g => new TableScopeDenial(g.Key.Code, g.Key.TablePublicId))
+            .ToList();
     }
 
     private static string ResolveScope(IEnumerable<string> scopes)

@@ -24,4 +24,9 @@ public interface IAppRoleRepository
     Task SetDefaultAsync(long appId, long roleId, CancellationToken ct = default);
     /// <summary>Sets (or clears, with null) the Dashboard page a role lands on as its app home.</summary>
     Task SetHomePageAsync(long roleId, long? pageId, CancellationToken ct = default);
+    /// <summary>The role's "User interface" settings JSON (meta.AppRole.UiSettingsJson); null = nothing hidden.</summary>
+    Task<string?> GetUiSettingsJsonAsync(long roleId, CancellationToken ct = default);
+    Task SetUiSettingsJsonAsync(long roleId, string? json, CancellationToken ct = default);
+    /// <summary>UiSettingsJson of several roles (roles without settings are left out).</summary>
+    Task<IReadOnlyDictionary<long, string>> GetUiSettingsJsonsAsync(IReadOnlyCollection<long> roleIds, CancellationToken ct = default);
 }

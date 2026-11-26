@@ -120,7 +120,7 @@ public sealed class UploadImportFileHandler(IAppAccessService access, IFileStora
 
     public async Task<ImportFileInfo> HandleAsync(Guid destinationTableId, Stream content, string fileName, long length, CancellationToken ct)
     {
-        await access.RequirePermissionByTablePublicIdAsync(destinationTableId, PermissionCodes.RecordsCreate, ct);
+        await access.RequireCanAddRecordsByTablePublicIdAsync(destinationTableId, ct);
         if (length <= 0) throw ImportFileErrors.Invalid("The file is empty.");
         if (length > ImportFileFormats.MaxFileBytes) throw ImportFileErrors.Invalid($"The file is larger than {ImportFileFormats.MaxFileBytes / (1024 * 1024)} MB. Split it into smaller files.");
         if (await files.CountByUserAsync(user.UserId, ct) >= MaxOutstandingPerUser)

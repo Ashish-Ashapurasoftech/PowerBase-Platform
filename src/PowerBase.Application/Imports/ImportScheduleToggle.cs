@@ -19,7 +19,7 @@ public sealed class SetImportScheduleEnabledHandler(
     {
         var def = await definitions.GetByPublicIdAsync(definitionId, ct) ?? throw new NotFoundException("ImportDefinition", definitionId);
         var destination = await tables.GetByIdAsync(def.DestinationTableId, ct);
-        await access.RequirePermissionByTablePublicIdAsync(destination.PublicId, PermissionCodes.RecordsCreate, ct);
+        await access.RequireCanAddRecordsByTablePublicIdAsync(destination.PublicId, ct);
 
         var schedule = ImportJson.Deserialize<ImportSchedule>(def.ScheduleJson)
             ?? throw Invalid("This import has no schedule. Open it to set one up.");

@@ -7,6 +7,9 @@ using PowerBase.Application.Apps.Commands.DeleteAppRole;
 using PowerBase.Application.Apps.Commands.UpdateAppRole;
 using PowerBase.Application.Apps.Commands.SetDefaultAppRole;
 using PowerBase.Application.Apps.Commands.SetAppRoleHomePage;
+using PowerBase.Application.Apps.Commands.UpdateRoleUiSettings;
+using PowerBase.Application.Apps.Queries.GetRoleUiSettings;
+using PowerBase.Application.Apps.RoleUi;
 using PowerBase.API.Models.Pages;
 using PowerBase.Application.Apps.Commands.UpdateTablePermissions;
 using PowerBase.Application.Apps.Commands.UpdateFieldPermissions;
@@ -138,7 +141,8 @@ public class AppRolesController : ControllerBase
             request.ManageableRolesType,
             request.Rank,
             request.ManageableRolePublicIds,
-            request.Name), ct);
+            request.Name,
+            request.TableExclusions), ct);
         return NoContent();
     }
 
@@ -174,6 +178,46 @@ public class AppRolesController : ControllerBase
         [FromRoute] Guid appId, [FromRoute] Guid rolePublicId, [FromBody] SetRoleHomePageRequest request, CancellationToken ct)
     {
         await _setHomePageHandler.HandleAsync(new SetAppRoleHomePageCommand(appId, rolePublicId, request.PagePublicId), ct);
+        return NoContent();
+    }
+
+    // ── Advanced Permissions > Table selection ───────────────────────────────
+
+    /// <summary>The tables each of the role's builder permissions does not apply to. Saved with the role (PUT, TableExclusions).</summary>
+    [HttpGet("{rolePublicId:guid}/table-exclusions")]
+    [RequireAppPermission(PermissionCodes.RolesManage, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<PowerBase.Application.Apps.Commands.UpdateAppRole.TableScopeExclusion>>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetTableExclusions(
+        [FromRoute] Guid appId, [FromRoute] Guid rolePublicId,
+        [FromServices] PowerBase.Application.Apps.Queries.GetRoleTableExclusions.GetRoleTableExclusionsQueryHandler handler, CancellationToken ct)
+    {
+        var rows = await handler.HandleAsync(new(appId, rolePublicId), ct);
+        return Ok(new ApiResponse<IReadOnlyList<PowerBase.Application.Apps.Commands.UpdateAppRole.TableScopeExclusion>>(rows));
+    }
+
+    // ── User interface settings (UI-only hiding; never changes data access) ───────
+
+    /// <summary>Get the role's "User interface" settings (tables, buttons, menus and Personal-settings sections it hides).</summary>
+    [HttpGet("{rolePublicId:guid}/ui-settings")]
+    [RequireAppPermission(PermissionCodes.RolesManage, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiResponse<RoleUiSettings>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetUiSettings(
+        [FromRoute] Guid appId, [FromRoute] Guid rolePublicId,
+        [FromServices] GetRoleUiSettingsQueryHandler handler, CancellationToken ct)
+    {
+        var settings = await handler.HandleAsync(new GetRoleUiSettingsQuery(appId, rolePublicId), ct);
+        return Ok(new ApiResponse<RoleUiSettings>(settings));
+    }
+
+    /// <summary>Replace the role's "User interface" settings.</summary>
+    [HttpPut("{rolePublicId:guid}/ui-settings")]
+    [RequireAppPermission(PermissionCodes.RolesManage, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> UpdateUiSettings(
+        [FromRoute] Guid appId, [FromRoute] Guid rolePublicId, [FromBody] RoleUiSettings request,
+        [FromServices] UpdateRoleUiSettingsCommandHandler handler, CancellationToken ct)
+    {
+        await handler.HandleAsync(new UpdateRoleUiSettingsCommand(appId, rolePublicId, request), ct);
         return NoContent();
     }
 

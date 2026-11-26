@@ -165,7 +165,7 @@ public sealed class ColumnFitHandler(
     public async Task<ImportColumnFitResponse> HandleAsync(Guid fileId, ImportColumnFitRequest request, CancellationToken ct)
     {
         var file = await ImportFileOwnership.LoadAsync(fileId, files, user, ct);
-        await access.RequirePermissionByTablePublicIdAsync(request.TableId, PermissionCodes.RecordsCreate, ct);
+        await access.RequireCanAddRecordsByTablePublicIdAsync(request.TableId, ct);
         var sheets = request.Sheets is { Count: > 0 } ? request.Sheets : [new ImportSheetRequest(null)];
         if (sheets.Count > MaxSheets) throw ImportFileErrors.Invalid($"At most {MaxSheets} sheets can be checked at once.");
 

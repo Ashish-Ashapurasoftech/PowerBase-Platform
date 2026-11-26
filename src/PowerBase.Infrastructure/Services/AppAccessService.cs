@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Infrastructure.Services;
@@ -16,6 +17,7 @@ public class AppAccessService : IAppAccessService
     private readonly IPipelineRepository _pipelineRepo;
     private readonly IAppRoleRepository? _appRoleRepo;
     private readonly IRelationshipRepository _relRepo;
+    private readonly IAppRolePermissionRepository? _permRepo;
 
     public AppAccessService(
         IAppRepository appRepo,
@@ -28,8 +30,10 @@ public class AppAccessService : IAppAccessService
         IQueryContext queryContext,
         IPipelineRepository pipelineRepo,
         IRelationshipRepository relRepo,
-        IAppRoleRepository? appRoleRepo = null)
+        IAppRoleRepository? appRoleRepo = null,
+        IAppRolePermissionRepository? permRepo = null)
     {
+        _permRepo = permRepo;
         _appRepo = appRepo;
         _tableRepo = tableRepo;
         _reportRepo = reportRepo;
@@ -53,24 +57,55 @@ public class AppAccessService : IAppAccessService
     {
         var appId = await _tableRepo.GetAppIdByPublicIdAsync(tablePublicId, ct);
         await RequirePermissionByAppIdAsync(appId, permissionCode, ct);
+        if (IsTableScoped(permissionCode))
+        {
+            var table = await _tableRepo.GetByPublicIdAsync(tablePublicId, ct);
+            await RequireTablePermissionAsync(appId, table.Id, permissionCode, ct);
+        }
     }
 
     public async Task RequirePermissionByReportPublicIdAsync(Guid reportPublicId, string permissionCode, CancellationToken ct = default)
     {
         var appId = await _reportRepo.GetAppIdByPublicIdAsync(reportPublicId, ct);
         await RequirePermissionByAppIdAsync(appId, permissionCode, ct);
+        if (IsTableScoped(permissionCode) && await _reportRepo.GetAppTableIdByPublicIdAsync(reportPublicId, ct) is long tableId)
+            await RequireTablePermissionAsync(appId, tableId, permissionCode, ct);
     }
 
     public async Task RequirePermissionByFormPublicIdAsync(Guid formPublicId, string permissionCode, CancellationToken ct = default)
     {
         var appId = await _formRepo.GetAppIdByPublicIdAsync(formPublicId, ct);
         await RequirePermissionByAppIdAsync(appId, permissionCode, ct);
+        if (IsTableScoped(permissionCode))
+        {
+            var form = await _formRepo.GetByPublicIdAsync(formPublicId, ct);
+            await RequireTablePermissionAsync(appId, form.AppTableId, permissionCode, ct);
+        }
     }
 
     public async Task RequirePermissionByFormRulePublicIdAsync(Guid rulePublicId, string permissionCode, CancellationToken ct = default)
     {
         var appId = await _formRuleRepo.GetAppIdByPublicIdAsync(rulePublicId, ct);
         await RequirePermissionByAppIdAsync(appId, permissionCode, ct);
+        if (IsTableScoped(permissionCode))
+        {
+            var rule = await _formRuleRepo.GetByPublicIdAsync(rulePublicId, ct);
+            if (await _formRepo.GetTableIdByFormIdAsync(rule.FormId, ct) is long tableId)
+                await RequireTablePermissionAsync(appId, tableId, permissionCode, ct);
+        }
+    }
+
+    /// <summary>Builder permissions a role can narrow per table (Roles > Advanced Permissions). Super admins are not
+    /// narrowed; *:read codes are not enforced here (see PermissionCodes.TableScopedEnforced).</summary>
+    private bool IsTableScoped(string permissionCode) =>
+        _permRepo is not null && !_queryContext.IsSuperAdmin && PermissionCodes.TableScopedEnforced.Contains(permissionCode);
+
+    /// <summary>The user holds the permission on this table: one of their roles has it and does not exclude the table.</summary>
+    private async Task RequireTablePermissionAsync(long appId, long tableId, string permissionCode, CancellationToken ct)
+    {
+        var roleIds = await _appUserRepo.GetUserAppRoleIdsAsync(appId, _queryContext.UserId, ct);
+        if (!await _permRepo!.HasTablePermissionAsync(roleIds, permissionCode, tableId, ct))
+            throw new UnauthorizedActionException("Your role does not have this permission on this table.");
     }
 
     public async Task RequirePermissionByPagePublicIdAsync(Guid pagePublicId, string permissionCode, CancellationToken ct = default)
@@ -163,6 +198,25 @@ public class AppAccessService : IAppAccessService
         EnsureTokenAppAccess(appId);
         if (_queryContext.IsSuperAdmin) return;
         await RequireMembershipByAppIdAsync(appId, ct);
+    }
+
+    public async Task RequireCanAddRecordsByTablePublicIdAsync(Guid tablePublicId, CancellationToken ct = default)
+    {
+        await RequireMembershipByTablePublicIdAsync(tablePublicId, ct);
+        if (_queryContext.IsSuperAdmin) return;
+
+        var table = await _tableRepo.GetByPublicIdAsync(tablePublicId, ct);
+        var roleIds = await _appUserRepo.GetUserAppRoleIdsAsync(table.AppId, _queryContext.UserId, ct);
+        if (_permRepo is not null)
+        {
+            foreach (var roleId in roleIds)
+            {
+                // A role with no row for the table gets the default, which does not allow adding (AppRoleTablePermission.Default).
+                var perm = await _permRepo.GetTablePermissionAsync(roleId, table.Id, ct);
+                if (perm?.CanAdd == true) return;
+            }
+        }
+        throw new UnauthorizedActionException("You do not have permission to add records to this table.");
     }
 
     private async Task RequireMembershipByAppIdAsync(long appId, CancellationToken ct)

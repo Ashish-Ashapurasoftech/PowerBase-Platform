@@ -319,7 +319,7 @@ public class ImportColumnFitTests
     public async Task Without_the_right_to_add_records_to_the_table_there_is_no_answer()
     {
         var file = Csv("Age\n1\n");
-        _access.RequirePermissionByTablePublicIdAsync(TableId, PermissionCodes.RecordsCreate, Arg.Any<CancellationToken>())
+        _access.RequireCanAddRecordsByTablePublicIdAsync(TableId, Arg.Any<CancellationToken>())
             .Returns<Task>(_ => throw new UnauthorizedActionException("add records to the table"));
 
         var act = () => Sut().HandleAsync(file.PublicId, new ImportColumnFitRequest(TableId, null), default);

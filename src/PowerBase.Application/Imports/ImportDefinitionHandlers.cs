@@ -116,7 +116,7 @@ public sealed class DeleteImportDefinitionHandler(
     {
         var def = await definitions.GetByPublicIdAsync(definitionId, ct) ?? throw new NotFoundException("ImportDefinition", definitionId);
         var destination = await tables.GetByIdAsync(def.DestinationTableId, ct);
-        await access.RequirePermissionByTablePublicIdAsync(destination.PublicId, PowerBase.Domain.Constants.PermissionCodes.RecordsCreate, ct);
+        await access.RequireCanAddRecordsByTablePublicIdAsync(destination.PublicId, ct);
         await definitions.DeleteAsync(def.Id, user.UserId, ct);
         await (refIndexer ?? NullFieldReferenceIndexer.Instance).RemoveSourceAsync(FieldReferenceSourceTypes.Import, def.PublicId, ct);
     }
@@ -145,7 +145,7 @@ public sealed class DeleteImportDefinitionsHandler(
         foreach (var tableId in found.Select(d => d.DestinationTableId).Distinct())
         {
             var table = await tables.GetByIdAsync(tableId, ct);
-            await access.RequirePermissionByTablePublicIdAsync(table.PublicId, PowerBase.Domain.Constants.PermissionCodes.RecordsCreate, ct);
+            await access.RequireCanAddRecordsByTablePublicIdAsync(table.PublicId, ct);
         }
         await definitions.DeleteManyAsync(found.Select(d => d.Id).ToList(), user.UserId, ct);
         foreach (var d in found)

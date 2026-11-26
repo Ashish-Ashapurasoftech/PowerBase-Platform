@@ -5,4 +5,5 @@ public record UpdateAppRoleRequest(
     string? ManageableRolesType = null,
     int? Rank = null,
     IReadOnlyList<Guid>? ManageableRolePublicIds = null,
-    string? Name = null);
+    string? Name = null,
+    IReadOnlyList<PowerBase.Application.Apps.Commands.UpdateAppRole.TableScopeExclusion>? TableExclusions = null);

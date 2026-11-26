@@ -19,6 +19,84 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
     /// <summary>Drops everything cached about who the user is and what their roles allow. Called BEFORE each write below.</summary>
     private void AccessChanging(bool inTransaction = false) => _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Access, inTransaction);
 
+    // ── Table-scoped builder permissions (Roles > Advanced Permissions > Table selection) ──
+
+    public async Task<IReadOnlyList<RoleTableExclusionRow>> GetTableExclusionsAsync(IReadOnlyCollection<long> appRoleIds, CancellationToken ct = default)
+    {
+        if (appRoleIds.Count == 0) return [];
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        var rows = await conn.QueryAsync<RoleTableExclusionRow>(new CommandDefinition("""
+            SELECT x.AppRoleId, p.Code, x.AppTableId, t.PublicId AS TablePublicId
+            FROM meta.AppRolePermissionTableExclusion x
+            JOIN meta.Permission p ON p.Id = x.PermissionId
+            JOIN meta.AppTable t   ON t.Id = x.AppTableId AND t.IsDeleted = 0
+            WHERE x.AppRoleId IN @appRoleIds
+            """, new { appRoleIds }, cancellationToken: ct));
+        return rows.ToList();
+    }
+
+    public async Task SetTableExclusionsAsync(long appRoleId, IReadOnlyList<(string Code, long AppTableId)> rows, CancellationToken ct = default)
+    {
+        AccessChanging();
+        await using var c = await ConnectionFactory.CreateAsync(ct);
+        await c.OpenAsync(ct);
+        await using var tx = await c.BeginTransactionAsync(ct);
+        await c.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM meta.AppRolePermissionTableExclusion WHERE AppRoleId = @appRoleId", new { appRoleId }, tx, cancellationToken: ct));
+        foreach (var r in rows.Distinct())
+        {
+            // Only codes the role holds, and only tables of the role's own app.
+            await c.ExecuteAsync(new CommandDefinition("""
+                INSERT INTO meta.AppRolePermissionTableExclusion (AppRoleId, PermissionId, AppTableId)
+                SELECT @appRoleId, p.Id, t.Id
+                FROM meta.Permission p
+                JOIN meta.AppRolePermission arp ON arp.PermissionId = p.Id AND arp.AppRoleId = @appRoleId
+                JOIN meta.AppRole r   ON r.Id = @appRoleId
+                JOIN meta.AppTable t  ON t.Id = @tableId AND t.AppId = r.AppId
+                WHERE p.Code = @code
+                """, new { appRoleId, code = r.Code, tableId = r.AppTableId }, tx, cancellationToken: ct));
+        }
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<RolePermissionCodeRow>> GetRoleCodesAsync(IReadOnlyCollection<long> appRoleIds, CancellationToken ct = default)
+    {
+        if (appRoleIds.Count == 0) return [];
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        var rows = await conn.QueryAsync<RolePermissionCodeRow>(new CommandDefinition("""
+            SELECT arp.AppRoleId, p.Code
+            FROM meta.AppRolePermission arp
+            JOIN meta.Permission p ON p.Id = arp.PermissionId
+            WHERE arp.AppRoleId IN @appRoleIds
+            """, new { appRoleIds }, cancellationToken: ct));
+        return rows.ToList();
+    }
+
+    public async Task<IReadOnlyList<AppTableRef>> ListAppTablesAsync(long appId, CancellationToken ct = default)
+    {
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        var rows = await conn.QueryAsync<AppTableRef>(new CommandDefinition(
+            "SELECT Id, PublicId, Name FROM meta.AppTable WHERE AppId = @appId AND IsDeleted = 0",
+            new { appId }, cancellationToken: ct));
+        return rows.ToList();
+    }
+
+    public async Task<bool> HasTablePermissionAsync(IReadOnlyCollection<long> appRoleIds, string code, long appTableId, CancellationToken ct = default)
+    {
+        if (appRoleIds.Count == 0) return false;
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        return await conn.ExecuteScalarAsync<bool>(new CommandDefinition("""
+            SELECT CASE WHEN EXISTS (
+                SELECT 1
+                FROM meta.AppRolePermission arp
+                JOIN meta.Permission p ON p.Id = arp.PermissionId AND p.Code = @code
+                WHERE arp.AppRoleId IN @appRoleIds
+                  AND NOT EXISTS (SELECT 1 FROM meta.AppRolePermissionTableExclusion x
+                                  WHERE x.AppRoleId = arp.AppRoleId AND x.PermissionId = p.Id AND x.AppTableId = @appTableId)
+            ) THEN 1 ELSE 0 END
+            """, new { appRoleIds, code, appTableId }, cancellationToken: ct));
+    }
+
     // ── Table-level ──────────────────────────────────────────────────────────
 
     private const string GetTablePermissionsSql = """

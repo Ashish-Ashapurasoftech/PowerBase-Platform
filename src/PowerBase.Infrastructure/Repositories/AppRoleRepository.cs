@@ -176,6 +176,32 @@ public class AppRoleRepository : TenantRepositoryBase, IAppRoleRepository
             new { roleId, pageId }, cancellationToken: ct));
     }
 
+    public async Task<string?> GetUiSettingsJsonAsync(long roleId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<string?>(new CommandDefinition(
+            "SELECT UiSettingsJson FROM meta.AppRole WHERE Id = @roleId AND IsDeleted = 0",
+            new { roleId }, cancellationToken: ct));
+    }
+
+    public async Task SetUiSettingsJsonAsync(long roleId, string? json, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE meta.AppRole SET UiSettingsJson = @json WHERE Id = @roleId AND IsDeleted = 0",
+            new { roleId, json }, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyDictionary<long, string>> GetUiSettingsJsonsAsync(IReadOnlyCollection<long> roleIds, CancellationToken ct = default)
+    {
+        if (roleIds.Count == 0) return new Dictionary<long, string>();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<(long Id, string Json)>(new CommandDefinition(
+            "SELECT Id, UiSettingsJson FROM meta.AppRole WHERE Id IN @roleIds AND IsDeleted = 0 AND UiSettingsJson IS NOT NULL",
+            new { roleIds }, cancellationToken: ct));
+        return rows.ToDictionary(r => r.Id, r => r.Json);
+    }
+
     public async Task<(long Id, Guid PublicId)> CreateAsync(AppRole role, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         AccessChanging(transaction is not null);

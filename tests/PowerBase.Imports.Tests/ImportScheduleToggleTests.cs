@@ -108,7 +108,7 @@ public class ImportScheduleToggleTests
     [Fact]
     public async Task Without_the_right_to_change_the_import_nothing_is_changed()
     {
-        _access.RequirePermissionByTablePublicIdAsync(DestinationId, PermissionCodes.RecordsCreate, Arg.Any<CancellationToken>())
+        _access.RequireCanAddRecordsByTablePublicIdAsync(DestinationId, Arg.Any<CancellationToken>())
             .Returns(Task.FromException(new UnauthorizedActionException("create records")));
 
         var act = () => _sut.HandleAsync(DefinitionId, false, default);

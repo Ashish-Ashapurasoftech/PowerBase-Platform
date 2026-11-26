@@ -17,6 +17,12 @@ public interface IAppAccessService
 
     /// <summary>Ensures the user is a member of the app that owns the specified table. Does NOT require any specific permission code.</summary>
     Task RequireMembershipByTablePublicIdAsync(Guid tablePublicId, CancellationToken ct = default);
+    /// <summary>
+    /// The user may add records to the table: an app member one of whose roles has "Add records" on it (Data Permissions,
+    /// the table-level CanAdd — the same rule as adding a record by hand). Super admins always may. Used by imports in place
+    /// of the flat <c>records:create</c> permission, which roles can no longer be given from the role page.
+    /// </summary>
+    Task RequireCanAddRecordsByTablePublicIdAsync(Guid tablePublicId, CancellationToken ct = default);
     /// <summary>Ensures the user is a member of the app that owns the specified report. Does NOT require any specific permission code.</summary>
     Task RequireMembershipByReportPublicIdAsync(Guid reportPublicId, CancellationToken ct = default);
     /// <summary>Ensures the user is a member of the app that owns the specified page. Does NOT require any specific permission code.

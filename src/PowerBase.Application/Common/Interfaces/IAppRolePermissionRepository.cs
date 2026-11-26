@@ -17,8 +17,28 @@ public record FieldPermissionScopedRow(Guid TablePublicId, Guid FieldPublicId, s
 
 public record RecordFilterRow(Guid TablePublicId, string Conjunction, string FilterJson, string Kind = "View");
 
+/// <summary>A role's builder permission <see cref="Code"/> does NOT apply to this table (Roles > Advanced Permissions).</summary>
+public record RoleTableExclusionRow(long AppRoleId, string Code, long AppTableId, Guid TablePublicId);
+
+/// <summary>A table of the app, slim.</summary>
+public record AppTableRef(long Id, Guid PublicId, string Name);
+
+/// <summary>A flat permission code held by a role.</summary>
+public record RolePermissionCodeRow(long AppRoleId, string Code);
+
 public interface IAppRolePermissionRepository
 {
+    // Table-scoped builder permissions (exclusions: a held code applies to every table except these)
+    Task<IReadOnlyList<RoleTableExclusionRow>> GetTableExclusionsAsync(IReadOnlyCollection<long> appRoleIds, CancellationToken ct = default);
+    /// <summary>Replaces the role's exclusions. Rows for codes the role does not hold are dropped.</summary>
+    Task SetTableExclusionsAsync(long appRoleId, IReadOnlyList<(string Code, long AppTableId)> rows, CancellationToken ct = default);
+    /// <summary>The flat permission codes of each of the given roles.</summary>
+    Task<IReadOnlyList<RolePermissionCodeRow>> GetRoleCodesAsync(IReadOnlyCollection<long> appRoleIds, CancellationToken ct = default);
+    /// <summary>The app's live tables, slim (id / public id / name only) — for the Table selection checks.</summary>
+    Task<IReadOnlyList<AppTableRef>> ListAppTablesAsync(long appId, CancellationToken ct = default);
+    /// <summary>True when one of the roles holds <paramref name="code"/> and does not exclude the table.</summary>
+    Task<bool> HasTablePermissionAsync(IReadOnlyCollection<long> appRoleIds, string code, long appTableId, CancellationToken ct = default);
+
     // Table-level
     Task<IReadOnlyList<TablePermissionRow>> GetTablePermissionsAsync(long appRoleId, CancellationToken ct = default);
     Task SetTablePermissionsAsync(long appRoleId, IReadOnlyList<AppRoleTablePermission> rows, IDbTransaction? transaction = null, CancellationToken ct = default);

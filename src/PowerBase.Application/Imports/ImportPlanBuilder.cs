@@ -150,8 +150,9 @@ public sealed class ImportPlanBuilder(
             throw Invalid("A destination field is mapped more than once.");
 
         if (file is null) await access.RequirePermissionByTablePublicIdAsync(cfg.SourceTableId, PermissionCodes.RecordsRead, ct);
-        await access.RequirePermissionByTablePublicIdAsync(destinationTableId, PermissionCodes.RecordsCreate, ct);
-        if (isMerge) await access.RequirePermissionByTablePublicIdAsync(destinationTableId, PermissionCodes.RecordsUpdate, ct);
+        // Adding (and, for a merge, editing) records is decided per table by the role's Data Permissions (checked just below
+        // with destAccess) — not by the flat records:create / records:update, which roles can no longer be given.
+        await access.RequireCanAddRecordsByTablePublicIdAsync(destinationTableId, ct);
 
         var destination = await tables.GetByPublicIdAsync(destinationTableId, ct);
         var source = file is null

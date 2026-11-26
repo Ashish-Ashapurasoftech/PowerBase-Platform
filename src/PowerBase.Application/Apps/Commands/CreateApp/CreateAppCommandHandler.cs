@@ -122,6 +122,7 @@ public class CreateAppCommandHandler
                 PermissionCodes.UsersInvite, PermissionCodes.UsersManage, PermissionCodes.RolesManage,
                 PermissionCodes.AuditLogsRead, PermissionCodes.AuditLogsReadOfStream,
                 PermissionCodes.PowerFlowsCreate, PermissionCodes.PowerFlowsRead, PermissionCodes.PowerFlowsUpdate, PermissionCodes.PowerFlowsDelete, PermissionCodes.PowerFlowsCopy,
+                PermissionCodes.BrandingColor, PermissionCodes.BrandingFont, PermissionCodes.BrandingGrid, PermissionCodes.BrandingLayout,
             }, _uow.Transaction, ct);
 
             var (participantRoleId, _) = await _appRoleRepo.CreateAsync(new AppRole

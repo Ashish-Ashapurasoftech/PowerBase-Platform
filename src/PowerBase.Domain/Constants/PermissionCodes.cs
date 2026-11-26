@@ -58,6 +58,42 @@ public static class PermissionCodes
 
     public const string TokenCreate      = "token:create";
 
+    // Branding (App Settings > Branding & Layout): which parts of the app's branding a role may change.
+    public const string BrandingColor  = "branding:color";
+    public const string BrandingFont   = "branding:font";
+    public const string BrandingGrid   = "branding:grid";
+    public const string BrandingLayout = "branding:layout";
+
+    public static readonly IReadOnlySet<string> BrandingPermissions = new HashSet<string>
+    {
+        BrandingColor, BrandingFont, BrandingGrid, BrandingLayout,
+    };
+
+    /// <summary>
+    /// Builder permissions a role can narrow to some tables (Roles > Advanced Permissions > Table selection;
+    /// meta.AppRolePermissionTableExclusion). A role holding one of these has it on every table unless excluded.
+    /// </summary>
+    public static readonly IReadOnlySet<string> TableScoped = new HashSet<string>
+    {
+        TablesRead, TablesUpdate, TablesDelete,
+        FieldsCreate, FieldsRead, FieldsUpdate, FieldsDelete,
+        ReportsCreate, ReportsRead, ReportsUpdate, ReportsDelete,
+        FormsCreate, FormsRead, FormsUpdate, FormsDelete, FormsRulesManage,
+    };
+
+    /// <summary>
+    /// The table-scoped permissions the API enforces per table. The *:read ones are left out on purpose: the same codes
+    /// load a table's fields, reports and forms for everyday use, so a per-table "View" only gates the builder screens
+    /// (enforced in the client) and never blocks working with the table's records.
+    /// </summary>
+    public static readonly IReadOnlySet<string> TableScopedEnforced = new HashSet<string>
+    {
+        TablesUpdate, TablesDelete,
+        FieldsCreate, FieldsUpdate, FieldsDelete,
+        ReportsCreate, ReportsUpdate, ReportsDelete,
+        FormsCreate, FormsUpdate, FormsDelete, FormsRulesManage,
+    };
+
     /// <summary>
     /// Structural/admin permission codes assigned to regular app members by default.
     /// Record data access (view/add/modify/delete/field-level) is governed by table-level

@@ -52,14 +52,14 @@ public class ImportBulkDeleteTests
     {
         await Delete(_inApp[0], _inApp[1], _inApp[2]);
 
-        await _access.Received(1).RequirePermissionByTablePublicIdAsync(TableA, PermissionCodes.RecordsCreate, Arg.Any<CancellationToken>());
-        await _access.Received(1).RequirePermissionByTablePublicIdAsync(TableB, PermissionCodes.RecordsCreate, Arg.Any<CancellationToken>());
+        await _access.Received(1).RequireCanAddRecordsByTablePublicIdAsync(TableA, Arg.Any<CancellationToken>());
+        await _access.Received(1).RequireCanAddRecordsByTablePublicIdAsync(TableB, Arg.Any<CancellationToken>());
     }
 
     [Fact]
     public async Task If_one_table_is_refused_nothing_is_deleted()
     {
-        _access.RequirePermissionByTablePublicIdAsync(TableB, PermissionCodes.RecordsCreate, Arg.Any<CancellationToken>())
+        _access.RequireCanAddRecordsByTablePublicIdAsync(TableB, Arg.Any<CancellationToken>())
             .Returns<Task>(_ => throw new UnauthorizedActionException("add records to the table"));
 
         var act = () => Delete(_inApp[0], _inApp[2]);

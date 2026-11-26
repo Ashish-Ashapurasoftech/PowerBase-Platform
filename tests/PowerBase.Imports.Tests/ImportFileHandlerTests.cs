@@ -116,7 +116,7 @@ public class ImportFileUploadTests
     [Fact]
     public async Task The_caller_must_be_allowed_to_add_records_to_the_table()
     {
-        _access.RequirePermissionByTablePublicIdAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns<Task>(_ => throw new UnauthorizedActionException("add records"));
+        _access.RequireCanAddRecordsByTablePublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns<Task>(_ => throw new UnauthorizedActionException("add records"));
 
         var act = () => Upload([1], "a.csv");
 

@@ -171,7 +171,7 @@ public class ImportPermissionMatrixTests
         var tables = Substitute.For<IAppTableRepository>();
         tables.GetByIdAsync(11, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 11, PublicId = Guid.NewGuid() });
         var access = Substitute.For<IAppAccessService>();
-        access.RequirePermissionByTablePublicIdAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+        access.RequireCanAddRecordsByTablePublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns<Task>(_ => throw new UnauthorizedActionException("add records"));
 
         var act = () => new DeleteImportDefinitionHandler(tables, access, definitions, User(9)).HandleAsync(def.PublicId, default);
