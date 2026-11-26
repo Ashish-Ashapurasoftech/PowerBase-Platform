@@ -126,8 +126,14 @@ public class UpdateFieldCommandHandler
             : ComputedFieldSearch.Apply(command.IsFilterable, existing.TypeCode, existing.IsHidden, existing.IsSystem);
         var isSearchable = ComputedFieldSearch.Apply(command.IsSearchable, existing.TypeCode, existing.IsHidden, existing.IsSystem);
         var isAuditable = existing.IsSystem ? false : command.IsAuditable;
+        // A system field or an encryption-exempt type (Reference, Number, Date, Boolean, User, ...) has no encryption setting a
+        // request can change, so whatever is stored stays. It used to be forced to false, but a field of an exempt type can still
+        // carry IsEncrypted = true from before the type was exempted (its column may still hold ciphertext until
+        // ExemptFieldEncryptionCleanupService migrates it): true -> false then looked like an un-encrypt and any settings save on a
+        // table with records was refused with "cannot be un-encrypted". Un-flagging those fields is the cleanup service's job
+        // (it decrypts the column first); clearing the flag here would leave ciphertext in a column read as plain.
         var isEncrypted = existing.IsSystem || PowerBase.Domain.Constants.PhysicalNaming.IsEncryptionExemptTypeCode(existing.TypeCode)
-            ? false
+            ? existing.IsEncrypted
             : command.IsEncrypted;
         var snapshotSourceFid = existing.IsSystem ? null : command.SnapshotSourceFid;
         var snapshotEditable = snapshotSourceFid.HasValue && command.SnapshotEditable;

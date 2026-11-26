@@ -133,7 +133,23 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         BEGIN
             UPDATE meta.AppUser
             SET IsDeleted = 0, Status = @status, UserName = @userName, UserEmail = @userEmail, UpdatedOn = SYSUTCDATETIME()
-            WHERE AppId = @appId AND UserId = @userId AND AppRoleId = @appRoleId AND IsFromGroup = 0;
+            WHERE Id = (
+                SELECT TOP 1 Id 
+                FROM meta.AppUser 
+                WHERE AppId = @appId AND UserId = @userId AND AppRoleId = @appRoleId AND IsFromGroup = 0 
+                ORDER BY Id DESC
+            );
+        END
+        ELSE IF @isFromGroup = 1 AND EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId AND AppRoleId = @appRoleId AND GroupId = @groupId AND IsFromGroup = 1)
+        BEGIN
+            UPDATE meta.AppUser
+            SET IsDeleted = 0, Status = @status, UserName = @userName, UserEmail = @userEmail, UpdatedOn = SYSUTCDATETIME()
+            WHERE Id = (
+                SELECT TOP 1 Id 
+                FROM meta.AppUser 
+                WHERE AppId = @appId AND UserId = @userId AND AppRoleId = @appRoleId AND GroupId = @groupId AND IsFromGroup = 1 
+                ORDER BY Id DESC
+            );
         END
         ELSE
         BEGIN

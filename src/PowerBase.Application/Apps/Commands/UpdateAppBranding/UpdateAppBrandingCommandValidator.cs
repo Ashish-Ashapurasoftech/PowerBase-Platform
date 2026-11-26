@@ -36,7 +36,8 @@ public class UpdateAppBrandingCommandValidator : AbstractValidator<UpdateAppBran
             RuleFor(x => x.Branding!.FontSize).Must(ValidFontSizes.Contains).WithMessage("Unknown font size.");
             RuleFor(x => x.Branding!.Density).Must(ValidDensities.Contains).WithMessage("Unknown density.");
             RuleFor(x => x.Branding!.BorderMode).Must(ValidBorderModes.Contains).WithMessage("Unknown border mode.");
-            RuleFor(x => x.Branding!.PageSize).Must(v => v is 5 or 10 or 25 or 50).WithMessage("Page size must be 5, 10, 25, or 50.");
+            // Same list the frontend offers (PAGE_SIZE_OPTIONS); 25 is kept so already-saved values stay valid.
+            RuleFor(x => x.Branding!.PageSize).Must(v => v is 5 or 10 or 20 or 25 or 50 or 100 or 200).WithMessage("Page size must be 5, 10, 20, 25, 50, 100, or 200.");
             RuleFor(x => x.Branding!.BrandColorHex)
                 .Matches("^#[0-9a-fA-F]{6}$")
                 .When(x => !string.IsNullOrEmpty(x.Branding!.BrandColorHex))

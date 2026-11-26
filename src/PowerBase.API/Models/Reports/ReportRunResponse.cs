@@ -31,6 +31,9 @@ public class ReportRunResponse
     /// group, not just this page, keyed by column Key. Null value = no total for that column (Distinct
     /// Count, Std Dev, Median, summary formulas, % of total, non-numeric Min/Max). Null when not paged.</summary>
     public IReadOnlyDictionary<string, decimal?>? SummaryTotals { get; init; }
+    /// <summary>Paged crosstab Summary only: every column value with its totals over all groups, and this page's
+    /// pivot-row totals. SummaryTotals holds the grand totals. Null otherwise.</summary>
+    public PowerBase.Application.Reports.Queries.RunReport.CrosstabSummaryResult? CrosstabSummary { get; init; }
 }
 
 public class ReportColumnTotalDto
