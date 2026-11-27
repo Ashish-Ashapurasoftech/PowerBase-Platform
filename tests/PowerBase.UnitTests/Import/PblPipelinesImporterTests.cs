@@ -831,6 +831,27 @@ public class PblPipelinesImporterTests
     [InlineData("{{time.now.weekday()}} {{time.now.isoweekday()}} {{time.now.strftime('%y %j %w')}}", "6 7 25 005 0")]
     [InlineData("{{(time.now + time.delta(days=1)).day}} {{time.parse('2025-03-01').month}}", "6 3")]
     [InlineData("v{{time.today > time.parse('2025-01-01')}}", "vTrue")]
+    // time.delta set parts, month spans keep the time, |timezone (US daylight time rule), wordcount, string methods
+    [InlineData("{{(time.today - time.delta(day=1))|date_ymd}} {{((time.today + time.delta(months=1) - time.delta(day=1)) - time.delta(days=1))|date_ymd}} {{(time.today + time.delta(day=31, month=2))|date_ymd}}", "2025-01-01 2025-01-31 2025-02-28")]
+    [InlineData("{{time.now + time.delta(months=1)}}|{{time.now + time.delta(hour=8, minute=0)}}", "2025-02-05 23:30:00+00:00|2025-01-05 08:00:00+00:00")]
+    [InlineData("{{time.now|timezone('America/New_York')}}|{{(time.now|timezone('America/Chicago')).strftime('%Y-%m-%d %I:%M %p')}}|{{time.now|timezone('Asia/Kolkata')}}|{{time.now|timezone('UTC')}}", "2025-01-05 18:30:00-05:00|2025-01-05 05:30 PM|2025-01-06 05:00:00+05:30|2025-01-05 23:30:00+00:00")]
+    [InlineData("{{(time.now + time.delta(months=6))|timezone('America/New_York')}}|{{((time.now|timezone('America/Los_Angeles')).date())}}", "2025-07-05 19:30:00-04:00|2025-01-05")]
+    [InlineData("{{(time.today + time.delta(month=3, day=9, hour=6, minute=59))|timezone('US/Eastern')}}|{{(time.today + time.delta(month=3, day=9, hour=7, minute=0))|timezone('US/Eastern')}}", "2025-03-09 01:59:00-05:00|2025-03-09 03:00:00-04:00")]
+    [InlineData("{{(time.today + time.delta(month=11, day=2, hour=5, minute=59))|timezone('America/New_York')}}|{{(time.today + time.delta(month=11, day=2, hour=6, minute=0))|timezone('America/New_York')}}", "2025-11-02 01:59:00-04:00|2025-11-02 01:00:00-05:00")]
+    [InlineData("{{'Hello, big world_1 x'|wordcount}} [{{'  a b  '.lstrip()}}][{{'  a b  '.rstrip()}}] {{'42'.zfill(5)}} {{'-42'.zfill(5)}} {{'12345'.zfill(3)}}", "4 [a b  ][  a b] 00042 -0042 12345")]
+    [InlineData("{{'123'.isdigit()}} {{'12a'.isdigit()}} {{'abc'.isalpha()}} {{'ab1'.isalnum()}} {{'AB'.isupper()}} {{'ab'.islower()}} {{'  '.isspace()}} {{''.isdigit()}}", "True False True True True True True False")]
+    [InlineData("{{(time.now - time.today).total_seconds()}} {{time.now.time()}}", "84600.0 23:30:00")]
+    // {% set name = value %} outside an if block
+    [InlineData("{% set digits = '+1 (212) 555-1234'|string|replace('(', '')|replace(')', '')|replace('-', '')|replace(' ', '')|replace('.', '')|replace('+', '')|trim %}{% set phone = digits[1:] if digits|length == 11 and digits[0] == '1' else digits %}{{ phone }}", "2125551234")]
+    [InlineData("{% set n = 3 %}{% set who = aa.name ~ '!' %}{{ n * 2 }} {{who}} {% if n > 2 %}big{% else %}small{% endif %}", "6 Ronak! big")]
+    // list literals, a date and time minus a date
+    [InlineData("{{[3, 7, 5]|max}} {{[3, 7, 5]|min}} {{[3, 7, 5]|sum}} {{[1, 2]|length}} {{['a', aa.name]|join('-')}} {{'b' in ['a', 'b']}} {{[4, 9]|last}}", "7 3 15 2 a-Ronak True 9")]
+    [InlineData("{{(time.now - time.today).seconds}} {{(time.parse('2025-03-01') - time.today).days}}", "84600 55")]
+    // escape, tojson / to_json, truncate (Jinja 2.11: length 255, killwords false, end '...', leeway 5)
+    [InlineData("{{'a<b & \"c\" \\'d\\''|escape}} {{aa.name|e}}", "a&lt;b &amp; &#34;c&#34; &#39;d&#39; Ronak")]
+    [InlineData("{\"m\": {{aa.name|tojson}}, \"n\": {{5|to_json}}, \"b\": {{(1 > 0)|tojson}}}", "{\"m\": \"Ronak\", \"n\": 5, \"b\": true}")]
+    [InlineData("{{'x\"y<z>&\\\\'|tojson}}", "\"x\\\"y\\u003cz\\u003e\\u0026\\\\\"")]
+    [InlineData("{{'hello world foo bar'|truncate(9)}}|{{aa.name|truncate(3)}}|{{'abcdefghijkl'|truncate(5, true, '..', 0)}}|{{'abcdefghijkl'|truncate(length=6, leeway=0)}}", "hello...|Ronak|abc..|abc...")]
     public async Task NewApp_JinjaWithAFormulaEquivalent_IsSavedAsAFormulaThatPrintsTheSameText(string qbValue, string expected)
     {
         var report = await ImportAsync(QblPipelineConverterTests.AllStepsWith("{{aa.name}}", 0, qbValue));
@@ -857,6 +878,7 @@ public class PblPipelinesImporterTests
     [InlineData("{{'x' if aa.name else 'empty'}} {{not aa.name}}", "empty True")]
     [InlineData("{{time.now}}|{{time.today}}|{{time.parse('2025-03-01')}}|{{time.now.date()}}", "2025-01-05 23:30:00+00:00|2025-01-05 00:00:00+00:00|2025-03-01 00:00:00|2025-01-05")]
     [InlineData("{{time.today + time.delta(days=1)}}", "2025-01-06 00:00:00+00:00")]
+    [InlineData("{\"m\": {{aa.name|tojson}}}", "{\"m\": null}")]
     public async Task NewApp_JinjaOnAnEmptyFieldAndWholeDates_PrintsWhatQuickbasePrints(string qbValue, string expected)
     {
         await ImportAsync(QblPipelineConverterTests.AllStepsWith("{{aa.name}}", 0, qbValue));
@@ -869,16 +891,102 @@ public class PblPipelinesImporterTests
         result.Should().Be(expected);
     }
 
+    // Every function of the PowerFlows formula language, with the Quickbase Jinja that becomes it, or why no Jinja does
+    // (Quickbase Pipelines Jinja reference: help.quickbase.com/docs/jinja-reference). A new formula function fails the Fact below
+    // until it is listed here.
+    public static readonly Dictionary<string, string> JinjaForFormulaFunction = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Length"] = "{{aa.name|length}}", ["Trim"] = "{{aa.name|trim}}", ["Lower"] = "{{aa.name|lower}}", ["Upper"] = "{{aa.name|upper}}",
+        ["Base64Encode"] = "{{aa.name|base64_encode}}", ["Base64Decode"] = "{{aa.name|base64_decode}}",
+        ["Begins"] = "{{aa.name.startswith('R')}}", ["Ends"] = "{{aa.name.endswith('k')}}", ["Contains"] = "{{'R' in aa.name}}",
+        ["Find"] = "{{aa.name.find('n')}}", ["HTMLToText"] = "{{aa.name|striptags}}", ["Left"] = "{{aa.name[:2]}}", ["Right"] = "{{aa.name[-2:]}}",
+        ["Mid"] = "{{aa.name[1:3]}}", ["NotLeft"] = "{{aa.name[2:]}}", ["NotRight"] = "{{aa.name[:-2]}}", ["Part"] = "{{aa.name.split(',')[1]}}",
+        ["RegexReplace"] = "{{aa.name|truncate(9)}}", ["SearchAndReplace"] = "{{aa.name|replace('a', 'b')}}", ["ToText"] = "{{aa.name|length|string}}",
+        ["URLEncode"] = "{{aa.name|urlencode}}", ["Join"] = "{{aa.name.split(',')|join('-')}}", ["Split"] = "{{aa.name.split(',')|join('-')}}",
+        ["Count"] = "{{aa.name.split(',')|length}}",
+        ["Now"] = "{{time.now|date_ymd}}", ["ToDate"] = "{{time.parse(aa.name)|date_ymd}}", ["Days"] = "{{(time.now + time.delta(days=1))|date_ymd}}",
+        ["Hours"] = "{{(time.now + time.delta(hours=1))|date_ymd}}", ["Minutes"] = "{{(time.now + time.delta(minutes=1))|date_ymd}}",
+        ["Seconds"] = "{{(time.now + time.delta(seconds=1))|date_ymd}}", ["Weeks"] = "{{(time.now + time.delta(weeks=1))|date_ymd}}",
+        ["AdjustMonth"] = "{{(time.today + time.delta(months=1))|date_ymd}}", ["AdjustYear"] = "{{(time.today + time.delta(years=1))|date_ymd}}",
+        ["Year"] = "{{time.now.year}}", ["Month"] = "{{time.now.month}}", ["Day"] = "{{time.now.day}}", ["Hour"] = "{{time.now.hour}}",
+        ["Minute"] = "{{time.now.minute}}", ["Second"] = "{{time.now.second}}", ["NameOfMonth"] = "{{time.now.strftime('%B')}}",
+        ["NameOfDay"] = "{{time.now.strftime('%A')}}", ["ToDays"] = "{{(time.parse(aa.name) - time.today).days}}",
+        ["ToSeconds"] = "{{(time.now - time.today).seconds}}", ["WeekDay"] = "{{time.now.weekday()}}",
+        ["DayOfYear"] = "{{time.now.strftime('%j')}}",
+        ["If"] = "{{'y' if aa.name else 'n'}}", ["Not"] = "{{not aa.name}}", ["Abs"] = "{{aa.name|float|abs}}", ["Int"] = "{{aa.name|int}}",
+        ["Round"] = "{{aa.name|float|round(1)}}", ["RoundDown"] = "{{aa.name|float|round(1, 'floor')}}", ["RoundUp"] = "{{aa.name|float|round(1, 'ceil')}}",
+        ["Mod"] = "{{aa.name|int % 2}}", ["ToNumber"] = "{{aa.name|float}}", ["Max"] = "{{[aa.name|int, 2]|max}}", ["Min"] = "{{[aa.name|int, 2]|min}}",
+        ["Sum"] = "{{[aa.name|int, 2]|sum}}",
+        ["RegexMatch"] = "{{aa.name.isdigit()}}", ["Date"] = "{{(time.today - time.delta(day=1))|date_ymd}}",
+        ["LastDayOfMonth"] = "{{(time.today + time.delta(day=31))|date_ymd}}",
+    };
+
+    public static readonly Dictionary<string, string> NoJinjaForFormulaFunction = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["RegexExtract"] = "Quickbase Jinja has no regex",
+        ["URLDecode"] = "no urldecode filter", ["Replace"] = "position replace: no Jinja form", ["Concat"] = "Jinja joins with ~ (written as &)",
+        ["List"] = "Jinja joins with ~ / join", ["Size"] = "list size: written as Count", ["ToUserList"] = "user lists are not Jinja values",
+        ["Today"] = "time.today is ToDate(Now()) in UTC, as Quickbase",
+        ["DateAdd"] = "time.delta is written with Days/Hours/...", ["DateDiff"] = "date subtraction is written with ToDays/ToSeconds",
+        ["FirstDayOfMonth"] = "time.delta(day=1) is written with Date(year, month, 1)", ["FirstDayOfWeek"] = "no Jinja form", ["FirstDayOfYear"] = "no Jinja form",
+        ["LastDayOfWeek"] = "no Jinja form", ["LastDayOfYear"] = "no Jinja form",
+        ["NextDayOfWeek"] = "no Jinja form", ["PrevDayOfWeek"] = "no Jinja form", ["Quarter"] = "no Jinja form", ["IsWeekday"] = "no Jinja form",
+        ["WeekdayAdd"] = "no Jinja form", ["WeekdaySub"] = "no Jinja form", ["DayOfWeek"] = "weekday() is written with WeekDay",
+        ["ToHours"] = "total_seconds() / 3600 is written with ToSeconds", ["ToMinutes"] = "total_seconds() / 60 is written with ToSeconds",
+        ["ToWeeks"] = "a Python timedelta has only .days / .seconds", ["ToTimeOfDay"] = "no Jinja form",
+        ["ToTimestamp"] = "used inside date parts of a field, not a Jinja form of its own",
+        ["And"] = "Jinja 'and' is written as the and operator", ["Or"] = "Jinja 'or' is written as the or operator",
+        ["True"] = "written as the literal true", ["False"] = "written as the literal false",
+        ["IsNull"] = "'is none' compares with an empty text, as a Quickbase None reads", ["IsNotNull"] = "'is not none' compares with an empty text",
+        ["Nz"] = "default(v, true) is written with If", ["Case"] = "if / elif is written with If", ["ToBool"] = "Jinja truthiness is written as a comparison",
+        ["Ceil"] = "round(..., 'ceil') is written with RoundUp", ["Floor"] = "// is written with RoundDown / Int", ["Sqrt"] = "** 0.5 is written with ^",
+        ["Average"] = "Jinja has no average filter", ["Rem"] = "% is written with Mod",
+        ["GetFieldValues"] = "record functions read other tables: Pipelines use a Search step", ["GetRecord"] = "record functions: Pipelines use a Look Up step",
+        ["GetRecordByUniqueField"] = "record functions: Pipelines use a Look Up step", ["GetRecords"] = "record functions: Pipelines use a Search step",
+        ["SumValues"] = "record functions: Pipelines use a Search step",
+        ["AppID"] = "a.context.app_id: the trigger context, not a formula", ["Dbid"] = "a.context.table_id: the trigger context, not a formula",
+        ["Rurl"] = "page links are rewritten by the URL rewriter", ["URLRoot"] = "page links are rewritten by the URL rewriter",
+        ["ID"] = "user values: a Quickbase user field is a Reference in PowerBase", ["IsUserEmail"] = "user values", ["Name"] = "user values",
+        ["ToUser"] = "user values", ["User"] = "user values", ["UserID"] = "user values", ["UserRoles"] = "user values",
+        ["UserToEmail"] = "user values", ["UserToID"] = "user values", ["UserToName"] = "user values",
+    };
+
+    [Fact]
+    public void EveryFormulaFunction_HasItsJinjaOrAReasonWhyNone()
+    {
+        var registry = PowerBase.Formula.Functions.FunctionRegistry.Builtin;
+        var names = ((System.Collections.IDictionary)typeof(PowerBase.Formula.Functions.FunctionRegistry)
+            .GetField("_byName", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(registry)!)
+            .Keys.Cast<string>().ToList();
+        names.Should().HaveCountGreaterThan(100);
+        names.Where(n => !JinjaForFormulaFunction.ContainsKey(n) && !NoJinjaForFormulaFunction.ContainsKey(n)).Should().BeEmpty();
+        JinjaForFormulaFunction.Keys.Intersect(NoJinjaForFormulaFunction.Keys, StringComparer.OrdinalIgnoreCase).Should().BeEmpty();
+    }
+
+    public static IEnumerable<object[]> FormulaFunctionJinja() => JinjaForFormulaFunction.Select(kv => new object[] { kv.Key, kv.Value });
+
+    [Theory]
+    [MemberData(nameof(FormulaFunctionJinja))]
+    public async Task EveryFormulaFunction_ItsQuickbaseJinja_BecomesThatFunction(string function, string qbValue)
+    {
+        var report = await ImportAsync(QblPipelineConverterTests.AllStepsWith("{{aa.name}}", 0, qbValue));
+
+        var value = Config(Saved("ref_ab")).GetProperty("fieldMappings")[0].GetProperty("value").GetString()!;
+        value.Should().StartWith(PowerBase.Application.Pipelines.PipelineFormulaValue.Prefix,
+            string.Join(" | ", report.Pipelines.Single().Issues.Where(i => i.StepId == "ab").Select(i => i.Message)));
+        value.Should().MatchRegex($@"(?i)\b{function}\(");
+    }
+
+
     // powerflowextraRd: Jinja our formulas have no equivalent for is not guessed: the value is cleared, reported and the step is a draft.
     [Theory]
     [InlineData("{{aa.name|title}}")]
-    [InlineData("{{time.now|timezone('America/New_York')}}")]
     [InlineData("{{runtime.pipeline_name}}")]
     [InlineData("{{time.delta(year=2016)}}")]
     [InlineData("{{time.now.strftime('%U')}}")]
-    [InlineData("{{aa.name|truncate(3)}}")]
-    [InlineData("{{aa.name|wordcount}}")]
     [InlineData("{{aa.name|md5}}")]
+    [InlineData("{% if aa.name %}{% set x = 1 %}{% endif %}{{x}}")]
+    [InlineData("{% set x %}a{% endset %}{{x}}")]
     [InlineData("{{aa.name|html2text}}")]
     [InlineData("{{aa.name is string}}")]
     [InlineData("{{aa.name.title()}}")]

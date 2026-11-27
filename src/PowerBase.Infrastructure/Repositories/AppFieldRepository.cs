@@ -14,7 +14,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 {
     private const string SelectColumns = """
         af.Id, af.PublicId, af.AppTableId, af.FieldTypeId, ft.Code AS TypeCode,
-        af.Name, af.Label, af.Description, af.PhysicalColumnName, af.DefaultValue,
+        af.Name, af.Label, af.Description, af.HelpText, af.PhysicalColumnName, af.DefaultValue,
         af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable, af.IsAuditable,
         af.IsUnique, af.IsSystem, af.Fid, af.Settings, af.IsEncrypted, af.IsAutoFill, af.SnapshotSourceFid, af.SnapshotEditable, af.IsSharedValues, af.IsHidden, af.IsDeleted, af.CreatedOn, af.CreatedBy
         """;
@@ -278,6 +278,12 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     private const string SetSnapshotConfigSql = """
         UPDATE meta.AppField
         SET SnapshotSourceFid = @sourceFid, SnapshotEditable = @editable
+        WHERE Id = @id AND IsDeleted = 0
+        """;
+
+    private const string SetHelpTextSql = """
+        UPDATE meta.AppField
+        SET HelpText = @helpText
         WHERE Id = @id AND IsDeleted = 0
         """;
 
@@ -725,6 +731,19 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     {
         FieldsChanging(transaction is not null);
         var command = new CommandDefinition(SetSharedValuesSql, new { id, isSharedValues }, transaction, cancellationToken: ct);
+        if (transaction is not null)
+        {
+            await transaction.Connection!.ExecuteAsync(command);
+            return;
+        }
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(command);
+    }
+
+    public async Task SetHelpTextAsync(long id, string? helpText, CancellationToken ct = default, IDbTransaction? transaction = null)
+    {
+        FieldsChanging(transaction is not null);
+        var command = new CommandDefinition(SetHelpTextSql, new { id, helpText }, transaction, cancellationToken: ct);
         if (transaction is not null)
         {
             await transaction.Connection!.ExecuteAsync(command);

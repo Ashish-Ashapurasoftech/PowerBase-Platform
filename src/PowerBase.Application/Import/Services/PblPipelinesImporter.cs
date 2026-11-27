@@ -32,7 +32,8 @@ public class PblPipelinesImporter(
     ITenantRepository tenantRepo,
     IQueryContext queryContext,
     UpdatePipelineCommandHandler? updatePipelineHandler = null,
-    Microsoft.Extensions.Configuration.IConfiguration? configuration = null)
+    Microsoft.Extensions.Configuration.IConfiguration? configuration = null,
+    PowerBase.Application.Pipelines.IRequestConnectionService? requestConnections = null)
 {
     /// <summary>The PowerBase site / API address imported links are written on (no trailing slash), or null when not configured.</summary>
     private string? SiteBase(bool api)
@@ -224,6 +225,7 @@ public class PblPipelinesImporter(
         await updatePipelineHandler.HandleAsync(new UpdatePipelineCommand(pipelinePublicId, existing.Name, pipeline.Description, false, existing.RowVersion), ct);
         item.Status = PipelineImportStatuses.Created;
 
+        await CreateHttpAccountsAsync(pipelinePublicId, steps, item, ct);
         if (steps.Count > 0)
             await SaveStepsAsync(pipelinePublicId, steps, item, ct);
         else
@@ -260,6 +262,7 @@ public class PblPipelinesImporter(
         item.PipelinePublicId = created.PublicId;
         item.Status = PipelineImportStatuses.Created;
 
+        await CreateHttpAccountsAsync(created.PublicId, steps, item, ct);
         if (steps.Count > 0)
             await SaveStepsAsync(created.PublicId, steps, item, ct);
         else if (pipeline.SourceStepCount > 0)
@@ -273,6 +276,34 @@ public class PblPipelinesImporter(
         }
 
         await ImportScheduleAsync(pipeline, created.PublicId, item, ct);
+    }
+
+    /// <summary>Quickbase Webhooks-channel requests have no account: as in Quickbase there is nothing to connect, so an HTTP
+    /// account without authentication for the step's base URL is created in the PowerFlow and the step uses it.</summary>
+    private async Task CreateHttpAccountsAsync(Guid pipelinePublicId, List<SavePipelineStepDto> steps, PipelineImportReportItem item, CancellationToken ct)
+    {
+        long? pipelineId = null;
+        foreach (var step in Flatten(steps))
+        {
+            if (step.Subtype != "make-request" || step.ConfigJson is null || !step.ConfigJson.Contains(QblPipelineConverter.AUTO_HTTP_ACCOUNT, StringComparison.Ordinal)) continue;
+            if (System.Text.Json.Nodes.JsonNode.Parse(step.ConfigJson) is not System.Text.Json.Nodes.JsonObject config) continue;
+            config.Remove(QblPipelineConverter.AUTO_HTTP_ACCOUNT);
+            var name = config["accountName"]?.GetValue<string>();
+            var baseUrl = config["baseUrl"]?.GetValue<string>();
+            try
+            {
+                if (requestConnections is null || string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(baseUrl))
+                    throw new InvalidOperationException("No HTTP account service.");
+                pipelineId ??= await pipelineRepo.GetIdByPublicIdAsync(pipelinePublicId, ct);
+                config["httpConnectionId"] = (await requestConnections.EnsureNoAuthenticationAccountAsync(pipelineId.Value, name!, baseUrl!, QueryContext.UserId, ct)).ToString();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                step.IsValidated = false;
+                Issue(item, "PIPELINE_HTTP_CONNECTION_MISSING", $"Step '{step.Label}': the HTTP account for {baseUrl} could not be created; connect it in the step before turning the PowerFlow on.");
+            }
+            step.ConfigJson = config.ToJsonString();
+        }
     }
 
     private async Task SaveStepsAsync(Guid pipelinePublicId, List<SavePipelineStepDto> steps, PipelineImportReportItem item, CancellationToken ct)

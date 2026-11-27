@@ -57,8 +57,8 @@ public class QblNoQuickbaseUrlImportTests
         new(Guid.Parse("00000000-0000-0000-0000-000000000001"), 1, "YSL Dev Docs",
         [
             new(10, "Employee", null, [F(1, "Date Created", "DateTime", true), F(2, "Date Modified", "DateTime", true), F(3, "Record ID#", "Number", true),
-                F(4, "Record Owner", "User", true), F(5, "Last Modified By", "User", true), F(7, "Email", "Email"), F(20, "Name"), F(22, "Status")]),
-        ]),
+                F(4, "Record Owner", "User", true), F(5, "Last Modified By", "User", true), F(7, "Email", "Email"), F(20, "Name"), F(22, "Status")], "bwcrtu9k5"),
+        ], "bt2kqxkqk"),
     ];
 
     private static PblPipeline Import(string steps)

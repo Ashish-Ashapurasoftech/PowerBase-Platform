@@ -711,15 +711,16 @@ public class PipelineComputedFieldSearchTests
     }
 
     [Fact]
-    public async Task LookUpRecord_ByKeyField_NoMatch_SaysWhichValueWasNotFound()
+    public async Task LookUpRecord_ByKeyField_NoMatch_SucceedsWithEmptyOutput_AsQuickbase()
     {
         var h = KeyedHarness();
         h.RecordRepo.GetIdsByColumnValuesAsync(Arg.Any<AppTable>(), Arg.Any<string>(), Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<object, long>());
 
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => h.RunStepAsync(LookUpByKey("SPC-404")));
+        var root = await h.RunStepAsync(LookUpByKey("SPC-404"));
 
-        Assert.Contains("Special Project Code 'SPC-404' was not found", error.Message);
+        Assert.Equal(JsonValueKind.Object, root.ValueKind);
+        Assert.Empty(root.EnumerateObject());
     }
 
     [Fact]
@@ -729,8 +730,37 @@ public class PipelineComputedFieldSearchTests
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => h.RunStepAsync(LookUpByKey("SPC-1")));
 
-        Assert.Contains("no longer the key field", error.Message);
+        Assert.Contains("no longer a unique field", error.Message);
         await h.RecordRepo.DidNotReceiveWithAnyArgs().GetIdsByColumnValuesAsync(default!, default!, default!, default);
+    }
+
+    [Fact]
+    public async Task LookUpRecord_ByAUniqueFieldThatIsNotTheKey_FindsTheRecord_AsQuickbase()
+    {
+        var unique = new AppField { Id = 20, Fid = 20, Name = "Special Project Code", Label = "Special Project Code", TypeCode = "Text", PhysicalColumnName = "f_20", IsUnique = true };
+        var h = new EngineHarness(TableFields(unique));
+        h.TableRepo.GetByPublicIdAsync(Table.PublicId, Arg.Any<CancellationToken>())
+            .Returns(new AppTable { Id = Table.Id, AppId = Table.AppId, PublicId = Table.PublicId, Name = "SPC", KeyFieldId = null });
+        h.RecordRepo.GetIdsByColumnValuesAsync(Arg.Any<AppTable>(), "f_20", Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<object, long> { ["SPC-1"] = 7 });
+        h.RecordRepo.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>> { [7] = Row(7, Guid.NewGuid()) });
+
+        var root = await h.RunStepAsync(LookUpByKey("SPC-1"));
+
+        Assert.Equal(7, root.GetProperty("Id").GetInt64());
+    }
+
+    [Fact]
+    public async Task LookUpRecord_ByRecordId_NotFound_SucceedsWithEmptyOutput_AsQuickbase()
+    {
+        var h = new EngineHarness(TableFields());
+        h.RecordRepo.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>>());
+
+        var root = await h.RunStepAsync(LookUp(999999));
+
+        Assert.Empty(root.EnumerateObject());
     }
 
     [Theory]

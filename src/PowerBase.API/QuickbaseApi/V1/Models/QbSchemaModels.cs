@@ -19,6 +19,11 @@ public sealed class QbTableResponse
     public string? SizeLimit { get; init; }
     public string? SpaceUsed { get; init; }
     public string? SpaceRemaining { get; init; }
+    /// <summary>Quickbase: {clearOnModification, clearOnSchedule, enabled}; PowerBase has no report cache, so all false.</summary>
+    public IDictionary<string, object?> ReportCaching { get; init; } = new Dictionary<string, object?>
+    {
+        ["clearOnModification"] = false, ["clearOnSchedule"] = false, ["enabled"] = false,
+    };
 }
 
 /// <summary>One item of GET /v1/fields (Quickbase getFields).</summary>

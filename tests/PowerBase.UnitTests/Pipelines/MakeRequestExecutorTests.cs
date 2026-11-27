@@ -81,6 +81,15 @@ public class MakeRequestExecutorTests
     }
     [Theory] [InlineData("https://evil.com/api")] [InlineData("../outside")] [InlineData("//evil.com")] public void PreventsCredentialHostEscape(string path)
     { var c = Config(); c.Path = path; Assert.Throws<InvalidOperationException>(() => MakeRequestExecutor.BuildUrl(c, Resolve)); }
+    [Theory]
+    [InlineData("https://ysl.quickbase.com/db/bu5hxjjx7?a=API_EditRecord&rid=4&usertoken=secret&_fid_9=x", "https://powerbase.internal/db/bu5hxjjx7?a=API_EditRecord&rid=4&_fid_9=x")]
+    [InlineData("https://api.quickbase.com/v1/records", "https://powerbase.internal/v1/records")]
+    public void PowerBaseMode_QuickbaseAddressBuiltAtRunTime_CallsTheCompatibleApi(string url, string expected)
+    {
+        // A record formula still building a Quickbase API address (EditRecordUrl): the same call on PowerBase's Quickbase-compatible API.
+        var c = new MakeRequestDefinition { RequestMode = "quickbase", Url = "{{steps.ref_a.fid_13}}" };
+        Assert.Equal(expected, MakeRequestExecutor.BuildUrl(c, _ => url).AbsoluteUri);
+    }
     [Fact] public async Task DeleteBodyAndConnectionHeadersAreApplied()
     {
         var c = Config(); c.Method = "DELETE"; c.Body = "{\"id\":1}";

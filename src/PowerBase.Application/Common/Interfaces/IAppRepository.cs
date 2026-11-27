@@ -10,6 +10,8 @@ public interface IAppRepository
     Task<App> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<long> GetIdByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<Guid> GetPublicIdByIdAsync(long appId, CancellationToken ct = default);
+    /// <summary>PublicId of the (not deleted) app whose meta.App.QBAppID equals the given Quickbase app id; newest wins. Null when none.</summary>
+    Task<Guid?> FindPublicIdByQbAppIdAsync(string qbAppId, CancellationToken ct = default);
     Task<IReadOnlyList<App>> ListAsync(int page, int pageSize, CancellationToken ct = default);
     Task<int> CountAsync(CancellationToken ct = default);
     /// <summary>Every non-deleted app of the tenant, unpaged. For internal lookups only (e.g. matching an import's source

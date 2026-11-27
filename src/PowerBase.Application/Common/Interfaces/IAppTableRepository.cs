@@ -6,6 +6,12 @@ namespace PowerBase.Application.Common.Interfaces;
 public interface IAppTableRepository
 {
     Task<AppTable> GetByIdAsync(long id, CancellationToken ct = default);
+    /// <summary>PublicId of the (not deleted, in a not deleted app) table whose meta.AppTable.QBTableID equals the given Quickbase table id; newest wins. Null when none.</summary>
+    Task<Guid?> FindPublicIdByQbTableIdAsync(string qbTableId, CancellationToken ct = default);
+    /// <summary>The stored Quickbase ids of the given apps and their (not deleted) tables: one row per table (TableId null for an app
+    /// with no table). Used by the pipeline-only import to find the app / table a Quickbase id of the file was imported as.</summary>
+    Task<IReadOnlyList<(long AppId, string? QbAppId, long? TableId, string? QbTableId)>> ListQuickbaseIdsAsync(IReadOnlyCollection<long> appIds, CancellationToken ct = default)
+        => Task.FromResult<IReadOnlyList<(long, string?, long?, string?)>>([]);
     Task<AppTable> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<long> GetAppIdByPublicIdAsync(Guid tablePublicId, CancellationToken ct = default);
     Task<IReadOnlyList<AppTable>> ListByAppAsync(long appId, CancellationToken ct = default);

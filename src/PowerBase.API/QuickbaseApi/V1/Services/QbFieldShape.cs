@@ -29,13 +29,13 @@ public static class QbFieldShape
 
     /// <summary>Quickbase: summaries are never searchable; Record Owner / Last Modified By always are; others follow the field.</summary>
     public static bool FindEnabled(AppField f, QbFieldType t) =>
-        t.Mode == "summary" || IsReference(f) ? false
+        t.Mode == "summary" || IsReference(f) || t.FieldType == "dblink" ? false
         : f.Fid is QbIds.RECORD_OWNER_FID or QbIds.LAST_MODIFIED_BY_FID ? true
         : t.Mode is "formula" or "lookup" ? FIND_TYPES.Contains(t.FieldType)   // calculated fields: Quickbase's type default
         : f.IsSearchable;
 
     /// <summary>Calculated fields (formula, summary, lookup) are not audited in Quickbase.</summary>
-    public static bool Audited(AppField f, QbFieldType t) => t.Mode is "" && !IsReference(f) && f.IsAuditable;
+    public static bool Audited(AppField f, QbFieldType t) => t.Mode is "" && !IsReference(f) && t.FieldType != "dblink" && f.IsAuditable;
     public static bool DoesDataCopy(AppField f, QbFieldType t) =>
         !IsSystem(f) && t.Mode is "" && t.FieldType is not ("file" or "dblink" or "recordid");
 
@@ -130,6 +130,17 @@ public static class QbFieldShape
                 p["autoSave"] = false;
                 p["openTargetIn"] = Ours("useNewWindow") is true ? "newWindow" : "sameWindow";
                 if (t.Mode == "formula") p["postTempToken"] = false;
+                // The text shown instead of the address (live realm: "appearsAs" on a URL formula with link text).
+                if (SettingString(f, "linkText") is { Length: > 0 } shownAs) p["appearsAs"] = shownAs;
+                break;
+            case "dblink":
+                // A report link (live realm): matches the child's reference field to this record's key, exactly.
+                p["exact"] = SettingBool(f, "valueMatchExact") ?? true;
+                p["linkText"] = SettingString(f, "linkText") is { Length: > 0 } lt ? lt : (string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label);
+                p["sourceFieldId"] = SettingInt(f, "sourceFid") ?? QbIds.RECORD_ID_FID;
+                p["targetFieldId"] = SettingInt(f, "targetFid");
+                p["targetTableId"] = Guid.TryParse(SettingString(f, "targetTablePublicId"), out var tt) ? QbIds.Format(tt) : null;
+                p["useNewWindow"] = SettingBool(f, "openInNewWindow") ?? false;
                 break;
             case "file":
                 p["maxVersions"] = Ours("maxVersions") ?? 3;
@@ -289,6 +300,20 @@ public static class QbFieldShape
             foreach (var p in d.RootElement.EnumerateObject())
                 if (p.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && p.Value.ValueKind is JsonValueKind.True or JsonValueKind.False)
                     return p.Value.GetBoolean();
+        }
+        catch (JsonException) { }
+        return null;
+    }
+
+    private static int? SettingInt(AppField f, string name)
+    {
+        if (string.IsNullOrWhiteSpace(f.Settings)) return null;
+        try
+        {
+            using var d = JsonDocument.Parse(f.Settings);
+            foreach (var p in d.RootElement.EnumerateObject())
+                if (p.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && p.Value.ValueKind == JsonValueKind.Number && p.Value.TryGetInt32(out var i))
+                    return i;
         }
         catch (JsonException) { }
         return null;

@@ -199,7 +199,7 @@ public class GetPipelineEditorQueryHandler
             // Single-table steps
             if (subtype is "search-records" or "look-up-record" or "create-record" or "bulk-trigger"
                 or "new-event" or "new-bulk-event" or "prepare-bulk-upsert"
-                or "import-with-csv" or "import-to-quickbase" or "export-records-csv"
+                or "import-with-csv" or "csv-import" or "import-to-quickbase" or "export-records-csv"
                 or "update-record" or "delete-record" or "upload-file"
                 or "on-new-event" or "on-new-bulk-event")
             {

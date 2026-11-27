@@ -43,7 +43,7 @@ public static class QblPipelineStepCatalog
         [(QUICKBASE_STEP, "quickbase", "bulk_record_set", "commit_bulk_upsert")] = new("action", "commit-upsert"),
         [(QUICKBASE_STEP, "quickbase", "bulk_record_set", "copy_records")] = new("action", "copy-records"),
         [(QUICKBASE_STEP, "quickbase", "attachment", "upload")] = new("file", "upload-file"),
-        [(QUICKBASE_STEP, "quickbase", "bulk_record_set", "csv_import")] = new("action", "import-with-csv"),
+        [(QUICKBASE_STEP, "quickbase", "bulk_record_set", "csv_import")] = new("action", "csv-import"),
         [(CLOCK_STEP, "clock", "timer", "pause")] = new("action", "pause"),
         [(OUTLOOK_STEP, "microsoft-outlook", "email", "send_email")] = new("email", "send-email-outlook"),
         [(CALLABLE_STEP, "cloudpipes-meta", "pipeline", "on_called")] = new("trigger", "pipeline-called"),
@@ -124,6 +124,11 @@ public static class QblPipelineStepCatalog
         "import-with-csv" => new(StringComparer.Ordinal)
         {
             ["connection"] = "", ["app"] = "", ["tableLabel"] = "", ["importTemplateId"] = "", ["csvFile"] = "", ["csvUpload"] = "", ["notifyEmails"] = "",
+        },
+        "csv-import" => new(StringComparer.Ordinal)
+        {
+            ["connection"] = "", ["app"] = "", ["tableLabel"] = "", ["mergeField"] = "", ["csvUrl"] = "", ["headerRow"] = "", ["rowSeparator"] = ",",
+            ["rowQuoteChar"] = "\"", ["skipFirstLine"] = false, ["columnMappings"] = new Dictionary<string, object?>(StringComparer.Ordinal),
         },
         "send-email-outlook" => new(StringComparer.Ordinal)
         {

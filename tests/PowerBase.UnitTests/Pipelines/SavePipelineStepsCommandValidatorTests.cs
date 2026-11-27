@@ -763,6 +763,8 @@ public class SavePipelineStepsCommandValidatorTests
         // Arrange
         var trigger = CreateTriggerStep("ref_trigger"); // trigger is record-added (valid single record)
         var createAction = CreateActionStep("ref_create"); // create-record action (valid single record)
+        // As in Quickbase, the Update Record step can set the fields the Create Record step sets.
+        createAction.ConfigJson = "{\"fieldMappings\": [{\"field\": \"fid_101\", \"value\": \"New\"}]}";
         var updateAction = new SavePipelineStepDto
         {
             PublicId = Guid.NewGuid(),

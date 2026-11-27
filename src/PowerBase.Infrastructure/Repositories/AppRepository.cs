@@ -296,6 +296,14 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         return publicId ?? throw new NotFoundException("App", appId);
     }
 
+    public async Task<Guid?> FindPublicIdByQbAppIdAsync(string qbAppId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition(
+            "SELECT TOP 1 PublicId FROM meta.App WHERE QBAppID = @qbAppId AND IsDeleted = 0 ORDER BY Id DESC",
+            new { qbAppId }, cancellationToken: ct));
+    }
+
     public async Task<(Guid PublicId, long Id)> CreateAsync(App app, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         AppsChanging(transaction is not null);

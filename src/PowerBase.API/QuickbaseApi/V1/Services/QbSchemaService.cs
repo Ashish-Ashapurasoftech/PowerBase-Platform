@@ -20,11 +20,13 @@ public sealed class QbSchemaService
     private readonly IAppRolePermissionRepository _rolePermissions;
     private readonly QbReferenceTypes _referenceTypes;
     private readonly IRecordRepository? _records;
+    private readonly IReportRepository? _reports;
 
     public QbSchemaService(IAppRepository apps, IAppTableRepository tables, IAppFieldRepository fields, IAppAccessService access,
         IRolePermissionEnforcer enforcer, IAppRoleRepository roles, IAppRolePermissionRepository rolePermissions, QbReferenceTypes referenceTypes,
-        IRecordRepository? records = null)
+        IRecordRepository? records = null, IReportRepository? reports = null)
     {
+        _reports = reports;
         _records = records;
         _referenceTypes = referenceTypes;
         _apps = apps;
@@ -69,6 +71,8 @@ public sealed class QbSchemaService
             keyFid = keyField?.Fid;
         }
 
+        var defaultReport = _reports is null ? null : await _reports.GetDefaultByTableAsync(table.PublicId, ct);
+        var defaultSort = defaultReport is null ? null : QbReportService.FirstSort(defaultReport);
         return new QbTableResponse
         {
             Name = table.Name,
@@ -80,8 +84,9 @@ public sealed class QbSchemaService
             // Quickbase's record counter: deleted records still count.
             NextRecordId = _records is null ? null : await _records.GetNextRecordIdAsync(table, ct),
             NextFieldId = await _fields.GetNextFidAsync(table.Id, ct),
-            DefaultSortFieldId = null,
-            DefaultSortOrder = null,
+            // The table's default sort = the sort of its default report (as API_DoQuery's def_sort_fid).
+            DefaultSortFieldId = defaultSort?.FieldId,
+            DefaultSortOrder = defaultSort?.Order,
             KeyFieldId = keyFid,
             SingleRecordName = table.SingularLabel,
             PluralRecordName = table.PluralLabel,

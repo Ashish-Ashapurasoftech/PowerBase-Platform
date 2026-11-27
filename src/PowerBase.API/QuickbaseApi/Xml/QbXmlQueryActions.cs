@@ -394,7 +394,10 @@ public sealed class QbXmlQueryActions
                 sb.Append("          <qydesc>").Append(Esc(rep.Description!)).Append("</qydesc>").Append(CRLF);
             // The report's sort: <qyslst> fids and <qyopts> "so-" one letter per field (live realm: List Changes = 2 / so-D.).
             IReadOnlyList<QbSortBy> repSort = Array.Empty<QbSortBy>();
-            try { repSort = (await _reportService.GetReportAsync(rep.PublicId, plan.Table.PublicId, ct)).Query.SortBy ?? repSort; }
+            // The table's default report sorts by the table's default sort, which Quickbase does not repeat in the query
+            // (live realm: List All sorted 6 DESC → <qyopts>nos.qws.</qyopts>, no <qyslst>).
+            if (!rep.IsDefault)
+                try { repSort = (await _reportService.GetReportAsync(rep.PublicId, plan.Table.PublicId, ct)).Query.SortBy ?? repSort; }
             catch (QbApiException) { }
             if (repSort.Count > 0)
                 sb.Append("          <qyslst>").Append(string.Join(".", repSort.Select(x => x.FieldId))).Append("</qyslst>").Append(CRLF);
@@ -422,7 +425,18 @@ public sealed class QbXmlQueryActions
             foreach (var child in el.Elements())
             {
                 var indent = child.Name.LocalName is "comma_start" or "numberfmt" ? "\t\t  " : "          ";
-                sb.Append(indent).Append(child.ToString(SaveOptions.DisableFormatting).Replace("\r\n", "\n")).Append('\n');
+                if (child.HasElements)
+                {
+                    // Nested lists (choices …) as Quickbase writes them: one element per line, two more spaces each level.
+                    sb.Append(indent).Append('<').Append(child.Name.LocalName);
+                    foreach (var a in child.Attributes()) sb.Append(' ').Append(a.Name.LocalName).Append("=\"").Append(Esc(a.Value)).Append('"');
+                    sb.Append(">\n");
+                    foreach (var g in child.Elements())
+                        sb.Append(indent).Append("  ").Append(SchemaLeaf(g)).Append('\n');
+                    sb.Append(indent).Append("</").Append(child.Name.LocalName).Append(">\n");
+                }
+                else
+                    sb.Append(indent).Append(SchemaLeaf(child)).Append('\n');
             }
             sb.Append("        </field>").Append(CRLF);
         }
@@ -475,6 +489,14 @@ public sealed class QbXmlQueryActions
     private sealed record Col(long Fid, string Label, string Type, int? Decimals, AppField? Field);
 
     public const string CRLF = "\r\n";
+
+    /// <summary>One schema element as Quickbase writes it: text escaped with quotes as &amp;quot;, an empty element as &lt;x /&gt;.</summary>
+    private static string SchemaLeaf(XElement e)
+    {
+        if (e.HasElements) return e.ToString(SaveOptions.DisableFormatting).Replace("\r\n", "\n");
+        var attrs = string.Concat(e.Attributes().Select(a => $" {a.Name.LocalName}=\"{Esc(a.Value)}\""));
+        return e.IsEmpty ? $"<{e.Name.LocalName}{attrs} />" : $"<{e.Name.LocalName}{attrs}>{Esc(e.Value)}</{e.Name.LocalName}>";
+    }
 
     /// <summary>These actions answer errors with Quickbase's line ends too (CRLF everywhere but after &lt;qdbapi&gt;).</summary>
     public static bool UsesCrlf(string action) => action.ToUpperInvariant() is "API_DOQUERY" or "API_DOQUERYCOUNT";

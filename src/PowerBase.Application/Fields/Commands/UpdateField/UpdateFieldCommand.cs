@@ -21,4 +21,6 @@ public record UpdateFieldCommand(
     bool SnapshotEditable = false,
     /// <summary>Shared values; null leaves the stored flag unchanged (callers that predate the setting, e.g. imports).</summary>
     bool? IsSharedValues = null,
-    bool InitializeSnapshotForExisting = false);
+    bool InitializeSnapshotForExisting = false,
+    /// <summary>Help text shown with the field; null leaves it unchanged, "" clears it.</summary>
+    string? HelpText = null);

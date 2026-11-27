@@ -313,7 +313,7 @@ public class PipelineEngineHandleErrorsTests
                 Subtype = invalidNumber ? "create-record" : "look-up-record",
                 ConfigJson = invalidNumber
                     ? JsonSerializer.Serialize(new { TableId = failTableGuid.ToString(), FieldMappings = new[] { new { Field = "fid_6", Value = "invalid number" } } })
-                    : JsonSerializer.Serialize(new { TablePublicId = failTableGuid.ToString(), RecordIdValue = "999" })
+                    : JsonSerializer.Serialize(new { TablePublicId = failTableGuid.ToString(), RecordIdValue = "not-a-number" })
             },
             new()
             {
@@ -384,7 +384,7 @@ public class PipelineEngineHandleErrorsTests
                 Label = "Monitored Failing Lookup",
                 Type = "query",
                 Subtype = "look-up-record",
-                ConfigJson = JsonSerializer.Serialize(new { TablePublicId = failTableGuid.ToString(), RecordIdValue = "999" })
+                ConfigJson = JsonSerializer.Serialize(new { TablePublicId = failTableGuid.ToString(), RecordIdValue = "not-a-number" })
             },
             new()
             {
@@ -506,7 +506,7 @@ public class PipelineEngineHandleErrorsTests
                 Label = "Monitored Failing Lookup",
                 Type = "query",
                 Subtype = "look-up-record",
-                ConfigJson = JsonSerializer.Serialize(new { TablePublicId = Guid.NewGuid().ToString(), RecordIdValue = "999" })
+                ConfigJson = JsonSerializer.Serialize(new { TablePublicId = Guid.NewGuid().ToString(), RecordIdValue = "not-a-number" })
             },
             new()
             {
@@ -518,7 +518,7 @@ public class PipelineEngineHandleErrorsTests
                 Label = "Failing Handler Action",
                 Type = "query",
                 Subtype = "look-up-record",
-                ConfigJson = JsonSerializer.Serialize(new { TablePublicId = Guid.NewGuid().ToString(), RecordIdValue = "888" })
+                ConfigJson = JsonSerializer.Serialize(new { TablePublicId = Guid.NewGuid().ToString(), RecordIdValue = "not-a-number" })
             }
         };
 
@@ -527,7 +527,7 @@ public class PipelineEngineHandleErrorsTests
         _fieldRepo.ListByTableAsync(10, Arg.Any<CancellationToken>()).Returns(new List<AppField>());
 
         _recordRepo.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>>()); // Throws InvalidOperationException ("Record with ID ... was not found")
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>>()); // A record that is not found is an empty output (as Quickbase); the non-numeric Record ID fails the step.
 
         // Act & Assert
         var act = () => _engine.ExecuteAsync(task, CancellationToken.None);

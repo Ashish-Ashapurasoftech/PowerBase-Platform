@@ -302,6 +302,14 @@ public class UpdateFieldCommandHandler
             if (existing.IsSharedValues != isSharedValues)
                 await _fieldRepo.SetSharedValuesAsync(existing.Id, isSharedValues, ct, _uow.Transaction);
 
+            // Help text: only when the caller sent one (null = unchanged); a blank text clears it.
+            if (command.HelpText is not null)
+            {
+                var helpText = string.IsNullOrWhiteSpace(command.HelpText) ? null : command.HelpText.Trim();
+                if (!string.Equals(existing.HelpText, helpText, StringComparison.Ordinal))
+                    await _fieldRepo.SetHelpTextAsync(existing.Id, helpText, ct, _uow.Transaction);
+            }
+
             await _versionService.CreateVersionIfChangedAsync(
                 existing.Id, before, after, command.CommitMessage,
                 FieldVersionChangeType.Update, restoredFromVersion: null, _uow.Transaction!, ct);
