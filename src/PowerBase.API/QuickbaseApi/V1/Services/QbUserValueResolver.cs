@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using PowerBase.API.QuickbaseApi.Common;
+using PowerBase.API.QuickbaseApi.V1.Models;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -17,10 +18,65 @@ public sealed class QbUserValueResolver
     private readonly IRecordRepository _records;
     private readonly IUserRepository _users;
 
-    public QbUserValueResolver(IRecordRepository records, IUserRepository users)
+    private readonly PowerBase.Application.Apps.Queries.ListAppUsers.ListAppUsersQueryHandler? _appUsers;
+    private readonly Dictionary<Guid, IReadOnlyList<PowerBase.Application.Apps.Queries.ListAppUsers.AppUserResult>> _appUserCache = new();
+
+    public QbUserValueResolver(IRecordRepository records, IUserRepository users,
+        PowerBase.Application.Apps.Queries.ListAppUsers.ListAppUsersQueryHandler? appUsers = null)
     {
         _records = records;
         _users = users;
+        _appUsers = appUsers;
+    }
+
+    /// <summary>
+    /// Formula and lookup user fields: our engine hands back only the user's display name (or e-mail), while Quickbase gives the
+    /// whole user object (live realm: PX User / Parent - P User = {"email","id","name","userName"}). Each such value is matched
+    /// against the app's users by name or e-mail and filled in only when exactly one user matches; otherwise it stays as it is.
+    /// </summary>
+    public async Task EnrichNamedUsersAsync(Guid appPublicId, IEnumerable<IDictionary<string, QbCell>> rows, IReadOnlyCollection<string> keys,
+        CancellationToken ct)
+    {
+        if (keys.Count == 0 || _appUsers is null) return;
+        if (!_appUserCache.TryGetValue(appPublicId, out var users))
+        {
+            try
+            {
+                users = (await _appUsers.HandleAsync(new PowerBase.Application.Apps.Queries.ListAppUsers.ListAppUsersQuery(
+                    appPublicId, 1, int.MaxValue, null, "userName", false, IsExport: true), ct)).Items;
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                users = Array.Empty<PowerBase.Application.Apps.Queries.ListAppUsers.AppUserResult>();
+            }
+            _appUserCache[appPublicId] = users;
+        }
+        if (users.Count == 0) return;
+        var distinct = users.GroupBy(u => u.UserPublicId).Select(g => g.First()).ToList();
+        object? Fill(object? v)
+        {
+            if (v is not IDictionary<string, object?> map || (map.TryGetValue("id", out var id) && id is not null)) return v;
+            var name = map.TryGetValue("name", out var n) ? n as string : null;
+            var email = map.TryGetValue("email", out var em) ? em as string : null;
+            var hits = distinct.Where(u =>
+                (!string.IsNullOrWhiteSpace(email) && string.Equals(u.UserEmail, email, StringComparison.OrdinalIgnoreCase))
+                || (!string.IsNullOrWhiteSpace(name) && (string.Equals(u.UserName, name, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(u.UserEmail, name, StringComparison.OrdinalIgnoreCase)))).ToList();
+            if (hits.Count != 1) return v;
+            var u = hits[0];
+            return new Dictionary<string, object?>
+            {
+                ["email"] = u.UserEmail, ["id"] = QbIds.Format(u.UserPublicId), ["name"] = u.UserName, ["userName"] = u.UserEmail,
+            };
+        }
+        foreach (var row in rows)
+            foreach (var key in keys)
+            {
+                if (!row.TryGetValue(key, out var cell) || cell?.Value is null) continue;
+                row[key] = cell.Value is System.Collections.IList list
+                    ? new QbCell(list.Cast<object?>().Select(Fill).ToList())
+                    : new QbCell(Fill(cell.Value));
+            }
     }
 
     /// <summary>True when the field's stored column holds user ids we can resolve.</summary>

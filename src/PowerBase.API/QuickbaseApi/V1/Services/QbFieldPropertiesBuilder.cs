@@ -36,6 +36,9 @@ public static class QbFieldPropertiesBuilder
         string? result = null;
         if (field.TypeCode is "Lookup" or "Summary") result = Str(root, "ResultTypeCode");
         var mapped = QbFieldTypeMap.Map(field.TypeCode, result);
+        // A Combined Text summary is a multi-select text in Quickbase (live realm: "S Combined" type multitext, value ["K4"]).
+        if (field.TypeCode == "Summary" && string.Equals(Str(root, "Function"), "CombinedText", StringComparison.OrdinalIgnoreCase))
+            mapped = mapped with { FieldType = "multitext" };
         // Built-in fields keep Quickbase's own types: Record ID# is "recordid" whatever our storage type is.
         if (field.IsSystem && field.Fid == QbIds.RECORD_ID_FID) return new QbFieldType("recordid", "", "int64");
         if (field.TypeCode is "Number" or "Formula_Number")

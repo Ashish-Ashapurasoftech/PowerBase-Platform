@@ -160,11 +160,13 @@ public sealed partial class QbRecordService
             : new QbReportField(fid, byFid[fid].Label ?? byFid[fid].Name, QbFieldPropertiesBuilder.TypeOf(byFid[fid], refTypes).FieldType, null)).ToList();
         var userFields = returned.Where(f => byFid.TryGetValue(f, out var x) && QbUserValueResolver.IsStoredUserField(x)).Select(f => byFid[f]).ToList();
         var users = await _userValues.ResolveAsync(table, userFields, page.Select(p => p.PublicId).ToList(), ct);
-        var fileBase = $"/apps/{await _apps.GetPublicIdByIdAsync(table.AppId, ct)}/files/download";
+        var appPublicId = await _apps.GetPublicIdByIdAsync(table.AppId, ct);
+        var fileBase = $"/apps/{appPublicId}/files/download";
         var fids = returned.Select(f => (int)f).ToList();
         var data = new List<IDictionary<string, QbCell>>(page.Count);
         foreach (var (rid, publicId) in page)
             data.Add(await ReadFieldsAsync(tableId, rid, publicId, fids, byFid, users.GetValueOrDefault(publicId), fileBase, refTypes, ct, onRecord));
+        await _userValues.EnrichNamedUsersAsync(appPublicId, data, NamedUserKeys(returned, byFid, refTypes), ct);
 
         return new QbRunReportResponse
         {

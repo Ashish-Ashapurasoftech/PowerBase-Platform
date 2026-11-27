@@ -256,6 +256,24 @@ public sealed class QbXmlQueryActions
         return new QbXmlResponse(req.Action) { Raw = Header(req.Action, req.Udata) + $"\t<numMatches>{count}</numMatches>{CRLF}</qdbapi>{CRLF}" };
     }
 
+    // ---------------------------------------------------------------- API_PurgeRecords
+
+    /// <summary>
+    /// API_PurgeRecords: deletes every record matching query / qid / qname (none given = every record), the same
+    /// selection API_DoQueryCount counts; answers &lt;num_records_deleted&gt; (live realm 2026-11-27).
+    /// </summary>
+    public async Task<QbXmlResponse> PurgeRecordsAsync(QbXmlRequest req, CancellationToken ct)
+    {
+        var plan = await PlanAsync(req, ct);
+        var deleted = 0;
+        if (!plan.Empty)
+        {
+            var where = string.IsNullOrWhiteSpace(plan.Where) ? "{3.GT.0}" : plan.Where;
+            deleted = (await _records.DeleteAsync(new QbDeleteRecordsRequest { From = plan.Table.PublicId.ToString(), Where = where }, ct)).NumberDeleted;
+        }
+        return new QbXmlResponse(req.Action) { Raw = Header(req.Action, req.Udata) + $"\t<num_records_deleted>{deleted}</num_records_deleted>{CRLF}</qdbapi>{CRLF}" };
+    }
+
     // ---------------------------------------------------------------- API_DoQuery
 
     private sealed record Row(long Rid, long UpdateId, IDictionary<string, QbCell> Cells, Dictionary<string, object?> Raw);
@@ -344,7 +362,9 @@ public sealed class QbXmlQueryActions
                     var text = CellText(c, row, structured: false, origin);
                     var tag = useFids ? null : ElementName(c.Label);
                     Cell(sb, tag, c.Fid, text);
-                    if (!useFids && c.Type == "address" && string.Equals(req.Get("clist")?.Trim(), "a", StringComparison.OrdinalIgnoreCase))
+                    // An address lookup is one column in Quickbase (live realm: no parent___p_address__street_1 ... parts).
+                    if (!useFids && c.Type == "address" && c.Field?.TypeCode != "Lookup"
+                        && string.Equals(req.Get("clist")?.Trim(), "a", StringComparison.OrdinalIgnoreCase))
                         foreach (var (suffix, value) in AddressParts(row.Raw.GetValueOrDefault(c.Fid.ToString())))
                             Cell(sb, tag + suffix, c.Fid, Esc(value));
                 }
@@ -381,10 +401,16 @@ public sealed class QbXmlQueryActions
           .Append("        <single_record_name>").Append(Esc(plan.Table.SingularLabel ?? "")).Append("</single_record_name>").Append(CRLF)
           .Append("        <plural_record_name>").Append(Esc(plan.Table.PluralLabel ?? "")).Append("</plural_record_name>").Append(CRLF)
           .Append("      </original>").Append(CRLF)
-          .Append("      <variables>").Append(CRLF);
-        foreach (var v in variables.Where(v => !v.IsDeleted))
-            sb.Append("        <var name=\"").Append(Esc(v.Name)).Append("\">").Append(Esc(v.Value)).Append("</var>").Append(CRLF);
-        sb.Append("      </variables>").Append(CRLF).Append("      <queries>").Append(CRLF);
+          ;
+        // Structured: the <variables> block only when the app has variables (live realm, app without any: no block).
+        if (variables.Any(v => !v.IsDeleted))
+        {
+            sb.Append("      <variables>").Append(CRLF);
+            foreach (var v in variables.Where(v => !v.IsDeleted))
+                sb.Append("        <var name=\"").Append(Esc(v.Name)).Append("\">").Append(Esc(v.Value)).Append("</var>").Append(CRLF);
+            sb.Append("      </variables>").Append(CRLF);
+        }
+        sb.Append("      <queries>").Append(CRLF);
         foreach (var rep in reports)
         {
             sb.Append("        <query id=\"").Append(QueryNumber(rep)).Append("\">").Append(CRLF)
@@ -453,7 +479,7 @@ public sealed class QbXmlQueryActions
                     var list = UserValues(row.Cells.TryGetValue(c.Fid.ToString(), out var cell) ? cell.Value : null);
                     if (list.Count == 0) anyEmpty = true;
                     foreach (var u in list)
-                        if (u.Id.Length > 0 && users.All(x => x.Id != u.Id)) users.Add(u);
+                        if (u.Id.Length > 0 && users.All(x => x.Id != u.Id)) users.Add((u.Id, u.UserName)); // live realm: <luser> shows the sign-in name
                 }
             sb.Append("<lusers>").Append(CRLF);
             if (anyEmpty) sb.Append("<luser id=\"-2147483648\"></luser>").Append(CRLF);
@@ -538,7 +564,8 @@ public sealed class QbXmlQueryActions
         if (c.Type == "timestamp" && row.Raw.GetValueOrDefault(c.Fid.ToString()) is { } stored && AsInstant(stored) is { } instant)
             return Ms(instant).ToString(CultureInfo.InvariantCulture);
         if (c.Type is "user" or "multiuser")
-            return Esc(string.Join(";", UserValues(value).Select(u => structured ? u.Id : u.Name)));
+            // Default format shows the sign-in name (live realm: "YslDevTeam"; ours is the e-mail), structured the user id.
+            return Esc(string.Join(";", UserValues(value).Select(u => structured ? u.Id : u.UserName)));
         return XmlValue(value, c.Type, c.Decimals);
     }
 
@@ -600,9 +627,9 @@ public sealed class QbXmlQueryActions
         _ => null,
     };
 
-    private static List<(string Id, string Name)> UserValues(object? value)
+    private static List<(string Id, string Name, string UserName)> UserValues(object? value)
     {
-        var result = new List<(string, string)>();
+        var result = new List<(string, string, string)>();
         void Add(object? u)
         {
             switch (u)
@@ -610,10 +637,12 @@ public sealed class QbXmlQueryActions
                 case IDictionary<string, object?> map:
                     var id = map.TryGetValue("id", out var i) ? i?.ToString() ?? "" : "";
                     var name = map.TryGetValue("name", out var n) ? n?.ToString() ?? "" : "";
-                    if (id.Length > 0 || name.Length > 0) result.Add((id, name.Length > 0 ? name : id));
+                    var userName = map.TryGetValue("userName", out var un) ? un?.ToString() ?? "" : "";
+                    if (id.Length > 0 || name.Length > 0)
+                        result.Add((id, name.Length > 0 ? name : id, userName.Length > 0 ? userName : name.Length > 0 ? name : id));
                     break;
                 case string s when s.Length > 0:
-                    result.Add((s, s));
+                    result.Add((s, s, s));
                     break;
             }
         }

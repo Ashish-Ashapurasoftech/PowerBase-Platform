@@ -37,7 +37,9 @@ public static class QbFieldShape
     /// <summary>Calculated fields (formula, summary, lookup) are not audited in Quickbase.</summary>
     public static bool Audited(AppField f, QbFieldType t) => t.Mode is "" && !IsReference(f) && t.FieldType != "dblink" && f.IsAuditable;
     public static bool DoesDataCopy(AppField f, QbFieldType t) =>
-        !IsSystem(f) && t.Mode is "" && t.FieldType is not ("file" or "dblink" or "recordid");
+        // A unique field is never copied with a record (live realm: unique Text -> doesDataCopy false).
+        (t.Mode == "lookup" && t.FieldType == "address")              // live realm: an address lookup is copied
+        || (!IsSystem(f) && !f.IsUnique && t.Mode is "" && t.FieldType is not ("file" or "dblink" or "recordid"));
 
     /// <summary>getFields "properties" for one field: the keys Quickbase returns for its type, with Quickbase's defaults.</summary>
     public static Dictionary<string, object?> Properties(AppField f, QbFieldType t, QbFieldContext? ctx = null)
@@ -78,14 +80,18 @@ public static class QbFieldShape
                 p["appendOnly"] = false;
                 p["maxLength"] = Ours("maxLength") ?? 0;
                 p["numLines"] = t.FieldType is "rich-text" or "text-multi-line" ? 6 : 1;
-                if (t.FieldType is "rich-text" or "text-multi-line") p["width"] = 60;
+                // Quickbase lists "width" only when one was set (text / choice: e.g. 40); rich / multi-line default 60.
+                if (Ours("width") is { } tw) p["width"] = tw;
+                else if (t.FieldType is "rich-text" or "text-multi-line") p["width"] = 60;
                 if (t.FieldType == "text-multiple-choice") p["choices"] = Ours("choices") ?? new List<string>();
                 break;
             case "multitext":
-                p["choices"] = Ours("choices") ?? new List<string>();
+                // A multi-select formula has no choice list (live realm: no "choices" key).
+                if (t.Mode is not ("formula" or "lookup" or "summary")) p["choices"] = Ours("choices") ?? new List<string>();   // lookups / formulas: no choices key (live realm)
                 break;
             case "numeric" or "currency" or "percent" or "rating" or "recordid":
-                p["blankIsZero"] = (bool?)Ours("blankIsZero") ?? (t.FieldType != "rating" && t.Mode != "formula");
+                p["blankIsZero"] = (bool?)Ours("blankIsZero") ?? (t.FieldType != "rating" && t.Mode != "formula"
+                    && !(t.Mode == "lookup" && ctx?.Inherit?.TypeCode.StartsWith("Formula", StringComparison.Ordinal) == true)); // lookup of a formula: false (live realm)
                 p["commaStart"] = t.FieldType == "currency" ? 3 : 4;
                 if (Ours("decimalPlaces") is { } dp) p["decimalPlaces"] = dp;
                 else if (t.FieldType == "recordid") p["decimalPlaces"] = 0;
@@ -95,12 +101,13 @@ public static class QbFieldShape
                 p["doesTotal"] = (bool?)Ours("doesTotal") ?? t.FieldType is not ("rating" or "recordid");
                 p["numberFormat"] = t.FieldType == "recordid" ? 0 : 8;
                 if (Ours("units") is { } units) p["units"] = units;
+                if (Ours("width") is { } nw) p["width"] = nw;   // set width only (live realm: numeric 10)
                 if (t.FieldType == "currency")
                 {
                     p["currencyFormat"] = Ours("currencyFormat") ?? "middle";
                     p["currencySymbol"] = Ours("currencySymbol") ?? "$";
                 }
-                if (t.FieldType == "rating") p["choices"] = new List<string> { "0", "1", "2", "3", "4", "5" };
+                if (t.FieldType == "rating" && t.Mode != "lookup") p["choices"] = new List<string> { "0", "1", "2", "3", "4", "5" };
                 break;
             case "date" or "timestamp":
                 p["defaultToday"] = false;
@@ -150,7 +157,7 @@ public static class QbFieldShape
                 break;
             case "address":
                 p["compositeFields"] = new List<object>();             // our address is one field, Quickbase splits it in six
-                p["width"] = 60;
+                p["width"] = Ours("width") ?? 60;
                 break;
             case "user" or "multiuser":
                 p["defaultKind"] = "none";
@@ -191,7 +198,7 @@ public static class QbFieldShape
         object? P(string k) => p.TryGetValue(k, out var v) ? v : null;
         var baseType = t.FieldType == "recordid" ? "int32" : IsReference(f) ? "float" : t.BaseType;
         var el = new XElement("field", new XAttribute("id", f.Fid!.Value), new XAttribute("field_type", XmlFieldType(t)), new XAttribute("base_type", baseType));
-        var xmlMode = t.FieldType == "recordid" ? "virtual" : t.Mode switch { "formula" => "virtual", "" => null, var m => m };
+        var xmlMode = t.FieldType is "recordid" or "dblink" ? "virtual" : t.Mode switch { "formula" => "virtual", "" => null, var m => m };
         if (xmlMode is not null) el.Add(new XAttribute("mode", xmlMode));
         el.Add(new XElement("label", string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label),
             new XElement("nowrap", B(NoWrap(f, t))),
@@ -260,6 +267,12 @@ public static class QbFieldShape
             case "file":
                 el.Add(new XElement("max_versions", B(P("maxVersions"))), new XElement("see_versions", B(P("seeVersions"))),
                     new XElement("use_new_window", "1"));
+                break;
+            case "dblink":
+                // Live realm order: target_dbid, target_fid, source_fid, use_new_window, cover_text, exact.
+                el.Add(new XElement("target_dbid", B(P("targetTableId"))), new XElement("target_fid", B(P("targetFieldId"))),
+                    new XElement("source_fid", B(P("sourceFieldId"))), new XElement("use_new_window", B(P("useNewWindow"))),
+                    new XElement("cover_text", B(P("linkText"))), new XElement("exact", B(P("exact"))));
                 break;
             case "address":
                 el.Add(new XElement("compositeFields"));

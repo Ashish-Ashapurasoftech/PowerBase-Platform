@@ -144,11 +144,20 @@ public sealed class QbXmlImportActions
                 throw new QbXmlException(err.Code, err.Message, $"Row {i + 1 + (skipFirst ? 1 : 0)}: {err.Detail}".TrimEnd(' ', ':'));
             }
         }
-        return new QbXmlResponse(req.Action)
-            .Add("num_recs_input", data.Count)
-            .Add("num_recs_added", added)
-            .AddIf(matched > 0, "num_recs_updated", updated) // Quickbase lists it only when the CSV matched existing records
-            .Add(rids);
+        // Quickbase's own layout (live realm 2026-11-27): updated + unchanged only when the CSV matched existing records;
+        // one rid sits on the <rids> line itself, several go one per line (LF between them, CRLF after the last).
+        const string CRLF = "\r\n";
+        var sb = new System.Text.StringBuilder(QbXmlQueryActions.Header(req.Action, req.Udata))
+            .Append("\t<num_recs_input>").Append(data.Count).Append("</num_recs_input>").Append(CRLF)
+            .Append("\t<num_recs_added>").Append(added).Append("</num_recs_added>").Append(CRLF);
+        if (matched > 0)
+            sb.Append("\t<num_recs_updated>").Append(updated).Append("</num_recs_updated>").Append(CRLF)
+              .Append("\t<num_recs_unchanged>").Append(matched - updated).Append("</num_recs_unchanged>").Append(CRLF);
+        var ridLines = rids.Elements().Select(r => $"\t  <rid update_id=\"{r.Attribute("update_id")!.Value}\">{r.Value}</rid>").ToList();
+        sb.Append(ridLines.Count == 1 ? $"\t<rids>{ridLines[0]}</rids>{CRLF}"
+            : $"\t<rids>{CRLF}{string.Join("\n", ridLines)}{(ridLines.Count > 0 ? CRLF : "")}\t</rids>{CRLF}");
+        sb.Append("</qdbapi>").Append(CRLF);
+        return new QbXmlResponse(req.Action) { Raw = sb.ToString() };
     }
 
     // ---------------------------------------------------------------- API_RunImport

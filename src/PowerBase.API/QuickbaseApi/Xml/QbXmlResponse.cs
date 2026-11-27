@@ -97,9 +97,41 @@ public sealed class QbXmlResponse
     /// The body of API_GetUserInfo / API_GetUserRole / API_UserRoles exactly as Quickbase lays it out (spacing, blank lines and
     /// LF / CRLF mix measured on a live realm); null for every other action (generic layout).
     /// </summary>
+    /// <summary>
+    /// API_GetFieldProperties as Quickbase writes it (live realm 2026-11-27): &lt;field&gt; at column 0 ending CRLF, children
+    /// indented 10 spaces ending LF, nested children +2 spaces, &lt;compositeFields&gt; block at column 0, &lt;/field&gt; CRLF.
+    /// </summary>
+    private static string? FieldLayout(IReadOnlyList<XNode> body)
+    {
+        var f = body.OfType<XElement>().FirstOrDefault(e => e.Name.LocalName == "field");
+        if (f is null) return null;
+        var sb = new StringBuilder($"<field{Attrs(f)}>").Append(CRLF);
+        void Write(XElement e, string pad)
+        {
+            if (e.Name.LocalName == "compositeFields")
+            {
+                // An address lookup shows an empty block (live realm); our own address has no sub-fields to list, so nothing.
+                if (!e.HasElements && (string?)f.Attribute("mode") != "lookup") return;
+                sb.Append("<compositeFields>\n");
+                foreach (var c in e.Elements()) sb.Append($"<{c.Name.LocalName}{Attrs(c)}  />\n");
+                sb.Append("</compositeFields>\n");
+                return;
+            }
+            // Quickbase quirk: these two numeric children are indented with two tabs and two spaces.
+            if (!e.HasElements) { sb.Append(e.Name.LocalName is "comma_start" or "numberfmt" ? "\t\t  " : pad).Append(Leaf(e)).Append('\n'); return; }
+            sb.Append(pad).Append($"<{e.Name.LocalName}{Attrs(e)}>\n");
+            foreach (var c in e.Elements()) Write(c, pad + "  ");
+            sb.Append(pad).Append($"</{e.Name.LocalName}>\n");
+        }
+        foreach (var c in f.Elements()) Write(c, "          ");
+        sb.Append("</field>").Append(CRLF);
+        return sb.ToString();
+    }
+
     private static string? UserLayout(string action, IReadOnlyList<XNode> body)
     {
         var a = action.ToUpperInvariant();
+        if (a == "API_GETFIELDPROPERTIES") return FieldLayout(body);
         if (a is not ("API_GETUSERINFO" or "API_GETUSERROLE" or "API_USERROLES")) return null;
         var root = body.OfType<XElement>().FirstOrDefault();
         if (root is null) return null;

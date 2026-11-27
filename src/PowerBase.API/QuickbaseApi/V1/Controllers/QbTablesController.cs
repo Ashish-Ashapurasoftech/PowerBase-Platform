@@ -7,7 +7,7 @@ namespace PowerBase.API.QuickbaseApi.V1.Controllers;
 
 /// <summary>Quickbase-compatible "Tables" API, version 1.</summary>
 [Route(QbV1.ROUTE_PREFIX + "/tables")]
-[QbRestExceptionFilter, QbRequireAuth, QbRealmHostname]
+[QbRestExceptionFilter, QbRequireAuth, QbRealmHostname, QbSortedJson]
 public sealed class QbTablesController : ControllerBase
 {
     private readonly QbSchemaService _schema;
@@ -29,5 +29,21 @@ public sealed class QbTablesController : ControllerBase
     {
         var id = await _ids.AppAsync(appId, "appId", ct);
         return Ok(await _schema.GetAppTablesAsync(id, ct));
+    }
+
+    /// <summary>Get a table (Quickbase getTable): GET /v1/tables/{tableId}?appId={appId}.</summary>
+    [HttpGet("{tableId}")]
+    [ProducesResponseType(typeof(QbTableResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(QbErrorBody), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(QbErrorBody), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetTable(string tableId, [FromQuery] string? appId, CancellationToken ct)
+    {
+        var app = await _ids.AppAsync(appId, "appId", ct);
+        Guid table;
+        try { table = await _ids.TableAsync(tableId, "tableId", ct); }
+        catch (QbApiException) { throw new QbApiException(404, "Invalid DBID", "Table not found in app."); }
+        var found = (await _schema.GetAppTablesAsync(app, ct)).FirstOrDefault(t => t.Id == QbIds.Format(table))
+            ?? throw new QbApiException(404, "Invalid DBID", "Table not found in app.");
+        return Ok(found);
     }
 }

@@ -147,6 +147,8 @@ public sealed partial class QbRecordService
             var refTypes = await _referenceTypes.ForAsync(fields, ct);
             foreach (var (rid, publicId) in processed)
                 data.Add(await ReadFieldsAsync(tableId, rid, publicId, returnFids, byFid, users.GetValueOrDefault(publicId), fileBase, refTypes, ct));
+            await _userValues.EnrichNamedUsersAsync(await _apps.GetPublicIdByIdAsync(table.AppId, ct), data,
+                NamedUserKeys(returnFids.Select(f => (long)f), byFid, refTypes), ct);
         }
 
         return new UpsertOutcome(new QbUpsertResponse
@@ -158,7 +160,7 @@ public sealed partial class QbRecordService
                 LineErrors = lineErrors.Count > 0 ? lineErrors : null,
                 UnchangedRecordIds = unchanged,
                 UpdatedRecordIds = updated,
-                TotalNumberOfRecordsProcessed = created.Count + updated.Count + unchanged.Count,
+                TotalNumberOfRecordsProcessed = created.Count + updated.Count + unchanged.Count + lineErrors.Count, // Quickbase counts failed lines too
             },
         }, lineErrors.Count > 0);
     }
@@ -675,6 +677,13 @@ public sealed partial class QbRecordService
                 System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var p) => p,
         _ => null,
     };
+
+    /// <summary>Formula / lookup user fields among <paramref name="fids"/> (their values come back as names; see EnrichNamedUsersAsync).</summary>
+    public static IReadOnlyCollection<string> NamedUserKeys(IEnumerable<long> fids, IReadOnlyDictionary<long, AppField> byFid,
+        IReadOnlyDictionary<long, QbFieldType>? refTypes = null) =>
+        fids.Where(f => byFid.TryGetValue(f, out var x) && !QbUserValueResolver.IsStoredUserField(x)
+                && QbFieldPropertiesBuilder.TypeOf(x, refTypes).FieldType is "user" or "multiuser")
+            .Select(f => f.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToList();
 
     private async Task<IDictionary<string, QbCell>> ReadFieldsAsync(Guid tableId, long rid, Guid publicId, IReadOnlyList<int> fids,
         IReadOnlyDictionary<long, AppField> byFid, IReadOnlyDictionary<long, object?>? users, string fileBase,

@@ -114,6 +114,17 @@ public sealed class QbXmlRecordActions
     }
 
     /// <summary>Converts a Quickbase XML text value ("How to specify values for different field types") into our input value.</summary>
+    private static readonly string[] TIME_FORMATS = { "h:mm tt", "h:mm:ss tt", "h tt", "htt", "h:mmtt", "H:mm", "H:mm:ss", "HH:mm", "HH:mm:ss" };
+
+    /// <summary>A Quickbase XML time-of-day value (12- or 24-hour text) as a time span; null when it cannot be read.</summary>
+    public static TimeSpan? ParseTimeOfDay(string text)
+    {
+        var s = text.Trim().ToUpperInvariant();
+        if (DateTime.TryParseExact(s, TIME_FORMATS, CultureInfo.InvariantCulture, DateTimeStyles.NoCurrentDateDefault, out var dt))
+            return dt.TimeOfDay;
+        return null;
+    }
+
     private async Task<object?> ConvertAsync(AppField field, string text, CancellationToken ct, bool msDuration = false,
         TimeZoneInfo? zone = null, bool msInUtc = false)
     {
@@ -139,6 +150,9 @@ public sealed class QbXmlRecordActions
                 // return QbTimeZone.ParseToUtc(text, zone ?? TimeZoneInfo.Utc, msInUtc) is { } t
                 return QbTimeZone.ParseToUtc(text, TimeZoneInfo.Utc, msInUtc: true) is { } t
                     ? t.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture) : null;
+            case "timeofday":
+                // Quickbase XML reads "10:30 AM", "13:45", "1:05:09 pm" (live realm: 10:30 AM → 37800000 ms); stored as hh:mm:ss.
+                return ParseTimeOfDay(text) is { } tod ? tod.ToString(@"hh\:mm\:ss", CultureInfo.InvariantCulture) : null;
             case "numeric" or "currency" or "percent" or "rating":
                 return decimal.TryParse(text, NumberStyles.Any, CultureInfo.InvariantCulture, out var n) ? n : text;
             case "duration":
@@ -387,11 +401,15 @@ public sealed class QbXmlRecordActions
             throw new QbXmlException(QbXmlErrors.INVALID_INPUT, "Invalid input", "No fields supplied");
         var stored = await SaveFilesAsync(t, publicId, files, ct);
         var appPublicId = await _apps.GetPublicIdByIdAsync(t.Table.AppId, ct);
-        var fileFields = new XElement("file_fields");
+        // Quickbase's own layout (live realm 2026-11-27): a blank line, each field block with 1/2-space indents and LF, then CRLF.
+        static string E(string s) => System.Security.SecurityElement.Escape(s)!.Replace("&apos;", "'");
+        var sb = new System.Text.StringBuilder(QbXmlQueryActions.Header(req.Action, req.Udata)).Append("\t<file_fields>\r\n\n");
         foreach (var (field, file) in stored)
-            fileFields.Add(new XElement("field", new XAttribute("id", field.Fid!.Value), file.Name,
-                new XElement("url", $"{Origin()}/apps/{appPublicId}/files/download?path={Uri.EscapeDataString(file.Path)}&fileName={Uri.EscapeDataString(file.Name)}")));
-        return new QbXmlResponse(req.Action).Add(fileFields);
+            sb.Append($" <field id=\"{field.Fid!.Value}\">\n  {E(file.Name)}\n  <url>")
+              .Append(E($"{Origin()}/apps/{appPublicId}/files/download?path={Uri.EscapeDataString(file.Path)}&fileName={Uri.EscapeDataString(file.Name)}"))
+              .Append("</url>\n </field>\n");
+        sb.Append("\r\n\t</file_fields>\r\n</qdbapi>\r\n");
+        return new QbXmlResponse(req.Action) { Raw = sb.ToString() };
     }
 
     /// <summary>Quickbase returns a full download URL here; build it from the request's own scheme and host.</summary>

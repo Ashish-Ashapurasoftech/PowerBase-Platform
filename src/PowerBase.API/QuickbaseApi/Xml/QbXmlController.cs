@@ -64,5 +64,20 @@ public sealed class QbXmlController : ControllerBase
         }
     }
 
-    private static ContentResult Xml(string xml, int status) => new() { Content = xml, ContentType = "text/xml; charset=utf-8", StatusCode = status };
+    private static ContentResult Xml(string xml, int status) => new() { Content = AsciiEntities(xml), ContentType = "text/xml; charset=utf-8", StatusCode = status };
+
+    /// <summary>Quickbase XML writes every non-ASCII character as a decimal character reference (live realm: "Ü" → "&amp;#220;").</summary>
+    public static string AsciiEntities(string xml)
+    {
+        if (xml.All(c => c < 128)) return xml;
+        var sb = new System.Text.StringBuilder(xml.Length + 32);
+        for (var i = 0; i < xml.Length; i++)
+        {
+            var c = xml[i];
+            if (c < 128) { sb.Append(c); continue; }
+            var cp = char.IsHighSurrogate(c) && i + 1 < xml.Length && char.IsLowSurrogate(xml[i + 1]) ? char.ConvertToUtf32(c, xml[++i]) : c;
+            sb.Append("&#").Append(cp).Append(';');
+        }
+        return sb.ToString();
+    }
 }
