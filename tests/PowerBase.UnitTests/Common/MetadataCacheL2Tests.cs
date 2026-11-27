@@ -283,4 +283,42 @@ public class MetadataCacheL2Tests
         first.ElapsedMilliseconds.Should().BeLessThan(3_000);
         later.ElapsedMilliseconds.Should().BeLessThan(500, "L2 is skipped while it is down");
     }
+
+    // ── Version stamp of the result cache ───────────────────────────────────
+
+    [Fact]
+    public async Task The_stamp_moves_with_any_tenant_or_global_version_and_is_withheld_while_one_just_moved()
+    {
+        var versions = new AgedVersions();
+        versions.Rows["fields"] = (3, 60_000);
+        versions.Rows["access"] = (5, 60_000);
+        var l2 = new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions()));
+
+        async Task<string?> Stamp()
+        {
+            using var _ = CacheVersionScope.Begin();
+            return await Quarantined(versions, l2).VersionStampAsync(Tenant);
+        }
+
+        var before = await Stamp();
+        before.Should().NotBeNull();
+
+        versions.Rows["access"] = (6, 60_000);   // a role permission changed (long enough ago to be settled)
+        var afterRoleChange = await Stamp();
+        afterRoleChange.Should().NotBe(before);
+
+        versions.Rows["userperms"] = (1, 60_000);   // a global group (AgedVersions answers every tenant, the global one included)
+        (await Stamp()).Should().NotBe(afterRoleChange);
+
+        versions.Rows["fields"] = (4, 500);   // moved half a second ago: its write may still be open
+        (await Stamp()).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task No_stamp_without_shared_versions()
+    {
+        using var _ = CacheVersionScope.Begin();
+        var cache = new MetadataCache(new MemoryCache(new MemoryCacheOptions()), Options.Create(new MetadataCacheOptions()), NullLogger<MetadataCache>.Instance);
+        (await cache.VersionStampAsync(Tenant)).Should().BeNull();
+    }
 }

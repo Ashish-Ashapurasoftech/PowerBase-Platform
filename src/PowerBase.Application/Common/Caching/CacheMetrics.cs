@@ -56,6 +56,22 @@ public static class CacheMetrics
         Totals.AddOrUpdate($"report:{reportType}:{(encrypted ? "enc" : "plain")}:{(repeat ? "repeat" : "new")}", 1, (_, n) => n + 1);
     }
 
+    private static readonly Counter<long> ResultCacheCounter = Meter.CreateCounter<long>("pb.result_cache.lookups", description: "Report result cache: hit, miss, or why it was skipped");
+    private static readonly Counter<long> ResultCacheBytesCounter = Meter.CreateCounter<long>("pb.result_cache.bytes_written", unit: "By", description: "Bytes of report answers written to Redis");
+
+    /// <summary>Report result cache outcome: hit, miss, skip-versions, skip-write-open, skip-down, error.</summary>
+    public static void ResultCache(string outcome)
+    {
+        ResultCacheCounter.Add(1, new KeyValuePair<string, object?>("outcome", outcome));
+        Totals.AddOrUpdate($"result:{outcome}", 1, (_, n) => n + 1);
+    }
+
+    public static void ResultCacheBytes(long bytes)
+    {
+        ResultCacheBytesCounter.Add(bytes);
+        Totals.AddOrUpdate("result:bytes", bytes, (_, n) => n + bytes);
+    }
+
     /// <summary>The totals since the process started (key → count or bytes). Sorted for a stable log line.</summary>
     public static IReadOnlyList<KeyValuePair<string, long>> Snapshot() => Totals.OrderBy(t => t.Key, StringComparer.Ordinal).ToList();
 

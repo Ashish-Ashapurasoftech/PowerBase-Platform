@@ -18,4 +18,11 @@ public interface IMetadataCache
 
     /// <summary>Drops everything cached for the tenant — for changes made outside the application's repositories.</summary>
     void FlushTenant(long tenantId);
+
+    /// <summary>
+    /// The shared versions of every group of the tenant and of the global groups (user permissions, sessions), as one string, read for
+    /// this request. Any metadata or permission write moves it. Null when the versions cannot be read, or when a group moved less than
+    /// the transaction quarantine ago (a write may still be open): a shared result must not be cached or read under it then.
+    /// </summary>
+    Task<string?> VersionStampAsync(long tenantId) => Task.FromResult<string?>(null);
 }
