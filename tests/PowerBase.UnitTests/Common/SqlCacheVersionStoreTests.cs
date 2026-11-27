@@ -82,7 +82,7 @@ public class SqlCacheVersionStoreTests
             young.Version.Should().Be(1);
             young.AgeMs.Should().BeLessThan(10_000);
             await check.ExecuteAsync("UPDATE meta.CacheVersion SET ChangedOn = DATEADD(SECOND, -40, SYSUTCDATETIME()) WHERE Grp = 'access'");
-            (await store.ReadWithAgeAsync(Tenant))!["access"].AgeMs.Should().BeGreaterThanOrEqualTo(40_000);
+            (await store.ReadWithAgeAsync(Tenant))!["access"].AgeMs.Should().BeGreaterThan(39_000, "ChangedOn is DATETIME2(3): the stored time may round by a millisecond");
         }
         finally
         {
