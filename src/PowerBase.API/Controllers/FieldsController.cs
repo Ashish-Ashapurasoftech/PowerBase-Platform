@@ -479,6 +479,7 @@ public class FieldsController : ControllerBase
         Label = f.Label,
         Description = f.Description,
         TypeCode = f.TypeCode,
+        ResultTypeCode = f.ResultTypeCode,
         IsRequired = f.IsRequired,
         IsSearchable = f.IsSearchable,
         IsSortable = f.IsSortable,

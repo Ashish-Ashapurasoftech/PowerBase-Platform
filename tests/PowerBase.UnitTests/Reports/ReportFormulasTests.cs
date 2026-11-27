@@ -261,15 +261,30 @@ public class ReportFormulasTests
     public void A_valid_report_formula_passes()
         => Validate("Table", "Custom", Total()).Should().BeEmpty();
 
+    // A formula named "F{n}", id FirstId + n, so a list of any length stays valid apart from its size.
+    private static ReportFormula[] NumberedFormulas(int count)
+        => Enumerable.Range(0, count)
+            .Select(n => new ReportFormula { Id = ReportFormulaFields.FirstId + n, Name = $"F{n}", TypeCode = "Formula_Number", Expression = "1" })
+            .ToArray();
+
     [Fact]
-    public void More_than_three_report_formulas_are_rejected()
+    public void A_report_can_have_up_to_the_maximum_number_of_report_formulas()
     {
-        var errors = Validate("Table", "Custom",
-            Total(), Size(),
-            new ReportFormula { Id = ReportFormulaFields.FirstId + 2, Name = "C", TypeCode = "Formula_Number", Expression = "1" },
-            new ReportFormula { Id = ReportFormulaFields.FirstId, Name = "D", TypeCode = "Formula_Number", Expression = "2" });
+        ReportFormulaFields.MaxFormulas.Should().BeGreaterThanOrEqualTo(10);
+        Validate("Table", "Custom", NumberedFormulas(ReportFormulaFields.MaxFormulas)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void More_than_the_maximum_number_of_report_formulas_are_rejected()
+    {
+        // One more than allowed: the extra formula takes an id past the reserved range too, so the report is refused either way.
+        var errors = Validate("Table", "Custom", NumberedFormulas(ReportFormulaFields.MaxFormulas + 1));
         errors.Should().ContainKey("reportFormulas");
     }
+
+    [Fact]
+    public void Report_formula_ids_stay_clear_of_the_summary_formula_ids()
+        => (ReportFormulaFields.FirstId + ReportFormulaFields.MaxFormulas - 1).Should().BeLessThan(SummaryFormulaFields.FirstId);
 
     [Fact]
     public void A_table_report_with_default_columns_cannot_have_report_formulas()

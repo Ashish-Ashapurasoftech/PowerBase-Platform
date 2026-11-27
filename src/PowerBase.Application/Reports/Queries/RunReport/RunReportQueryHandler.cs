@@ -25,6 +25,9 @@ public class ReportColumnInfo
     public string Key { get; init; } = string.Empty;
     public string Name { get; init; } = string.Empty;
     public string TypeCode { get; init; } = string.Empty;
+    /// <summary>Reference, Lookup and Summary columns only: the type the field is shown as (its settings' resultTypeCode),
+    /// so a screen can name it "Currency (Lookup)". Null for other columns.</summary>
+    public string? ResultTypeCode { get; init; }
 }
 
 public class PagedReportRunResult
@@ -50,6 +53,37 @@ public class PagedReportRunResult
     /// be worked out exactly over every matching record (too many to read into memory, or matched by a quick search /
     /// calculated filter SQL can't repeat). Left out rather than shown covering only some records.</summary>
     public bool TotalsIncomplete { get; init; }
+    /// <summary>Paged Summary reports only (<see cref="RunReportQuery.PageSummary"/>): grand totals over every group,
+    /// keyed by column Key — see ReportRunResponse.SummaryTotals. Null when the summary isn't paged.</summary>
+    public IReadOnlyDictionary<string, decimal?>? SummaryTotals { get; init; }
+    /// <summary>Paged crosstab Summary only (a Summary with "Group columns"): every column value and its totals over
+    /// every group, plus each pivot row's totals on this page. SummaryTotals then holds the bottom-right grand totals.
+    /// Null otherwise.</summary>
+    public CrosstabSummaryResult? CrosstabSummary { get; init; }
+}
+
+/// <summary>See <see cref="PagedReportRunResult.CrosstabSummary"/>. Values are the same (already resolved) values the
+/// rows carry in their series / Rows-level fields, so the viewer can match them the way it reads the rows.</summary>
+public sealed class CrosstabSummaryResult
+{
+    /// <summary>Every distinct crosstab column value across ALL groups (not just this page), each with its column's
+    /// totals keyed by sub-column Key ("0" = Count, "agg{i}_{fid}"). Null total = can't be recombined.</summary>
+    public List<CrosstabColumnTotals> Columns { get; init; } = [];
+    /// <summary>One entry per pivot row on this page: its Rows-level values (in level order) and its totals across every
+    /// crosstab column.</summary>
+    public List<CrosstabRowTotals> Rows { get; init; } = [];
+}
+
+public sealed class CrosstabColumnTotals
+{
+    public object? Value { get; init; }
+    public Dictionary<string, decimal?> Totals { get; init; } = new();
+}
+
+public sealed class CrosstabRowTotals
+{
+    public List<object?> Values { get; init; } = [];
+    public Dictionary<string, decimal?> Totals { get; init; } = new();
 }
 
 /// <summary>See <see cref="RunReportQueryHandler.ResolveDeleteScopeAsync"/>.</summary>
@@ -255,7 +289,9 @@ public class RunReportQueryHandler
         }
 
         if (report.ReportType is "Summary" or "Chart")
-            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, effectiveRuntimeFilters, filterTree, isMaskedPreview, ct);
+            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, effectiveRuntimeFilters, filterTree, isMaskedPreview, ct,
+                pageGroups: query.PageSummary && report.ReportType == "Summary",
+                sortKey: query.SummarySortKey, sortDesc: query.SummarySortDesc);
 
         return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields,
             effectiveRuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, isMaskedPreview, isAppEncrypted, ct);
@@ -422,6 +458,7 @@ public class RunReportQueryHandler
             Key = (f.Fid.HasValue ? (long)f.Fid.Value : f.Id).ToString(),
             Name = string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label,
             TypeCode = f.TypeCode,
+            ResultTypeCode = RelationshipTypeLabel.IsTagged(f.TypeCode) ? RelationshipTypeLabel.ValueType(f.TypeCode, f.Settings) : null,
         }).ToList();
 
         // Determine which field IDs are formula (compute-on-read, no physical column)
@@ -1427,7 +1464,7 @@ public class RunReportQueryHandler
         return new FilterCondition
         {
             FieldId = cond.FieldId, Operator = cond.Operator, SubField = cond.SubField,
-            Value = resolved, ValueMode = "literal", ValueFieldId = null,
+            Value = resolved, ValueMode = "literal", ValueFieldId = null, ValueType = cond.ValueType,
         };
     }
 
@@ -1451,7 +1488,7 @@ public class RunReportQueryHandler
         FilterCondition Cond(string op, DateTime value) => new()
         {
             FieldId = cond.FieldId, SubField = cond.SubField,
-            Operator = op, Value = value.ToString(isoFormat), ValueMode = "literal",
+            Operator = op, Value = value.ToString(isoFormat), ValueMode = "literal", ValueType = cond.ValueType,
         };
 
         return isDuring
@@ -1833,7 +1870,10 @@ public class RunReportQueryHandler
         IReadOnlyList<(long FieldId, string Value, string? SubField)>? runtimeFilters,
         FilterGroup? savedAndRuntimeFilterTree,
         bool isMaskedPreview,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool pageGroups = false,
+        string? sortKey = null,
+        bool sortDesc = false)
     {
         var visibleFieldIds = access.VisibleFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
         var fieldMap = allFields
@@ -2045,12 +2085,12 @@ public class RunReportQueryHandler
         for (var i = 0; i < rowGroupSpecs.Count; i++)
         {
             var f = rowGroupSpecs[i].Field;
-            columns.Add(new ReportColumnInfo { FieldId = f.Fid ?? f.Id, Key = rowGroupKeys[i], Name = string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label, TypeCode = f.TypeCode });
+            columns.Add(new ReportColumnInfo { FieldId = f.Fid ?? f.Id, Key = rowGroupKeys[i], Name = string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label, TypeCode = f.TypeCode, ResultTypeCode = RelationshipTypeLabel.ValueType(f.TypeCode, f.Settings) });
         }
         columns.Add(new() { FieldId = 0, Key = "0", Name = "Count", TypeCode = "Number" });
         if (seriesField is not null)
         {
-            columns.Add(new ReportColumnInfo { FieldId = seriesField.Fid ?? seriesField.Id, Key = seriesKey!, Name = string.IsNullOrWhiteSpace(seriesField.Label) ? seriesField.Name : seriesField.Label, TypeCode = seriesField.TypeCode });
+            columns.Add(new ReportColumnInfo { FieldId = seriesField.Fid ?? seriesField.Id, Key = seriesKey!, Name = string.IsNullOrWhiteSpace(seriesField.Label) ? seriesField.Name : seriesField.Label, TypeCode = seriesField.TypeCode, ResultTypeCode = RelationshipTypeLabel.ValueType(seriesField.TypeCode, seriesField.Settings) });
         }
         for (var i = 0; i < displayAggregations.Count; i++)
         {
@@ -2079,6 +2119,95 @@ public class RunReportQueryHandler
             }
         }
 
+        // Paged Summary (the report viewer, like a Table report): sort every group, work out the grand totals over every
+        // group, then hand back just the requested page. Not for a crosstab ("Group columns"): its pivot rows are built from
+        // several flat rows each, so a page of flat rows would split them.
+        // Paged crosstab Summary: a pivot row is one combination of Rows-level values, built from several flat rows (one per
+        // column value). Page by pivot row — every flat row of a pivot row on the page is returned, so no row is split —
+        // and work out every column's totals, each pivot row's totals and the grand totals here, over ALL groups.
+        if (pageGroups && seriesField is not null)
+        {
+            static string KeyOf(object? v) => v is null ? "\u0000" : v.ToString() ?? "\u0000";
+            string RowKeyOf(RecordResult r) => string.Join("\u0001", rowGroupKeys.Select(k => KeyOf(r.Fields.GetValueOrDefault(k))));
+
+            var pivotOrder = new List<string>();
+            var pivotItems = new Dictionary<string, List<RecordResult>>();
+            var columnItems = new Dictionary<string, (object? Value, List<RecordResult> Items)>();
+            foreach (var item in items)
+            {
+                var rowKey = RowKeyOf(item);
+                if (!pivotItems.TryGetValue(rowKey, out var list))
+                {
+                    pivotItems[rowKey] = list = [];
+                    pivotOrder.Add(rowKey);
+                }
+                list.Add(item);
+
+                var seriesValue = item.Fields.GetValueOrDefault(seriesKey!);
+                var colKey = KeyOf(seriesValue);
+                if (!columnItems.TryGetValue(colKey, out var col))
+                    columnItems[colKey] = col = (seriesValue, []);
+                col.Items.Add(item);
+            }
+
+            var pagePivotKeys = pivotOrder.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+            CrosstabSummaryResult? crosstab = null;
+            if (!definition.HideTotals)
+            {
+                crosstab = new CrosstabSummaryResult
+                {
+                    Columns = columnItems.Values
+                        .Select(c => new CrosstabColumnTotals { Value = c.Value, Totals = SummaryGrandTotals(c.Items, displayAggregations, summaryFormulaPlan.Has) })
+                        .ToList(),
+                    Rows = pagePivotKeys
+                        .Select(k => new CrosstabRowTotals
+                        {
+                            Values = rowGroupKeys.Select(rk => pivotItems[k][0].Fields.GetValueOrDefault(rk)).ToList(),
+                            Totals = SummaryGrandTotals(pivotItems[k], displayAggregations, summaryFormulaPlan.Has),
+                        })
+                        .ToList(),
+                };
+            }
+            else
+            {
+                // Totals hidden: the column list is still needed so every page shows the same column headers.
+                crosstab = new CrosstabSummaryResult
+                {
+                    Columns = columnItems.Values.Select(c => new CrosstabColumnTotals { Value = c.Value }).ToList(),
+                };
+            }
+
+            return new PagedReportRunResult
+            {
+                Items = pagePivotKeys.SelectMany(k => pivotItems[k]).ToList(),
+                Columns = columns,
+                TotalCount = pivotOrder.Count,
+                Page = page,
+                PageSize = pageSize,
+                IsDataMasked = isMaskedPreview,
+                SummaryTotals = definition.HideTotals ? new Dictionary<string, decimal?>() : SummaryGrandTotals(items, displayAggregations, summaryFormulaPlan.Has),
+                CrosstabSummary = crosstab,
+            };
+        }
+
+        if (pageGroups && seriesField is null)
+        {
+            if (!string.IsNullOrEmpty(sortKey))
+                items = SortSummaryItems(items, sortKey, sortDesc);
+            var summaryTotals = definition.HideTotals ? null : SummaryGrandTotals(items, displayAggregations, summaryFormulaPlan.Has);
+            var pageItems = items.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+            return new PagedReportRunResult
+            {
+                Items = pageItems,
+                Columns = columns,
+                TotalCount = items.Count,
+                Page = page,
+                PageSize = pageSize,
+                IsDataMasked = isMaskedPreview,
+                SummaryTotals = summaryTotals ?? new Dictionary<string, decimal?>(),
+            };
+        }
+
         return new PagedReportRunResult
         {
             Items = items,
@@ -2089,6 +2218,88 @@ public class RunReportQueryHandler
             IsDataMasked = isMaskedPreview,
             ResolvedGaugeGoalValue = resolvedGaugeGoalValue,
         };
+    }
+
+    private static decimal? SummaryNumber(object? v)
+    {
+        if (v is null) return null;
+        if (v is System.Text.Json.JsonElement je)
+            return je.ValueKind == System.Text.Json.JsonValueKind.Number && je.TryGetDecimal(out var jd) ? jd : null;
+        if (v is string s)
+            return decimal.TryParse(s, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var sd) ? sd : null;
+        if (v is bool or DateTime or DateTimeOffset) return null;
+        try { return Convert.ToDecimal(v, System.Globalization.CultureInfo.InvariantCulture); }
+        catch { return null; }
+    }
+
+    /// <summary>Sorts Summary groups by one column Key — numerically when both values are numbers (a blank counts as 0,
+    /// like the viewer's own sort), otherwise as text.</summary>
+    private static List<RecordResult> SortSummaryItems(List<RecordResult> items, string key, bool desc)
+    {
+        int Compare(RecordResult a, RecordResult b)
+        {
+            var av = a.Fields.TryGetValue(key, out var x) ? x : null;
+            var bv = b.Fields.TryGetValue(key, out var y) ? y : null;
+            var an = av is null ? 0m : SummaryNumber(av);
+            var bn = bv is null ? 0m : SummaryNumber(bv);
+            int result = an.HasValue && bn.HasValue
+                ? an.Value.CompareTo(bn.Value)
+                : string.Compare(av?.ToString(), bv?.ToString(), StringComparison.OrdinalIgnoreCase);
+            return desc ? -result : result;
+        }
+        var sorted = items.ToList();
+        // List.Sort isn't stable — keep equal groups in their original (Rows) order.
+        var index = sorted.Select((r, i) => (r, i)).ToDictionary(t => t.r, t => t.i);
+        sorted.Sort((a, b) => { var c = Compare(a, b); return c != 0 ? c : index[a].CompareTo(index[b]); });
+        return sorted;
+    }
+
+    /// <summary>The paged Summary's grand-totals row over EVERY group, recombined per aggregate function the same way the
+    /// viewer does it for an unpaged report: Count/Sum add up, Avg is weighted by each group's Count, Min/Max take the
+    /// extreme. Distinct Count, Std Dev, Median, summary formulas and % of total can't be recombined from per-group
+    /// values — those keys map to null (the viewer shows "100%" for % of total itself).</summary>
+    private static Dictionary<string, decimal?> SummaryGrandTotals(
+        List<RecordResult> items, List<SummaryAggregation> displayAggregations, Func<long, bool> isSummaryFormula)
+    {
+        var totals = new Dictionary<string, decimal?>
+        {
+            ["0"] = items.Sum(r => SummaryNumber(r.Fields.GetValueOrDefault("0")) ?? 0m),
+        };
+        for (var i = 0; i < displayAggregations.Count; i++)
+        {
+            var agg = displayAggregations[i];
+            var key = $"agg{i}_{agg.FieldId}";
+            if (isSummaryFormula(agg.FieldId) || agg.DisplayAs == "PercentOfColumnTotal") { totals[key] = null; continue; }
+            var values = items.Select(r => SummaryNumber(r.Fields.GetValueOrDefault(key))).Where(v => v.HasValue).Select(v => v!.Value).ToList();
+            switch (agg.Function)
+            {
+                case "Sum":
+                case "Count":
+                    totals[key] = values.Sum();
+                    break;
+                case "Avg":
+                    decimal weighted = 0, count = 0;
+                    foreach (var r in items)
+                    {
+                        if (SummaryNumber(r.Fields.GetValueOrDefault(key)) is not { } avg) continue;
+                        var c = SummaryNumber(r.Fields.GetValueOrDefault("0")) ?? 0m;
+                        weighted += avg * c;
+                        count += c;
+                    }
+                    totals[key] = count > 0 ? weighted / count : null;
+                    break;
+                case "Min":
+                    totals[key] = values.Count > 0 ? values.Min() : null;
+                    break;
+                case "Max":
+                    totals[key] = values.Count > 0 ? values.Max() : null;
+                    break;
+                default:
+                    totals[key] = null;
+                    break;
+            }
+        }
+        return totals;
     }
 
     /// <summary>Resolves Summary's "Rows" group levels — RowGroupLevels (the chained "Group by X,

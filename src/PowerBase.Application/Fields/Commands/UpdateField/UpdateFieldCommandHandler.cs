@@ -122,8 +122,14 @@ public class UpdateFieldCommandHandler
         var isSortable = existing.IsSystem ? false : command.IsSortable;
         var isFilterable = existing.IsSystem ? false : command.IsFilterable;
         var isAuditable = existing.IsSystem ? false : command.IsAuditable;
+        // A system field or an encryption-exempt type (Reference, Number, Date, Boolean, User, ...) has no encryption setting a
+        // request can change, so whatever is stored stays. It used to be forced to false, but a field of an exempt type can still
+        // carry IsEncrypted = true from before the type was exempted (its column may still hold ciphertext until
+        // ExemptFieldEncryptionCleanupService migrates it): true -> false then looked like an un-encrypt and any settings save on a
+        // table with records was refused with "cannot be un-encrypted". Un-flagging those fields is the cleanup service's job
+        // (it decrypts the column first); clearing the flag here would leave ciphertext in a column read as plain.
         var isEncrypted = existing.IsSystem || PowerBase.Domain.Constants.PhysicalNaming.IsEncryptionExemptTypeCode(existing.TypeCode)
-            ? false
+            ? existing.IsEncrypted
             : command.IsEncrypted;
         var snapshotSourceFid = existing.IsSystem ? null : command.SnapshotSourceFid;
         var snapshotEditable = snapshotSourceFid.HasValue && command.SnapshotEditable;
@@ -310,7 +316,11 @@ public class UpdateFieldCommandHandler
 
         // Lookups of this field save the type of value they show; they follow the switch (Number → Currency …).
         if (switchedToTypeCode is not null)
+        {
             await FieldValueTypes.RefreshLookupsOfAsync(existing, switchedToTypeCode, _relRepo, _fieldRepo, ct);
+            // When this field is a parent's key, the new-field References showing it follow the switch too.
+            await ReferenceResultTypeRefresher.RefreshForParentAsync(table, _relRepo, _fieldRepo, ct);
+        }
 
         // Backfill: when an optional field becomes required and a default is supplied, fill existing
         // rows whose value is NULL/empty so they remain valid.

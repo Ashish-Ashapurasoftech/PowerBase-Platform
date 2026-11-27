@@ -38,7 +38,8 @@ public class UpdateMyPreferencesCommandValidator : AbstractValidator<UpdateMyPre
             .When(x => x.Preferences.Density is not null).WithMessage("Unknown density.");
         RuleFor(x => x.Preferences.BorderMode).Must(v => ValidBorderModes.Contains(v!))
             .When(x => x.Preferences.BorderMode is not null).WithMessage("Unknown border mode.");
-        RuleFor(x => x.Preferences.PageSize).Must(v => v is 5 or 10 or 25 or 50)
-            .When(x => x.Preferences.PageSize is not null).WithMessage("Page size must be 5, 10, 25, or 50.");
+        // Same list the frontend offers (PAGE_SIZE_OPTIONS); 25 is kept so already-saved values stay valid.
+        RuleFor(x => x.Preferences.PageSize).Must(v => v is 5 or 10 or 20 or 25 or 50 or 100 or 200)
+            .When(x => x.Preferences.PageSize is not null).WithMessage("Page size must be 5, 10, 20, 25, 50, 100, or 200.");
     }
 }

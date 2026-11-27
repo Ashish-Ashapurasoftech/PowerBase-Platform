@@ -8,8 +8,17 @@ namespace PowerBase.Application.Imports;
 /// JSON columns are read and written in exactly one place.</summary>
 public static class ImportConfigMapper
 {
+    /// <summary><c>ConstraintPolicy</c> is the combined choice saved before the duplicate and error settings were separated: still read, never written.</summary>
     private sealed record Options(string? ConstraintPolicy, List<string>? NotifyEmails, ImportFileOptions? File = null, List<ImportTargetConfig>? AdditionalTargets = null, List<ImportVirtualColumn>? VirtualColumns = null, FilterGroup? TableConditions = null,
-        List<ImportSheetMapping>? SheetMappings = null, bool? OnlyChanged = null, List<ImportVariable>? Variables = null);
+        List<ImportSheetMapping>? SheetMappings = null, bool? OnlyChanged = null, List<ImportVariable>? Variables = null, string? DuplicatePolicy = null, string? ErrorPolicy = null);
+
+    /// <summary>The two settings of a stored definition: the new ones when saved, otherwise what the old combined choice stands for.</summary>
+    private static (string Duplicate, string Error) PoliciesOf(Options? options)
+    {
+        var (duplicate, error) = ImportConstraintPolicy.Split(options?.ConstraintPolicy);
+        return (ImportDuplicatePolicy.IsValid(options?.DuplicatePolicy) ? options!.DuplicatePolicy! : duplicate,
+                ImportErrorPolicy.IsValid(options?.ErrorPolicy) ? options!.ErrorPolicy! : error);
+    }
 
     public static ImportDefinitionConfig ToConfig(ImportDefinition def, Guid sourceTableId) => new()
     {
@@ -28,8 +37,8 @@ public static class ImportConfigMapper
         Conditions = ImportJson.Deserialize<FilterGroup>(def.ConditionsJson),
         Mappings = ImportJson.Deserialize<List<ImportFieldMapping>>(def.FieldMappingJson) ?? [],
         ColumnRules = ImportJson.Deserialize<List<ImportColumnRule>>(def.ColumnRulesJson) ?? [],
-        ConstraintPolicy = ImportJson.Deserialize<Options>(def.OptionsJson)?.ConstraintPolicy is { } p && ImportConstraintPolicy.IsValid(p)
-            ? p : ImportConstraintPolicy.ImportValid,
+        DuplicatePolicy = PoliciesOf(ImportJson.Deserialize<Options>(def.OptionsJson)).Duplicate,
+        ErrorPolicy = PoliciesOf(ImportJson.Deserialize<Options>(def.OptionsJson)).Error,
         NotifyEmails = ImportJson.Deserialize<Options>(def.OptionsJson)?.NotifyEmails ?? []
     };
 
@@ -46,12 +55,15 @@ public static class ImportConfigMapper
             ? ImportJson.Serialize(cfg.ColumnRules.Where(r => r.RemoveDuplicates || r.RequireField || r.IgnoreBlanks)) : null;
         var notify = ImportNotify.Normalize(cfg.NotifyEmails);
         var file = cfg.SourceKind == ImportSourceKinds.File ? cfg.File : null;
-        entity.OptionsJson = cfg.ConstraintPolicy == ImportConstraintPolicy.ImportValid && notify.Count == 0 && file is null && cfg.AdditionalTargets.Count == 0 && cfg.VirtualColumns.Count == 0 && cfg.TableConditions is not { Nodes.Count: > 0 } && cfg.SheetMappings.Count == 0 && !cfg.OnlyChangedSinceLastRun && cfg.Variables.Count == 0
+        var defaultPolicies = cfg.DuplicatePolicy == ImportDuplicatePolicy.KeepFirst && cfg.ErrorPolicy == ImportErrorPolicy.ImportValid;
+        entity.OptionsJson = defaultPolicies && notify.Count == 0 && file is null && cfg.AdditionalTargets.Count == 0 && cfg.VirtualColumns.Count == 0 && cfg.TableConditions is not { Nodes.Count: > 0 } && cfg.SheetMappings.Count == 0 && !cfg.OnlyChangedSinceLastRun && cfg.Variables.Count == 0
             ? null
             : ImportJson.Serialize(new Options(
-                cfg.ConstraintPolicy == ImportConstraintPolicy.ImportValid ? null : cfg.ConstraintPolicy, notify.Count == 0 ? null : notify, file,
+                null, notify.Count == 0 ? null : notify, file,
                 cfg.AdditionalTargets.Count == 0 ? null : cfg.AdditionalTargets, cfg.VirtualColumns.Count == 0 ? null : cfg.VirtualColumns,
                 cfg.TableConditions is { Nodes.Count: > 0 } ? cfg.TableConditions : null, cfg.SheetMappings.Count == 0 ? null : cfg.SheetMappings,
-                cfg.OnlyChangedSinceLastRun ? true : null, cfg.Variables.Count == 0 ? null : cfg.Variables));
+                cfg.OnlyChangedSinceLastRun ? true : null, cfg.Variables.Count == 0 ? null : cfg.Variables,
+                cfg.DuplicatePolicy == ImportDuplicatePolicy.KeepFirst ? null : cfg.DuplicatePolicy,
+                cfg.ErrorPolicy == ImportErrorPolicy.ImportValid ? null : cfg.ErrorPolicy));
     }
 }

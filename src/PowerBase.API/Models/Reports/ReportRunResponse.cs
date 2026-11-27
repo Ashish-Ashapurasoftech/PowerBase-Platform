@@ -27,6 +27,13 @@ public class ReportRunResponse
     /// <summary>True when a column that opted into a total/average row is missing from Totals because its total couldn't be
     /// worked out exactly over every matching record — left out rather than shown covering only some.</summary>
     public bool TotalsIncomplete { get; init; }
+    /// <summary>Paged Summary reports only (RunReportRequest.PageSummary): the grand-totals row over every
+    /// group, not just this page, keyed by column Key. Null value = no total for that column (Distinct
+    /// Count, Std Dev, Median, summary formulas, % of total, non-numeric Min/Max). Null when not paged.</summary>
+    public IReadOnlyDictionary<string, decimal?>? SummaryTotals { get; init; }
+    /// <summary>Paged crosstab Summary only: every column value with its totals over all groups, and this page's
+    /// pivot-row totals. SummaryTotals holds the grand totals. Null otherwise.</summary>
+    public PowerBase.Application.Reports.Queries.RunReport.CrosstabSummaryResult? CrosstabSummary { get; init; }
 }
 
 public class ReportColumnTotalDto

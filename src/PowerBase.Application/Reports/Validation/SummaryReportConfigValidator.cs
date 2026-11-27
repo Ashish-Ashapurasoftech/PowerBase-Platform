@@ -57,7 +57,7 @@ public sealed class SummaryReportConfigValidator : IReportConfigValidator
                 var allowed = GroupByModeCategoryHelper.GetAllowedGroupByModes(groupByField.TypeCode);
                 if (!allowed.Contains(input.GroupByMode, StringComparer.OrdinalIgnoreCase))
                     CommonReportValidationHelpers.AddError(errors, "groupByMode",
-                        $"groupByMode must be one of: {string.Join(", ", allowed)} for field type '{groupByField.TypeCode}'.");
+                        $"groupByMode must be one of: {string.Join(", ", allowed)} for field type '{PowerBase.Application.Relationships.RelationshipTypeLabel.Of(groupByField)}'.");
             }
         }
 
@@ -142,7 +142,7 @@ public sealed class SummaryReportConfigValidator : IReportConfigValidator
                 var allowed = GroupByModeCategoryHelper.GetAllowedGroupByModes(field.TypeCode);
                 if (!allowed.Contains(level.GroupByMode, StringComparer.OrdinalIgnoreCase))
                     CommonReportValidationHelpers.AddError(errors, "rowGroupLevels",
-                        $"groupByMode must be one of: {string.Join(", ", allowed)} for field type '{field.TypeCode}'.");
+                        $"groupByMode must be one of: {string.Join(", ", allowed)} for field type '{PowerBase.Application.Relationships.RelationshipTypeLabel.Of(field)}'.");
             }
         }
     }
@@ -166,7 +166,7 @@ public sealed class SummaryReportConfigValidator : IReportConfigValidator
             var allowed = GroupByModeCategoryHelper.GetAllowedGroupByModes(seriesField.TypeCode);
             if (!allowed.Contains(chart.SeriesMode, StringComparer.OrdinalIgnoreCase))
                 CommonReportValidationHelpers.AddError(errors, "chart.seriesMode",
-                    $"seriesMode must be one of: {string.Join(", ", allowed)} for field type '{seriesField.TypeCode}'.");
+                    $"seriesMode must be one of: {string.Join(", ", allowed)} for field type '{PowerBase.Application.Relationships.RelationshipTypeLabel.Of(seriesField)}'.");
         }
     }
 
@@ -192,7 +192,7 @@ public sealed class SummaryReportConfigValidator : IReportConfigValidator
             {
                 var fieldLabel = string.IsNullOrWhiteSpace(field.Label) ? field.Name : field.Label;
                 CommonReportValidationHelpers.AddError(errors, "aggregations",
-                    $"'{agg.Function}' is not a valid Summarize-By option for field '{fieldLabel}' ({field.TypeCode}). Allowed: {string.Join(", ", allowed)}");
+                    $"'{agg.Function}' is not a valid Summarize-By option for field '{fieldLabel}' ({PowerBase.Application.Relationships.RelationshipTypeLabel.Of(field)}). Allowed: {string.Join(", ", allowed)}");
             }
         }
     }

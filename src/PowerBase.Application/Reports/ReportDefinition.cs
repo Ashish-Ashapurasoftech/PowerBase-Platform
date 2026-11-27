@@ -91,7 +91,7 @@ public class ReportDefinition
 
 public class ReportFormula
 {
-    /// <summary>Reserved id (<see cref="ReportFormulaFields.FirstId"/> + 0..2) other parts of the definition (columns, filters, sorts, group-by, aggregations)
+    /// <summary>Reserved id (<see cref="ReportFormulaFields.FirstId"/> + 0..<see cref="ReportFormulaFields.MaxFormulas"/> - 1) other parts of the definition (columns, filters, sorts, group-by, aggregations)
     /// use to refer to this formula; it can never collide with a real field's Fid.</summary>
     public long Id { get; set; }
     public string Name { get; set; } = string.Empty;
@@ -206,6 +206,18 @@ public class FilterCondition
     /// <summary>Only meaningful when ValueMode == "field" (the other field on this table to compare
     /// against) or "parentField" (the field on the parent table).</summary>
     public long? ValueFieldId { get; set; }
+
+    /// <summary>What the left side is, for the import filter only (a report never sets it): null or "field" is the field in <see cref="FieldId"/>;
+    /// "variable" is the import variable named in <see cref="LeftValue"/>; "formula" is the formula in <see cref="LeftValue"/>. A variable or a formula
+    /// that uses no field of the row is the same for every row, so an import works it out once, before it runs, and the condition then reads as an
+    /// ordinary one (see <c>ImportFilterOperands</c>).</summary>
+    public string? LeftKind { get; set; }
+    public string? LeftValue { get; set; }
+
+    /// <summary>For an import's filter on a file column only (a report never sets it): the type the operator reads the column's text as, one of "number",
+    /// "date" or "checkbox". A file's columns are all text, so "is before", "is greater than" or "is equal to checked" has to say what to read the cell as; a cell that
+    /// cannot be read that way does not match. Null or missing is plain text, as for every other field.</summary>
+    public string? ValueType { get; set; }
 }
 
 // ── Summary: chained Rows group levels ────────────────────────────────────────
