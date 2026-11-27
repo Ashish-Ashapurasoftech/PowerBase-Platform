@@ -42,10 +42,11 @@ public class DeleteTableCommandHandler
     {
         var table = await _tableRepo.GetByPublicIdAsync(command.PublicId, ct);
 
-        // Fetch all fields to check for pipeline dependencies (active or inactive)
+        // Fetch all fields to check for pipeline dependencies
         var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
-        // Any PowerFlow step (active or inactive) that names the table (trigger, search, create, copy records…) blocks the delete, whether or
-        // not the step lists individual fields. The field-level pass only adds which fields (by label) each step uses.
+        // Any step of an ACTIVE PowerFlow that names the table (trigger, search, create, copy records…) blocks the delete, whether or
+        // not the step lists individual fields. A disabled PowerFlow does not run, so it does not block (its steps are marked invalid
+        // after the delete instead). The field-level pass only adds which fields (by label) each step uses.
         var tableSteps = await _pipelineRepo.GetActivePipelineStepsUsingTableAsync(table.PublicId, ct);
         if (tableSteps.Count > 0)
         {
@@ -98,6 +99,10 @@ public class DeleteTableCommandHandler
         }
 
         await _tableRepo.DeleteAsync(command.PublicId, ct);
+
+        // A disabled PowerFlow that still names this table was let through above: mark its steps as not validated so it cannot be
+        // switched on again until they are fixed (enabling is refused while a step is not validated).
+        await _pipelineRepo.InvalidateStepsUsingTableAsync(table.PublicId, ct);
 
         // D13: Purge table documents from search index
         if (_searchService != null && _searchService.IsEnabled && _queryContext != null)

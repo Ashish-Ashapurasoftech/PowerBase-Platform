@@ -20,7 +20,7 @@ public class ListReportsQueryHandler
     public async Task<IReadOnlyList<ReportDetailResult>> HandleAsync(ListReportsQuery query, CancellationToken ct = default)
     {
         var appId = await _appRepo.GetIdByPublicIdAsync(query.AppPublicId, ct);
-        var reports = await _reportRepo.ListByAppAsync(appId, ct);
+        var reports = await _reportRepo.ListByAppAsync(appId, ct, query.IncludeHidden);
         var tables = (await _tableRepo.ListByAppAsync(appId, ct)).ToDictionary(t => t.Id);
 
         var results = new List<ReportDetailResult>();

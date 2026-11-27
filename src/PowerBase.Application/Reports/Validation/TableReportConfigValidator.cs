@@ -41,7 +41,7 @@ public sealed class TableReportConfigValidator : IReportConfigValidator
             CommonReportValidationHelpers.AddError(errors, "groupByFieldId", $"Unknown field ID: {input.GroupByFieldId.Value}");
 
         ValidateTableSortGroup(input.TableSortGroup, validFieldIds, fieldMap, errors);
-        ValidateOptions(input.Options, errors);
+        ValidateOptions(input.Options, validFieldIds, errors);
 
         CommonReportValidationHelpers.ForbidIfPopulated(input.Aggregations.Count > 0, "aggregations", "Table", errors);
         CommonReportValidationHelpers.ForbidIfPopulated(input.Chart is not null, "chart", "Table", errors);
@@ -80,7 +80,7 @@ public sealed class TableReportConfigValidator : IReportConfigValidator
         }
     }
 
-    private static void ValidateOptions(ReportOptionsCommand? options, IDictionary<string, string[]> errors)
+    private static void ValidateOptions(ReportOptionsCommand? options, HashSet<long> validFieldIds, IDictionary<string, string[]> errors)
     {
         if (options is null)
             return;
@@ -88,5 +88,9 @@ public sealed class TableReportConfigValidator : IReportConfigValidator
         if (!AllowedColumnHeaderTextModes.Contains(options.ColumnHeaderText))
             CommonReportValidationHelpers.AddError(errors, "options.columnHeaderText",
                 $"columnHeaderText must be one of: {string.Join(", ", AllowedColumnHeaderTextModes)}");
+
+        var rowColorError = ReportRowColors.Validate(options.RowColorJson, validFieldIds);
+        if (rowColorError is not null)
+            CommonReportValidationHelpers.AddError(errors, "options.rowColorJson", rowColorError);
     }
 }

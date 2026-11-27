@@ -85,6 +85,77 @@ public class DeleteFieldDependencyTests
         await _fieldRepo.Received(1).DeleteAsync(fieldId, table.Id, Arg.Any<CancellationToken>());
     }
 
+    // A PowerFlow that is switched off does not run, so it must not block a delete (the repository only reports ACTIVE flows, which is
+    // what these mocks model). Its steps are then marked invalid, so enabling it later is refused until they are fixed.
+    [Fact]
+    public async Task DeleteField_WhenOnlyDisabledFlowsUseTheField_DeletesItAndMarksItsStepsInvalid()
+    {
+        var table = MakeTable();
+        var fieldId = Guid.NewGuid();
+        var fid = 101;
+        _tableRepo.GetByPublicIdAsync(table.PublicId, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.GetByPublicIdAsync(fieldId, Arg.Any<CancellationToken>()).Returns(MakeField(fieldId, fid));
+        _pipelineRepo.GetActivePipelineReferencesForFieldAsync(Arg.Any<AppField>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+            .Returns(new List<(string PipelineName, string StepLabel)>());
+        _fieldRepo.DeleteAsync(fieldId, table.Id, Arg.Any<CancellationToken>()).Returns(1);
+
+        await CreateDeleteFieldSut().HandleAsync(new DeleteFieldCommand(table.PublicId, fieldId));
+
+        await _fieldRepo.Received(1).DeleteAsync(fieldId, table.Id, Arg.Any<CancellationToken>());
+        await _pipelineRepo.Received(1).InvalidateStepsReferencingFieldAsync(fid, Arg.Is<System.Data.IDbTransaction?>(t => t == null), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task DeleteField_WhenBlockedByAnActiveFlow_ChangesNoFlowSteps()
+    {
+        var table = MakeTable();
+        var fieldId = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(table.PublicId, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.GetByPublicIdAsync(fieldId, Arg.Any<CancellationToken>()).Returns(MakeField(fieldId, 101));
+        _pipelineRepo.GetActivePipelineReferencesForFieldAsync(Arg.Any<AppField>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+            .Returns(new List<(string PipelineName, string StepLabel)> { ("Pipeline A", "Step 1") });
+
+        await CreateDeleteFieldSut().Invoking(s => s.HandleAsync(new DeleteFieldCommand(table.PublicId, fieldId)))
+            .Should().ThrowAsync<ValidationException>();
+
+        await _pipelineRepo.DidNotReceive().InvalidateStepsReferencingFieldAsync(Arg.Any<int>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task BulkDeleteFields_WhenOnlyDisabledFlowsUseTheFields_DeletesThemAndMarksTheirStepsInvalid()
+    {
+        var table = MakeTable();
+        var id1 = Guid.NewGuid();
+        var id2 = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(table.PublicId, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(new List<AppField> { MakeField(id1, 101), MakeField(id2, 102) });
+        _pipelineRepo.GetActivePipelineReferencesForFieldAsync(Arg.Any<AppField>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+            .Returns(new List<(string PipelineName, string StepLabel)>());
+        _fieldRepo.BulkDeleteAsync(Arg.Any<IEnumerable<Guid>>(), table.Id, Arg.Any<CancellationToken>()).Returns(2);
+
+        await CreateBulkDeleteFieldSut().HandleAsync(new BulkDeleteFieldsCommand(table.PublicId, new List<Guid> { id1, id2 }));
+
+        await _fieldRepo.Received(1).BulkDeleteAsync(Arg.Any<IEnumerable<Guid>>(), table.Id, Arg.Any<CancellationToken>());
+        await _pipelineRepo.Received(1).InvalidateStepsReferencingFieldAsync(101, Arg.Is<System.Data.IDbTransaction?>(t => t == null), Arg.Any<CancellationToken>());
+        await _pipelineRepo.Received(1).InvalidateStepsReferencingFieldAsync(102, Arg.Is<System.Data.IDbTransaction?>(t => t == null), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task BulkDeleteFields_WhenBlockedByAnActiveFlow_ChangesNoFlowSteps()
+    {
+        var table = MakeTable();
+        var id1 = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(table.PublicId, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(new List<AppField> { MakeField(id1, 101) });
+        _pipelineRepo.GetActivePipelineReferencesForFieldAsync(Arg.Any<AppField>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+            .Returns(new List<(string PipelineName, string StepLabel)> { ("Pipeline A", "Step 1") });
+
+        await CreateBulkDeleteFieldSut().Invoking(s => s.HandleAsync(new BulkDeleteFieldsCommand(table.PublicId, new List<Guid> { id1 })))
+            .Should().ThrowAsync<ValidationException>();
+
+        await _pipelineRepo.DidNotReceive().InvalidateStepsReferencingFieldAsync(Arg.Any<int>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+    }
+
     [Fact]
     public async Task BulkDeleteFields_WhenAnyFieldReferencedInActivePipeline_ThrowsValidationException()
     {

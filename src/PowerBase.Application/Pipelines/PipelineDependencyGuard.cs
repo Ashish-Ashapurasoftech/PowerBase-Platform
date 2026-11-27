@@ -6,7 +6,9 @@ namespace PowerBase.Application.Pipelines;
 
 /// <summary>
 /// Shared "is this used by a PowerFlow?" checks for every path that removes a field or a table (field / bulk / table delete,
-/// relationship delete, relationship field removal). Deleting a whole app is deliberately not checked. Active and inactive PowerFlows both count.
+/// relationship delete, relationship field removal). Deleting a whole app is deliberately not checked. Only ACTIVE PowerFlows count: a disabled one
+/// does not run, so it does not block (Quickbase imports arrive disabled). The delete handlers mark a disabled flow's affected steps as not
+/// validated instead, so it cannot be switched on again until they are fixed.
 /// </summary>
 public static class PipelineDependencyGuard
 {

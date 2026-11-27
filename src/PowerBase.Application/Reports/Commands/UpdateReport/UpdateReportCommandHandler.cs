@@ -134,6 +134,7 @@ public class UpdateReportCommandHandler
                 DisableBulkUpdate = command.Options.DisableBulkUpdate,
                 DisableGridEdit = command.Options.DisableGridEdit,
                 ShowDescriptionOnReportPage = command.Options.ShowDescriptionOnReportPage,
+                RowColorJson = ReportRowColors.Normalize(command.Options.RowColorJson),
             },
             Aggregations = command.Aggregations.Select(a => new SummaryAggregation
             {

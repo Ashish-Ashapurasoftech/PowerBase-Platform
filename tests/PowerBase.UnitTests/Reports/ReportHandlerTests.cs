@@ -179,6 +179,38 @@ public class ReportHandlerTests
         result.All(r => r.Name == "My Report").Should().BeTrue();
     }
 
+    // Hidden reports are unlisted everywhere except where one is being picked (the dashboard designer), which asks for them.
+    [Fact]
+    public async Task ListReports_ByDefault_DoesNotAskForHiddenReports()
+    {
+        var app = new App { Id = 1, PublicId = Guid.NewGuid(), Name = "App" };
+        _appRepo.GetIdByPublicIdAsync(app.PublicId).Returns(app.Id);
+        _reportRepo.ListByAppAsync(app.Id, Arg.Any<CancellationToken>(), Arg.Any<bool>()).Returns(new List<Report>());
+        var sut = new ListReportsQueryHandler(_reportRepo, _appRepo, _tableRepo);
+
+        await sut.HandleAsync(new ListReportsQuery(app.PublicId));
+
+        await _reportRepo.Received(1).ListByAppAsync(app.Id, Arg.Any<CancellationToken>(), false);
+        await _reportRepo.DidNotReceive().ListByAppAsync(app.Id, Arg.Any<CancellationToken>(), true);
+    }
+
+    [Fact]
+    public async Task ListReports_WhenAskedToIncludeHidden_PassesItToTheRepository()
+    {
+        var app = new App { Id = 1, PublicId = Guid.NewGuid(), Name = "App" };
+        var table = MakeTable();
+        var hidden = MakeReport(table.Id);
+        hidden.Visibility = "Hidden";
+        _appRepo.GetIdByPublicIdAsync(app.PublicId).Returns(app.Id);
+        _reportRepo.ListByAppAsync(app.Id, Arg.Any<CancellationToken>(), true).Returns(new List<Report> { MakeReport(table.Id), hidden });
+        var sut = new ListReportsQueryHandler(_reportRepo, _appRepo, _tableRepo);
+
+        var result = await sut.HandleAsync(new ListReportsQuery(app.PublicId, IncludeHidden: true));
+
+        result.Should().HaveCount(2);
+        result.Should().Contain(r => r.Visibility == "Hidden");
+    }
+
     // --- RunReportQueryHandler ---
 
     [Fact]

@@ -127,6 +127,8 @@ public class ReportOptionsRequest
     public bool DisableBulkUpdate { get; set; }
     public bool DisableGridEdit { get; set; }
     public bool ShowDescriptionOnReportPage { get; set; }
+    /// <summary>Row colouring (see ReportOptions.RowColorJson). Null = none.</summary>
+    public string? RowColorJson { get; set; }
 }
 
 public class CustomDynamicFilterItemRequest
