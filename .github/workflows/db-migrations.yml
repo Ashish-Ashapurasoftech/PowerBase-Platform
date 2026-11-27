@@ -22,8 +22,13 @@ on:
   push:
     branches:
       - develop
+      # C test setup (stored computed columns): "Run workflow" is not offered because the default branch (main) has no copy of this
+      # workflow, so a push here runs it — control DB plus ONLY tenant 17 (Powerbase_17, the C environment's database). See the
+      # "Run C Tenant Migration" step; other tenants on the shared server are left as they are.
+      - feature/PB-stored-computed-columns
     paths:
       - 'database/migrations/**'
+      - '.github/workflows/db-migrations.yml'
 
 permissions:
   contents: read
@@ -74,7 +79,7 @@ jobs:
 
       # 2. All Tenant Databases Migrations (database/migrations/tenant against all provisioned Powerbase_N)
       - name: Run All Tenant Migrations
-        if: ${{ (github.event_name == 'push' || github.event.inputs.target == 'all' || github.event.inputs.target == 'tenants') && github.event.inputs.tenant_id == '' }}
+        if: ${{ ((github.event_name == 'push' && github.ref_name != 'feature/PB-stored-computed-columns') || github.event.inputs.target == 'all' || github.event.inputs.target == 'tenants') && github.event.inputs.tenant_id == '' }}
         env:
           ConnectionStrings__DefaultConnection: ${{ secrets.AZURE_SQL_CONNECTION_STRING }}
         run: |
@@ -86,6 +91,23 @@ jobs:
           echo "$output"
           echo '```text' >> $GITHUB_STEP_SUMMARY
           echo "$output" | grep -E '(\[run\]|Tenant [0-9]|Applied:|Tenants processed|SKIPPED|FAILED)' >> $GITHUB_STEP_SUMMARY || echo "$output" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          if [ $exit_code -ne 0 ]; then exit $exit_code; fi
+
+      # 2b. C test setup: a push to feature/PB-stored-computed-columns migrates only tenant 17 (Powerbase_17).
+      - name: Run C Tenant Migration (tenant 17)
+        if: ${{ github.event_name == 'push' && github.ref_name == 'feature/PB-stored-computed-columns' }}
+        env:
+          ConnectionStrings__DefaultConnection: ${{ secrets.AZURE_SQL_CONNECTION_STRING }}
+        run: |
+          echo "### 🏢 C Tenant Migration (Tenant 17)" >> $GITHUB_STEP_SUMMARY
+          set +e
+          output=$(dotnet run --project src/PowerBase.Migrator/PowerBase.Migrator.csproj --no-build --configuration Release -- migrate tenant --id 17)
+          exit_code=$?
+          set -e
+          echo "$output"
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          echo "$output" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           if [ $exit_code -ne 0 ]; then exit $exit_code; fi
 
