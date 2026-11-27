@@ -20,10 +20,15 @@ public class SearchOutboxRepository : TenantRepositoryBase, ISearchOutbox
     private const int InsertChunk = 400;   // 5 parameters per row, well under SQL Server's 2,100
     private const int AckChunk = 400;      // 4 parameters per row
 
-    public SearchOutboxRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, ILogger<SearchOutboxRepository>? logger = null)
+    /// <summary>Search:Outbox:MaxAttempts — rows at or past it are parked (the relay's own limit).</summary>
+    private readonly int _maxAttempts;
+
+    public SearchOutboxRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, ILogger<SearchOutboxRepository>? logger = null,
+        Microsoft.Extensions.Configuration.IConfiguration? configuration = null)
         : base(connectionFactory, queryContext)
     {
         _logger = logger;
+        _maxAttempts = SearchOutboxMaxAttempts.From(configuration);
     }
 
     private static async Task<bool> TableExistsAsync(IDbConnection connection, IDbTransaction? tx, CancellationToken ct)
@@ -186,12 +191,26 @@ public class SearchOutboxRepository : TenantRepositoryBase, ISearchOutbox
         await connection.OpenAsync(ct);
         if (!await TableExistsAsync(connection, null, ct)) return null;
 
-        // IX_SearchOutbox_Record (TableId, RecordPublicId) answers this without touching other tables' rows.
+        // IX_SearchOutbox_Record (TableId, RecordPublicId) answers this without touching other tables' rows. Parked rows (out of attempts,
+        // waiting for the daily sweep) are not "on their way": counting them kept a table off the index for good (UAT, Nov 2026).
         return (await connection.QueryAsync<Guid>(new CommandDefinition("""
             SELECT DISTINCT TOP (@take) RecordPublicId
             FROM meta.SearchOutbox
-            WHERE TableId = @tableId
-            """, new { tableId, take = max + 1 }, cancellationToken: ct))).AsList();
+            WHERE TableId = @tableId AND Attempts < @maxAttempts
+            """, new { tableId, take = max + 1, maxAttempts = _maxAttempts }, cancellationToken: ct))).AsList();
+    }
+
+    public async Task<IReadOnlyList<Guid>> ListParkedRecordsAsync(long tableId, int max, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        if (!await TableExistsAsync(connection, null, ct)) return [];
+
+        return (await connection.QueryAsync<Guid>(new CommandDefinition("""
+            SELECT DISTINCT TOP (@take) RecordPublicId
+            FROM meta.SearchOutbox
+            WHERE TableId = @tableId AND Attempts >= @maxAttempts
+            """, new { tableId, take = max + 1, maxAttempts = _maxAttempts }, cancellationToken: ct))).AsList();
     }
 
     public async Task<IReadOnlyList<SearchOutboxPendingRecord>?> ListPendingRecordsAsync(int max, CancellationToken ct = default)

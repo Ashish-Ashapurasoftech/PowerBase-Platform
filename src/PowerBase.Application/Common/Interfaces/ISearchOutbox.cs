@@ -55,6 +55,11 @@ public interface ISearchOutbox
     /// </summary>
     Task<IReadOnlyList<Guid>?> ListPendingRecordsAsync(long tableId, int max, CancellationToken ct = default);
 
+    /// <summary>Records of the table with an unconfirmed change that ran out of attempts (parked until the daily sweep), up to
+    /// <paramref name="max"/> + 1. <see cref="ListPendingRecordsAsync(long,int,CancellationToken)"/> leaves these out.</summary>
+    Task<IReadOnlyList<Guid>> ListParkedRecordsAsync(long tableId, int max, CancellationToken ct = default) =>
+        Task.FromResult<IReadOnlyList<Guid>>(Array.Empty<Guid>());
+
     /// <summary>The same across every table of the tenant (for global search), newest change first: up to <paramref name="max"/> records.
     /// Null when the outbox cannot tell.</summary>
     Task<IReadOnlyList<SearchOutboxPendingRecord>?> ListPendingRecordsAsync(int max, CancellationToken ct = default);

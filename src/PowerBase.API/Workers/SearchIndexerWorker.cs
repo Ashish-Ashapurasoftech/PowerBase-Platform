@@ -140,7 +140,21 @@ public class SearchIndexerWorker : BackgroundService
                     _consecutiveFullBatches = 0;
                 }
 
-                await ProcessMessageBatchAsync(messages, stoppingToken);
+                // The receiver does not renew locks by itself: a batch of field-job pages on a wide, big table (each a whole-record
+                // rewrite) could outlast the lock, so its pages were never completed and the job never moved. Keep the locks while it runs.
+                using (var renewCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken))
+                {
+                    var renewal = KeepLocksAsync(messages, renewCts.Token);
+                    try
+                    {
+                        await ProcessMessageBatchAsync(messages, stoppingToken);
+                    }
+                    finally
+                    {
+                        renewCts.Cancel();
+                        try { await renewal; } catch (OperationCanceledException) { }
+                    }
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -184,6 +198,29 @@ public class SearchIndexerWorker : BackgroundService
             await _receiver.CloseAsync();
         }
         catch { }
+    }
+
+    /// <summary>Renews the batch's message locks before they run out, until cancelled (the batch is done). A message already settled
+    /// (or whose lock is gone) is dropped from the list; renewal stops after an hour so a hung batch is still redelivered.</summary>
+    private async Task KeepLocksAsync(IReadOnlyList<ServiceBusReceivedMessage> messages, CancellationToken ct)
+    {
+        var live = messages.ToList();
+        var until = DateTimeOffset.UtcNow.AddHours(1);
+        while (live.Count > 0 && DateTimeOffset.UtcNow < until)
+        {
+            var soonest = live.Min(m => m.LockedUntil);
+            var wait = soonest - DateTimeOffset.UtcNow - TimeSpan.FromSeconds(15);
+            await Task.Delay(wait > TimeSpan.FromSeconds(1) ? wait : TimeSpan.FromSeconds(1), ct);
+            var due = live.Where(m => m.LockedUntil - DateTimeOffset.UtcNow < TimeSpan.FromSeconds(20)).ToList();
+            var lost = new System.Collections.Concurrent.ConcurrentBag<ServiceBusReceivedMessage>();
+            await Task.WhenAll(due.Select(async m =>
+            {
+                try { await _receiver.RenewMessageLockAsync(m, ct); }   // updates m.LockedUntil
+                catch (OperationCanceledException) { throw; }
+                catch (Exception) { lost.Add(m); }                     // settled already, or the lock is gone
+            }));
+            foreach (var m in lost) live.Remove(m);
+        }
     }
 
     /// <summary>Which message(s) produced a document, so a document Azure rejects can be traced back to its message.</summary>

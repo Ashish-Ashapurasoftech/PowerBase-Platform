@@ -136,15 +136,20 @@ public class RunReportQueryHandler
     /// <summary>How far the search index is behind one table, worked out once per run. <see cref="PendingIds"/>: the records (row ids)
     /// whose latest change the index may not show yet. <see cref="TooFarBehind"/>: more of them than can be re-checked, or no way to
     /// tell which, so nothing should be asked of the index.</summary>
-    /// <see cref="FieldsBeingRewritten"/>: fields a field job is still writing into the index (switched on, converted, or the current
-    /// owner of a column being emptied); the index answers for them only once the job is done. Any running job also rewrites the
-    /// free-text field of the records it passes, so quick search waits for it too.
-    private sealed record IndexLag(bool TooFarBehind, IReadOnlyCollection<long> PendingIds, IReadOnlySet<long>? FieldsBeingRewritten = null)
+    /// <see cref="FieldsBeingRewritten"/>: fields a field job has not finished writing into the index (switched on, converted, or the
+    /// current owner of a column being emptied) — parked jobs included, their field is still incomplete; the index answers for them only
+    /// once the job is done. Only those fields are kept off the index, never the whole table. <see cref="TextBeingRewritten"/>: a job
+    /// that is still moving also rewrites the free-text field of the records it passes, so quick search waits for it (not for a parked one).
+    /// <see cref="ParkedIds"/>: records among <see cref="PendingIds"/> whose change ran out of attempts. They are re-checked in SQL where
+    /// a path re-checks, but they do not stop the index from paging: nothing is moving them, so waiting would keep the table off the
+    /// index until the daily sweep.
+    private sealed record IndexLag(bool TooFarBehind, IReadOnlyCollection<long> PendingIds, IReadOnlySet<long>? FieldsBeingRewritten = null,
+        bool TextBeingRewritten = false, IReadOnlySet<long>? ParkedIds = null)
     {
         public static readonly IndexLag CaughtUp = new(false, Array.Empty<long>());
         public static readonly IndexLag Unknown = new(true, Array.Empty<long>());
-        public bool TextBeingRewritten => FieldsBeingRewritten is { Count: > 0 };
-        public bool Any => TooFarBehind || PendingIds.Count > 0 || TextBeingRewritten;
+        /// <summary>Records the index may not show yet that are still on their way (not parked).</summary>
+        public int MovingCount => ParkedIds is { Count: > 0 } ? PendingIds.Count(id => !ParkedIds.Contains(id)) : PendingIds.Count;
         public bool Rewrites(FilterGroup? tree) =>
             FieldsBeingRewritten is { Count: > 0 } && Relationships.SummaryEncryptionGuard.ConditionFieldIds(tree).Any(FieldsBeingRewritten.Contains);
     }
@@ -649,8 +654,8 @@ public class RunReportQueryHandler
         {
             if (indexLag != null) return indexLag;
             var lag = await RecordLagAsync();
-            var rewriting = await FieldsBeingRewrittenAsync();
-            return indexLag = rewriting.Count == 0 ? lag : lag with { FieldsBeingRewritten = rewriting };
+            var (rewriting, textRewriting) = await FieldsBeingRewrittenAsync();
+            return indexLag = rewriting.Count == 0 ? lag : lag with { FieldsBeingRewritten = rewriting, TextBeingRewritten = textRewriting };
         }
 
         async Task<IndexLag> RecordLagAsync()
@@ -672,7 +677,22 @@ public class RunReportQueryHandler
 
                 var ids = justIndexed.Select(r => r.Id).ToHashSet();
                 if (pending.Count > 0) ids.UnionWith(await _recordRepo.GetIdsByPublicIdsAsync(table, pending, ct));
-                return ids.Count > IndexLagRecheckLimit ? IndexLag.Unknown : new IndexLag(false, ids);
+                if (ids.Count > IndexLagRecheckLimit) return IndexLag.Unknown;
+
+                // Parked changes (out of attempts): re-checked like pending ones while few fit next to them; with more, the index is used
+                // as it is for those records (they wait for the daily sweep) rather than keeping the table off the index.
+                var room = IndexLagRecheckLimit - ids.Count;
+                var parked = await _searchOutbox!.ListParkedRecordsAsync(table.Id, room, ct);
+                HashSet<long>? parkedIds = null;
+                if (parked.Count > room)
+                    _logger.LogWarning("[RunReport] Table {TableId} has more than {Room} search outbox records parked (out of attempts); the index is used as it is for them until the daily sweep re-drives them.",
+                        table.Id, room);
+                else if (parked.Count > 0)
+                {
+                    parkedIds = (await _recordRepo.GetIdsByPublicIdsAsync(table, parked, ct)).Where(id => !ids.Contains(id)).ToHashSet();
+                    ids.UnionWith(parkedIds);
+                }
+                return new IndexLag(false, ids, ParkedIds: parkedIds);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -683,34 +703,69 @@ public class RunReportQueryHandler
         }
 
         // The fields a running field job is still writing into the index: the job's own field, and whoever owns a column it is emptying now.
-        async Task<IReadOnlySet<long>> FieldsBeingRewrittenAsync()
+        // A parked job (out of attempts) still counts for its own field — the index is incomplete for it — but not for quick search.
+        async Task<(IReadOnlySet<long> Fids, bool TextRewriting)> FieldsBeingRewrittenAsync()
         {
-            if (_searchFieldJobs == null) return new HashSet<long>();
+            if (_searchFieldJobs == null) return (new HashSet<long>(), false);
             try
             {
                 var jobs = await _searchFieldJobs.ListForTableAsync(table.Id, ct);
+                var textRewriting = jobs.Any(j => !j.Parked);
                 var fids = jobs.Select(j => j.FieldId).ToHashSet();
                 foreach (var job in jobs.Where(j => !string.IsNullOrEmpty(j.Slot)))
                     foreach (var owner in allFields.Where(f => f.Fid.HasValue
                                  && (string.Equals(f.SearchSlot, job.Slot, StringComparison.OrdinalIgnoreCase)
                                      || string.Equals(f.SearchSlotEnd, job.Slot, StringComparison.OrdinalIgnoreCase))))
                         fids.Add(owner.Fid!.Value);
-                return fids;
+                return (fids, textRewriting);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogWarning(ex, "[RunReport] Could not list the search field jobs of table {TableId}; using the index as is.", table.Id);
-                return new HashSet<long>();
+                return (new HashSet<long>(), false);
             }
         }
 
-        // The fast path pages and sorts in the index itself, so it can't take a SQL re-check of the records the index is behind on.
-        if (shouldTryFastAiPaging && (await IndexLagAsync()).Any)
+        // Why the fast path is off for this run, logged once (Information) so it shows in the deployed logs.
+        string? fastPathBlocker = FastPathBlocker();
+        string? FastPathBlocker()
         {
-            shouldTryFastAiPaging = false;
+            if (!_searchService.IsGridSearchEnabled) return "grid search disabled";
+            if (!hasSearchableFields) return "no searchable/filterable field";
+            if (!canExpressEffectiveFilter) return "filter cannot be expressed in the index";
+            if (!canSortInSearch) return "sort field not sortable in the index";
+            if (!quickSearchFitsIndex) return "exact or field-limited quick search";
+            if (!string.IsNullOrWhiteSpace(quickSearch) && roleHidesSearchableText) return "quick search with a searchable field hidden from the role";
+            if (access.RestrictToCreatedBy.HasValue) return "RestrictToCreatedBy (CreatedBy not in index)";
+            if (FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, notInSearchFids)) return "filter on a computed field not in the index";
+            if (FormulaFilterSorter.TreeContainsFormulaField(access.ViewFilter, computedFids)) return "role filter on a computed field";
+            if (totalCols.Count > 0 && !totalsExpressibleInSql) return "totals cannot be repeated in SQL";
+            return null;
         }
 
-        if (shouldTryFastAiPaging && await _searchService.IsHealthyAsync(ct))
+        // The fast path pages and sorts in the index itself, so it can't take a SQL re-check of the records the index is behind on
+        // (parked records excepted, see IndexLag.ParkedIds). A field job only stops it when the report filters, sorts or shows that field.
+        if (shouldTryFastAiPaging)
+        {
+            var lag = await IndexLagAsync();
+            if (lag.TooFarBehind) fastPathBlocker = "index too far behind (outbox pending or recent changes > " + IndexLagRecheckLimit + ")";
+            else if (lag.MovingCount > 0) fastPathBlocker = $"{lag.MovingCount} record(s) not yet indexed";
+            else if (!string.IsNullOrWhiteSpace(quickSearch) && lag.TextBeingRewritten) fastPathBlocker = "quick search while a field job is running";
+            else if (lag.FieldsBeingRewritten is { Count: > 0 } rewriting)
+            {
+                var used = FieldsUsed(allFields, selectedFields, sortFields, userFilterTree, access.ViewFilter);
+                var hit = allFields.Where(f => f.Fid.HasValue && (rewriting.Contains(f.Id) || rewriting.Contains(f.Fid.Value))
+                                               && (used is null || used.Contains(f.Fid.Value)))
+                                   .Select(f => (long)f.Fid!.Value).ToList();
+                if (hit.Count > 0) fastPathBlocker = "field job not finished on used field(s) " + string.Join(",", hit);
+            }
+            if (fastPathBlocker == null && !await _searchService.IsHealthyAsync(ct)) fastPathBlocker = "search service unhealthy";
+            if (fastPathBlocker != null) shouldTryFastAiPaging = false;
+        }
+        if (fastPathBlocker != null)
+            _logger.LogInformation("[RunReport] Fast AI paging off for table {TableId}: {Blocker}", table.Id, fastPathBlocker);
+
+        if (shouldTryFastAiPaging)
         {
             try
             {

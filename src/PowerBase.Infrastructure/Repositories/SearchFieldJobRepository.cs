@@ -15,9 +15,13 @@ public class SearchFieldJobRepository : TenantRepositoryBase, ISearchFieldJobs
 
     private const string Columns = "Id, TableId, AppId, Action, FieldId, Slot, EndSlot, AfterId";
 
-    public SearchFieldJobRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
+    private readonly int _maxAttempts;
+
+    public SearchFieldJobRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext,
+        Microsoft.Extensions.Configuration.IConfiguration? configuration = null)
         : base(connectionFactory, queryContext)
     {
+        _maxAttempts = SearchOutboxMaxAttempts.From(configuration);
     }
 
     private static async Task<bool> TableExistsAsync(IDbConnection connection, CancellationToken ct)
@@ -43,7 +47,14 @@ public class SearchFieldJobRepository : TenantRepositoryBase, ISearchFieldJobs
         await connection.OpenAsync(ct);
         if (!await TableExistsAsync(connection, ct)) return null;
 
+        // A job that starts from the first record redoes all an older identical job (same table, action, field and columns) would still
+        // do, so that one is dropped: its run stops at its next compare-and-set. Without this every rebuild of a stored field on a big
+        // table piled up another job (UAT: 457 open jobs on one 1.1M-row table, all out of attempts).
         return await connection.ExecuteScalarAsync<long>(new CommandDefinition("""
+            IF @afterId = 0
+                DELETE FROM meta.SearchFieldJob
+                WHERE TableId = @tableId AND Action = @action AND FieldId = @fieldId
+                  AND ISNULL(Slot, N'') = ISNULL(@slot, N'') AND ISNULL(EndSlot, N'') = ISNULL(@endSlot, N'');
             INSERT INTO meta.SearchFieldJob (TableId, AppId, Action, FieldId, Slot, EndSlot, AfterId)
             OUTPUT inserted.Id
             VALUES (@tableId, @appId, @action, @fieldId, @slot, @endSlot, @afterId)
@@ -103,9 +114,10 @@ public class SearchFieldJobRepository : TenantRepositoryBase, ISearchFieldJobs
         await connection.OpenAsync(ct);
         if (!await TableExistsAsync(connection, ct)) return [];
 
-        var rows = await connection.QueryAsync<Row>(new CommandDefinition(
-            $"SELECT {Columns} FROM meta.SearchFieldJob WHERE TableId = @tableId", new { tableId }, cancellationToken: ct));
-        return rows.Select(ToEntry).ToList();
+        var rows = await connection.QueryAsync<(long Id, long TableId, long AppId, byte Action, long FieldId, string? Slot, string? EndSlot, long AfterId, int Attempts)>(
+            new CommandDefinition($"SELECT {Columns}, Attempts FROM meta.SearchFieldJob WHERE TableId = @tableId", new { tableId }, cancellationToken: ct));
+        return rows.Select(r => new SearchFieldJobEntry(r.Id, r.TableId, r.AppId, (IndexAction)r.Action, r.FieldId, r.Slot, r.EndSlot, r.AfterId,
+            Parked: r.Attempts >= _maxAttempts)).ToList();
     }
 
     public async Task<int> ReleaseParkedAsync(int maxAttempts, CancellationToken ct = default)

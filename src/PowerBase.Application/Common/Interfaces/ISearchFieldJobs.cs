@@ -6,7 +6,9 @@ using PowerBase.Application.Common.Models;
 namespace PowerBase.Application.Common.Interfaces;
 
 /// <summary>A field job still running (or stopped): which field, which column to empty, and how far it has got.</summary>
-public sealed record SearchFieldJobEntry(long Id, long TableId, long AppId, IndexAction Action, long FieldId, string? Slot, string? EndSlot, long AfterId);
+/// <see cref="Parked"/>: the job ran out of attempts and waits for the daily sweep. Nothing moves it, so it does not hold up the table
+/// (quick search, other fields); its own field is still incomplete in the index.
+public sealed record SearchFieldJobEntry(long Id, long TableId, long AppId, IndexAction Action, long FieldId, string? Slot, string? EndSlot, long AfterId, bool Parked = false);
 
 /// <summary>
 /// meta.SearchFieldJob: field changes still on their way to every record in the search index. A job is recorded before its first message

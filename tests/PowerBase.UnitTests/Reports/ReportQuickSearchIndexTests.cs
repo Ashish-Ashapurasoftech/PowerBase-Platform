@@ -394,6 +394,77 @@ public class ReportQuickSearchIndexTests
         return jobs;
     }
 
+    private static ISearchFieldJobs ParkedJobOn(long fid)
+    {
+        var jobs = Substitute.For<ISearchFieldJobs>();
+        jobs.ListForTableAsync(TableId, Arg.Any<CancellationToken>())
+            .Returns(new List<SearchFieldJobEntry> { new(1, TableId, AppId, PowerBase.Application.Common.Models.IndexAction.BackfillField, fid, null, null, 500, Parked: true) });
+        return jobs;
+    }
+
+    /// <summary>Whether the fast path (the index pages the report itself, 20 rows) was tried.</summary>
+    private bool FastPathTried() => _searchService.ReceivedCalls().Any(c =>
+        c.GetMethodInfo().Name == nameof(IAzureSearchService.SearchRecordsWithDocumentsPagedAsync)
+        || (c.GetMethodInfo().Name == nameof(IAzureSearchService.SearchRecordsPagedAsync) && c.GetArguments()[5] is 20));
+
+    [Fact]
+    public async Task A_field_job_on_a_field_the_report_does_not_use_leaves_the_fast_path_on()
+    {
+        var sut = Handler(filter: DepartmentIs("Engineering"), jobs: JobRunningOn(3));
+        IndexFilterFinds(2, 2);
+
+        await sut.HandleAsync(new RunReportQuery(ReportId, 1, 20));
+
+        FastPathTried().Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_field_job_on_a_filtered_field_keeps_the_fast_path_off()
+    {
+        var sut = Handler(filter: DepartmentIs("Engineering"), jobs: JobRunningOn(Department));
+        IndexFilterFinds(2, 2);
+
+        await sut.HandleAsync(new RunReportQuery(ReportId, 1, 20));
+
+        FastPathTried().Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_parked_field_job_does_not_hold_up_quick_search()
+    {
+        var sut = Handler(jobs: ParkedJobOn(3));
+        IndexQuickSearchFinds(2, 2);
+
+        await sut.HandleAsync(new RunReportQuery(ReportId, 1, 20, QuickSearch: "Acme"));
+
+        FastPathTried().Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Parked_outbox_records_do_not_switch_the_fast_path_off()
+    {
+        var sut = Handler(filter: DepartmentIs("Engineering"), withOutbox: true);
+        _outbox.ListParkedRecordsAsync(TableId, Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult<IReadOnlyList<Guid>>(new List<Guid> { PendingRecord }));
+        IndexFilterFinds(2, 2);
+
+        await sut.HandleAsync(new RunReportQuery(ReportId, 1, 20));
+
+        FastPathTried().Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Pending_outbox_records_still_switch_the_fast_path_off()
+    {
+        var sut = Handler(filter: DepartmentIs("Engineering"), withOutbox: true);
+        OutboxHasPending();
+        IndexFilterFinds(2, 2);
+
+        await sut.HandleAsync(new RunReportQuery(ReportId, 1, 20));
+
+        FastPathTried().Should().BeFalse();
+    }
+
     [Fact]
     public async Task Quick_search_waits_in_sql_while_a_field_job_is_still_rewriting_the_tables_records()
     {
