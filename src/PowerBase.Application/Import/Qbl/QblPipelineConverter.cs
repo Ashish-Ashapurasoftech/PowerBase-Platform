@@ -2029,6 +2029,9 @@ public static class QblPipelineConverter
                 AppAndTable(withApp: true, TableKeys);
                 _usedSources.Add("export_fields");
                 Config["fieldMappings"] = Mappings(FieldInputs(source.Table, source, "export_fields", addressParts: true));
+                // Every field chosen on the Quickbase step, a field left without a value too: an Update Record step acting on this
+                // record can set any of them (as in Quickbase), though nothing is written to the ones without a value.
+                Config["outputFields"] = FieldList("export_fields", keepAddressParts: true);
             }
 
             public void UpdateRecord()
