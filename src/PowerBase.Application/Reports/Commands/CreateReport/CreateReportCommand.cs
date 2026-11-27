@@ -54,7 +54,8 @@ public record ReportOptionsCommand(
     bool DisableBulkUpdate = false,
     bool DisableGridEdit = false,
     bool ShowDescriptionOnReportPage = false,
-    Guid? QuickPeekFormId = null);
+    Guid? QuickPeekFormId = null,
+    string? RowColorJson = null);
 
 public record ChartConfigCommand(
     string ChartType,

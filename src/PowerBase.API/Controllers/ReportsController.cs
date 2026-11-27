@@ -334,15 +334,15 @@ public class ReportsController : ControllerBase
         return Ok(new ApiResponse<List<GridEditRuntimeRuleResponse>>(response));
     }
 
-    /// <summary>List all reports for an app.</summary>
+    /// <summary>List all reports for an app. <c>includeHidden=true</c> also lists Hidden reports (the dashboard designer's report picker).</summary>
     [HttpGet("apps/{appId:guid}/reports")]
     [RequireAppPermission(PermissionCodes.ReportsRead, AppAccessResolver.ByAppId)]
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<ReportResponse>>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> List(Guid appId, CancellationToken ct)
+    public async Task<IActionResult> List(Guid appId, [FromQuery] bool includeHidden = false, CancellationToken ct = default)
     {
-        var results = await _listHandler.HandleAsync(new ListReportsQuery(appId), ct);
+        var results = await _listHandler.HandleAsync(new ListReportsQuery(appId, includeHidden), ct);
         var items = results.Select(MapToResponse).ToList();
         return Ok(new ApiResponse<IReadOnlyList<ReportResponse>>(items));
     }
@@ -797,6 +797,7 @@ public class ReportsController : ControllerBase
                 DisableBulkUpdate = r.Definition.Options.DisableBulkUpdate,
                 DisableGridEdit = r.Definition.Options.DisableGridEdit,
                 ShowDescriptionOnReportPage = r.Definition.Options.ShowDescriptionOnReportPage,
+                RowColorJson = r.Definition.Options.RowColorJson,
             },
         },
         IsDefault = r.IsDefault,
@@ -877,7 +878,7 @@ public class ReportsController : ControllerBase
     private static ReportOptionsCommand? MapOptions(ReportOptionsRequest? req) =>
         req is null ? null : new ReportOptionsCommand(
             req.ColumnHeaderText, req.ShowEditIcon, req.ShowViewIcon, req.ShowQuickPeekIcon, req.DisableBulkDelete,
-            req.DisableBulkUpdate, req.DisableGridEdit, req.ShowDescriptionOnReportPage, req.QuickPeekFormId);
+            req.DisableBulkUpdate, req.DisableGridEdit, req.ShowDescriptionOnReportPage, req.QuickPeekFormId, req.RowColorJson);
 
     // ── Chart config mapping helpers ──────────────────────────────────────────
 

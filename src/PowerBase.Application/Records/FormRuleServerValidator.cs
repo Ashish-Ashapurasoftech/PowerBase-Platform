@@ -127,11 +127,20 @@ public static class FormRuleServerValidator
 
         var fieldsByFid = fields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value);
         var isCreate = oldValuesByFid is null;
+        // What the rules' CONDITIONS and expressions see. On an update the write usually carries only
+        // the fields that were edited (a normal form save sends the changed ones; Grid Edit one cell;
+        // Mass Update the chosen fields; system fields such as Date Created / Record ID / Record Owner
+        // are never sent). Evaluating a condition against just those values made every other field
+        // look blank, so "Date Created is blank" fired on a record that has a Date Created. The record's
+        // stored values fill in underneath whatever was submitted. A create has no stored values, so
+        // there it is just the submitted ones. The Require check below deliberately keeps using the
+        // submitted values only (see "a field this write never touched isn't checked").
+        var conditionValues = isCreate ? effectiveValues : MergeStoredValues(oldValuesByFid!, effectiveValues);
         // A User/MultiUser field's raw value is a numeric user id (or comma-joined ids) — 'contains'
         // is a free-text name/email search, so every id any rule's 'contains' condition might need
         // is resolved to a display name once, up front, rather than per-condition (mirrors the
         // frontend's resolveUserDisplayNames, called from form-renderer.component.ts's conditionsMet).
-        var userNames = await ResolveContainsUserNamesAsync(rules, fieldsByFid, effectiveValues, userRepo, ct);
+        var userNames = await ResolveContainsUserNamesAsync(rules, fieldsByFid, conditionValues, userRepo, ct);
         // The current user's app roles — a user can hold several (direct + group-derived), so a role
         // condition compares against the whole set. Fetched only when some rule actually has a role
         // condition, so writes to tables without one pay nothing. (This used to compare against the
@@ -153,11 +162,11 @@ public static class FormRuleServerValidator
             bool met;
             if (rule.IsExpressionMode)
             {
-                met = await EvaluateExpressionConditionAsync(rule, table, fields, effectiveValues, tableRepo, fieldRepo, recordRepo, engine, userRoles, ct);
+                met = await EvaluateExpressionConditionAsync(rule, table, fields, conditionValues, tableRepo, fieldRepo, recordRepo, engine, userRoles, ct);
             }
             else
             {
-                met = ConditionsMet(rule, effectiveValues, oldValuesByFid, userRoles, currentUserId, fieldsByFid, userNames);
+                met = ConditionsMet(rule, conditionValues, oldValuesByFid, userRoles, currentUserId, fieldsByFid, userNames);
             }
             if (!met) continue;
 
@@ -175,7 +184,7 @@ public static class FormRuleServerValidator
                 {
                     string? message = null;
                     if (action.IsExpressionValue && !string.IsNullOrWhiteSpace(action.ActionValue))
-                        message = await EvaluateExpressionActionValueAsync(action.ActionValue, table, fields, effectiveValues, tableRepo, fieldRepo, recordRepo, engine, ct);
+                        message = await EvaluateExpressionActionValueAsync(action.ActionValue, table, fields, conditionValues, tableRepo, fieldRepo, recordRepo, engine, ct);
                     else if (!string.IsNullOrWhiteSpace(action.ActionValue))
                         message = action.ActionValue;
                     message ??= $"This change is not allowed ('{rule.Name}').";
@@ -212,6 +221,16 @@ public static class FormRuleServerValidator
         }
 
         return violations;
+    }
+
+    /// <summary>The record's stored values with the submitted ones laid over them (a submitted value wins,
+    /// including an explicit null/blank).</summary>
+    private static Dictionary<long, object?> MergeStoredValues(
+        IReadOnlyDictionary<long, object?> stored, IReadOnlyDictionary<long, object?> submitted)
+    {
+        var merged = new Dictionary<long, object?>(stored);
+        foreach (var kvp in submitted) merged[kvp.Key] = kvp.Value;
+        return merged;
     }
 
     private static bool ConditionsMet(

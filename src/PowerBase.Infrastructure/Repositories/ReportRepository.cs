@@ -140,8 +140,10 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
         WHERE t.AppId = @appId
           AND r.IsDeleted = 0
           AND r.IsDefaultSettingsRecord = 0
+          AND t.IsDeleted = 0 -- a deleted table's reports stay in the database; they must not be listed (every table-scoped query here excludes them too)
           AND (
               r.Visibility = 'Shared'
+              OR (@includeHidden = 1 AND r.Visibility = 'Hidden') -- only when asked for (dashboard designer): hidden reports are unlisted everywhere else
               OR (r.Visibility = 'Personal' AND r.OwnerId = @userId)
               OR (r.Visibility IN ('MyRole', 'SpecificRoles', 'Role') AND EXISTS (
                   SELECT 1 FROM meta.AppRoleReport arr
@@ -338,11 +340,11 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
         return cached.Value;
     }
 
-    public async Task<IReadOnlyList<Report>> ListByAppAsync(long appId, CancellationToken ct = default)
+    public async Task<IReadOnlyList<Report>> ListByAppAsync(long appId, CancellationToken ct = default, bool includeHidden = false)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var results = await connection.QueryAsync<Report>(
-            new CommandDefinition(ListByAppSql, new { appId, userId = QueryContext.UserId }, cancellationToken: ct));
+            new CommandDefinition(ListByAppSql, new { appId, userId = QueryContext.UserId, includeHidden = includeHidden ? 1 : 0 }, cancellationToken: ct));
         return results.AsList();
     }
 
