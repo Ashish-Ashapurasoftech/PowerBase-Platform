@@ -7,7 +7,7 @@ namespace PowerBase.API.QuickbaseApi.V1.Controllers;
 
 /// <summary>Quickbase-compatible "Reports" API, version 1.</summary>
 [Route(QbV1.ROUTE_PREFIX + "/reports")]
-[QbRestExceptionFilter, QbRequireAuth, QbRealmHostname]
+[QbRestExceptionFilter, QbRequireAuth, QbRealmHostname, QbSortedJson]
 public sealed class QbReportsController : ControllerBase
 {
     private readonly QbReportService _reports;
@@ -49,5 +49,16 @@ public sealed class QbReportsController : ControllerBase
         if (topValue is <= 0)
             throw QbApiException.InvalidRequest("Report parameter 'top' must be greater than zero.");
         return Ok(await _reports.RunReportAsync(report, table, skipValue, topValue, ct));
+    }
+
+    /// <summary>Get reports for a table (Quickbase getTableReports): GET /v1/reports?tableId={tableId}.</summary>
+    [HttpGet]
+    [ProducesResponseType(typeof(IReadOnlyList<QbReportResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(QbErrorBody), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(QbErrorBody), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetTableReports([FromQuery] string? tableId, CancellationToken ct)
+    {
+        var table = await _ids.TableAsync(tableId, "tableId", ct);
+        return Ok(await _reports.GetTableReportsAsync(table, ct));
     }
 }

@@ -6,7 +6,7 @@ namespace PowerBase.API.QuickbaseApi.V1.Controllers;
 
 /// <summary>Quickbase-compatible "Files" API, version 1.</summary>
 [Route(QbV1.ROUTE_PREFIX + "/files")]
-[QbRestExceptionFilter, QbRequireAuth, QbRealmHostname]
+[QbRestExceptionFilter, QbRequireAuth, QbRealmHostname, QbSortedJson]
 public sealed class QbFilesController : ControllerBase
 {
     private readonly QbFileService _files;

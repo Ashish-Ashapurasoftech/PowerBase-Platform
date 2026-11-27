@@ -27,9 +27,10 @@ public sealed class QbUpsertMetadata
     /// <summary>Quickbase leaves "lineErrors" out of the response when every row succeeded.</summary>
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public IDictionary<string, IReadOnlyList<string>>? LineErrors { get; init; }
+    /// <summary>Quickbase writes the metadata keys in this (alphabetical) order.</summary>
+    public int TotalNumberOfRecordsProcessed { get; init; }
     public IReadOnlyList<long> UnchangedRecordIds { get; init; } = Array.Empty<long>();
     public IReadOnlyList<long> UpdatedRecordIds { get; init; } = Array.Empty<long>();
-    public int TotalNumberOfRecordsProcessed { get; init; }
 }
 
 /// <summary>DELETE /v1/records body (Quickbase deleteRecords).</summary>

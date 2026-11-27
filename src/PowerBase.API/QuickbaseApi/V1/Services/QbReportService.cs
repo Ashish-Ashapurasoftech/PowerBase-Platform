@@ -60,6 +60,23 @@ public sealed class QbReportService
         return (report, table);
     }
 
+    /// <summary>
+    /// getTableReports: every report of the table the caller can see, oldest first (Quickbase lists by report id), each
+    /// in the getReport shape. The table's hidden "Default Report Settings" record is not a report and is left out.
+    /// </summary>
+    public async Task<IReadOnlyList<QbReportResponse>> GetTableReportsAsync(Guid tableId, CancellationToken ct)
+    {
+        var settings = await _reports.GetDefaultSettingsRecordAsync(tableId, ct);
+        var list = new List<QbReportResponse>();
+        foreach (var r in (await _reports.ListByTableAsync(tableId, ct)).OrderBy(r => r.Id))
+        {
+            if (settings is not null && r.Id == settings.Id) continue;
+            try { list.Add(await GetReportAsync(r.PublicId, tableId, ct)); }
+            catch (QbApiException e) when (e.StatusCode is 403 or 404) { } // not visible to this caller
+        }
+        return list;
+    }
+
     public async Task<QbReportResponse> GetReportAsync(Guid reportId, Guid tableId, CancellationToken ct)
     {
         var (report, table) = await LoadAsync(reportId, tableId, PermissionCodes.ReportsRead, ct);
@@ -299,6 +316,9 @@ public sealed class QbReportService
             }
             return cells;
         }).ToList();
+        if (isTable)
+            await _userValues.EnrichNamedUsersAsync(await _apps.GetPublicIdByIdAsync(table.AppId, ct), data,
+                QbRecordService.NamedUserKeys(columns.Select(c => c.FieldId).Distinct(), byFid, refTypes), ct);
 
         return new QbRunReportResponse
         {

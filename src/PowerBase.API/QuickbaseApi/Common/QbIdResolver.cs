@@ -105,7 +105,14 @@ public sealed class QbIdResolver
                 // The app listing leaves out the table's "Default Report Settings" report; it is still a runnable report.
                 if (report is null && await _reports.GetDefaultSettingsRecordAsync(tablePublicId, ct) is { } settings && settings.Id == n)
                     report = settings;
-                return report?.PublicId ?? throw QbApiException.NotFound($"Report with Id \"{n}\" not found.");
+                if (report is not null) return report.PublicId;
+                // A Quickbase caller sends the table's own report number (List All = 1, List Changes = 2, then 5, 6, ...),
+                // the same numbers API_DoQuery qid uses (live realm: GET /v1/reports/1?tableId=... is List All).
+                var all = await _reports.ListByTableIncludingDeletedAsync(table.Id, ct) ?? Array.Empty<PowerBase.Domain.Entities.Report>();
+                var hit = Xml.QbXmlQueryActions.QueryNumbers(all).FirstOrDefault(p => p.Value == n);
+                if (hit.Value == n && all.FirstOrDefault(r => r.PublicId == hit.Key) is { IsDeleted: false } byNumber)
+                    return byNumber.PublicId;
+                throw QbApiException.NotFound($"Report with Id \"{n}\" not found.");
             }
             case IdKind.Missing: throw Required(param);
             default: throw Bad(raw!, param);

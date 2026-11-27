@@ -7,7 +7,7 @@ namespace PowerBase.API.QuickbaseApi.V1.Controllers;
 
 /// <summary>Quickbase-compatible "Records" API, version 1.</summary>
 [Route(QbV1.ROUTE_PREFIX + "/records")]
-[QbRestExceptionFilter, QbRequireAuth, QbRealmHostname]
+[QbRestExceptionFilter, QbRequireAuth, QbRealmHostname, QbSortedJson]
 public sealed class QbRecordsController : ControllerBase
 {
     private readonly QbRecordService _records;

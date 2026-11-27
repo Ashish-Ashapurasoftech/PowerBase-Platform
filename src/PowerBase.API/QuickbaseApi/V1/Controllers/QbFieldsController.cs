@@ -7,7 +7,7 @@ namespace PowerBase.API.QuickbaseApi.V1.Controllers;
 
 /// <summary>Quickbase-compatible "Fields" API, version 1.</summary>
 [Route(QbV1.ROUTE_PREFIX + "/fields")]
-[QbRestExceptionFilter, QbRequireAuth, QbRealmHostname]
+[QbRestExceptionFilter, QbRequireAuth, QbRealmHostname, QbSortedJson]
 public sealed class QbFieldsController : ControllerBase
 {
     private readonly QbSchemaService _schema;
@@ -30,5 +30,20 @@ public sealed class QbFieldsController : ControllerBase
         var id = await _ids.TableAsync(tableId, "tableId", ct);
         var withPerms = QbQueryParams.ParseBool(includeFieldPerms, "includeFieldPerms") ?? false;
         return Ok(await _schema.GetFieldsAsync(id, withPerms, ct));
+    }
+
+    /// <summary>Get a field (Quickbase getField): GET /v1/fields/{fieldId}?tableId={tableId}&amp;includeFieldPerms={bool}.</summary>
+    [HttpGet("{fieldId}")]
+    [ProducesResponseType(typeof(QbFieldResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(QbErrorBody), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(QbErrorBody), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetField(string fieldId, [FromQuery] string? tableId, [FromQuery] string? includeFieldPerms, CancellationToken ct)
+    {
+        var id = await _ids.TableAsync(tableId, "tableId", ct);
+        if (!long.TryParse(fieldId, out var fid)) throw QbApiException.BadRequest("'fieldId' must be integer");
+        var withPerms = QbQueryParams.ParseBool(includeFieldPerms, "includeFieldPerms") ?? false;
+        var field = (await _schema.GetFieldsAsync(id, withPerms, ct)).FirstOrDefault(f => f.Id == fid)
+            ?? throw new QbApiException(404, "No such field", $"Field with fid {fid} not found");
+        return Ok(field);
     }
 }
