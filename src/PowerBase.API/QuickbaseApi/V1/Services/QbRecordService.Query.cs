@@ -1,3 +1,4 @@
+using PowerBase.Application.Common.Interfaces;
 using System.Globalization;
 using System.Text.Json;
 using PowerBase.API.QuickbaseApi.Common;
@@ -48,22 +49,39 @@ public sealed partial class QbRecordService
         // every field the caller may see.
         var select = (request.Select ?? new()).Select(e => (long)QbIds.ParseFid(e.ValueKind == JsonValueKind.Number ? e.GetRawText() : e.GetString(), "select"))
             .Distinct().ToList();
-        foreach (var fid in select)
-            if (!byFid.ContainsKey(fid) && fid != QbIds.RECORD_ID_FID) throw QbApiException.BadRequest($"Unknown field with Id \"{fid}\".");
-        if (select.Count == 0)
-            select = fields.Where(f => f.Fid.HasValue && !f.IsDeleted && visible.Contains(f.Fid.Value)).Select(f => (long)f.Fid!.Value)
+        // Live realm: a select id the table does not have is skipped (200), not an error.
+        select = select.Where(fid => byFid.ContainsKey(fid) || fid == QbIds.RECORD_ID_FID).ToList();
+        if (select.Count == 0 && (request.Select is null || request.Select.Count == 0))
+            // Live realm: no select = the table's default columns (fields shown by default; the built-in fields 1-5 are not).
+            select = fields.Where(f => f.Fid.HasValue && !f.IsDeleted && visible.Contains(f.Fid.Value) && !QbFieldShape.IsSystem(f)
+                    && QbFieldShape.AppearsByDefault(f)).Select(f => (long)f.Fid!.Value)
                 .Distinct().OrderBy(f => f).ToList();
         var returned = select.Where(visible.Contains).ToList(); // a hidden field is left out, as in Quickbase
 
         var sort = SortOf(request, byFid);
         foreach (var s in sort)
             if (!byFid.ContainsKey(s.FieldId) && s.FieldId != QbIds.RECORD_ID_FID) throw QbApiException.BadRequest($"Unknown field with Id \"{s.FieldId}\".");
+        // Live realm: rows that tie on the requested sort keep the table's default sort (List All), then Record ID# ascending.
+        if (sort.Count > 0)
+        {
+            foreach (var d in await DefaultSortAsync(table.PublicId, ct))
+                if (byFid.ContainsKey(d.FieldId) && sort.All(s => s.FieldId != d.FieldId)) sort.Add(d);
+            if (sort.All(s => s.FieldId != QbIds.RECORD_ID_FID)) sort.Add(new SortSpec { FieldId = QbIds.RECORD_ID_FID });
+        }
 
         var knownFids = fields.Where(f => f.Fid.HasValue).Select(f => f.Fid!.Value).ToHashSet();
         var appRow = await _apps.GetByIdAsync(table.AppId, ct);
         string? QbType(long fid) => byFid.TryGetValue(fid, out var tf) ? QbFieldPropertiesBuilder.TypeOf(tf).FieldType : null;
-        FilterGroup? where = string.IsNullOrWhiteSpace(request.Where) ? null
-            : QbWhereParser.Parse(request.Where, knownFids, QbType, QbTimeZone.OfApp(appRow.Formatting));
+        FilterGroup? where;
+        try
+        {
+            where = string.IsNullOrWhiteSpace(request.Where) ? null
+                : QbWhereParser.Parse(request.Where, knownFids, QbType, QbTimeZone.OfApp(appRow.Formatting));
+        }
+        catch (QbApiException e) when (e.StatusCode == 400 && e.Description.StartsWith("Invalid query", StringComparison.Ordinal))
+        {
+            throw new QbApiException(400, "Invalid request", "Criteria is invalid.");   // live realm wording for a query it cannot read
+        }
         var filter = new FilterGroup { Logic = "AND" };
         if (where is not null) filter.Nodes.Add(new FilterNode { Group = where });
         if (access.ViewFilter is { } vf) filter.Nodes.Add(new FilterNode { Group = vf });
@@ -79,6 +97,11 @@ public sealed partial class QbRecordService
         var inMemory = EncryptedRowFilter.TouchesEncrypted(filterTree, fields, appEncrypted)
                        || phoneFids.Count > 0
                        || filterFids.Any(Computed) || sort.Any(s => Computed(s.FieldId) || Encrypted(s.FieldId));
+        // Quickbase orders a choice field by its choice list and a blank number just above 0. SQL cannot, so such a sort is done
+        // in memory — for tables up to QB_ORDER_MAX_ROWS rows (bigger ones keep the plain SQL order).
+        if (!inMemory && sort.Count > 0
+            && await _records.CountAsync(table, fields, filterTree, access.RestrictToCreatedBy, ct) <= QB_ORDER_MAX_ROWS)
+            inMemory = true;
 
         int total;
         List<(long Rid, Guid PublicId)> page;
@@ -134,7 +157,8 @@ public sealed partial class QbRecordService
                     if (matches is not null && !matches.Contains(key.Rid)) continue;
                     var slim = new Dictionary<string, object?> { ["Id"] = key.Rid, ["PublicId"] = key.PublicId };
                     var all = Merge(EncryptedRowFilter.ValuesByFid(rows[i], fields), computed[i], rows[i]);
-                    kept.Add((slim, sort.Count == 0 ? new Dictionary<long, object?>() : sort.ToDictionary(s => s.FieldId, s => all.GetValueOrDefault(s.FieldId))));
+                    kept.Add((slim, sort.Count == 0 ? new Dictionary<long, object?>() : sort.ToDictionary(s => s.FieldId,
+                        s => byFid.TryGetValue(s.FieldId, out var sf) ? QbOrderValue(sf, all.GetValueOrDefault(s.FieldId)) : all.GetValueOrDefault(s.FieldId))));
                 }
                 if (rows.Count < memoryPage) break;
             }
@@ -232,6 +256,62 @@ public sealed partial class QbRecordService
     }
 
     /// <summary>Blank first (ascending), then numbers numerically, dates by time, text case-insensitively.</summary>
+    /// <summary>Rows considered by one in-memory Quickbase-order sort at most.</summary>
+    public const int QB_ORDER_MAX_ROWS = 20000;
+
+    /// <summary>1 = choice field (ordered by its choice list), 2 = number whose blank counts just above 0; 0 = plain order.</summary>
+    public static int QbOrderKind(AppField f)
+    {
+        var t = QbFieldPropertiesBuilder.TypeOf(f);
+        if (t.Mode != "") return 0;
+        if (t.FieldType == "text-multiple-choice" && QbFieldPropertiesBuilder.BuildProperties(f).GetValueOrDefault("choices") is IEnumerable<string>) return 1;
+        if (t.FieldType is "numeric" or "currency" or "percent" && QbFieldShape.Properties(f, t).GetValueOrDefault("blankIsZero") is true) return 2;
+        if (t.FieldType == "checkbox") return 3;
+        return 0;
+    }
+
+    /// <summary>The sort value Quickbase uses (live realm): a choice's position in its list (blank first), a blank number = 0 + ε.</summary>
+    public static object? QbOrderValue(AppField f, object? value)
+    {
+        switch (QbOrderKind(f))
+        {
+            case 1:
+            {
+                var text = value?.ToString();
+                if (string.IsNullOrEmpty(text)) return -1m;
+                var choices = ((IEnumerable<string>)QbFieldPropertiesBuilder.BuildProperties(f)["choices"]!).ToList();
+                var i = choices.FindIndex(c => string.Equals(c, text, StringComparison.Ordinal));
+                return i >= 0 ? (decimal)i : choices.Count + 0.5m;   // a value outside the list: after the listed ones
+            }
+            case 2:
+                return value is null || value is string { Length: 0 } ? 0.0000000001m : value;
+            case 3:
+                return value switch                                            // a blank box sorts as unchecked
+                {
+                    bool b => b ? 1m : 0m,
+                    string sv => sv.Trim() is "1" or "true" or "True" ? 1m : 0m,
+                    IConvertible c => Convert.ToDecimal(c, CultureInfo.InvariantCulture) != 0 ? 1m : 0m,
+                    _ => 0m,
+                };
+            default:
+                return value;
+        }
+    }
+
+    /// <summary>The table's default (List All) report sort, used to break ties as Quickbase does.</summary>
+    private async Task<IReadOnlyList<SortSpec>> DefaultSortAsync(Guid tablePublicId, CancellationToken ct)
+    {
+        if (_services?.GetService(typeof(IReportRepository)) is not IReportRepository reports
+            || _services.GetService(typeof(QbReportService)) is not QbReportService reportService) return Array.Empty<SortSpec>();
+        try
+        {
+            if (await reports.GetDefaultByTableAsync(tablePublicId, ct) is not { } def) return Array.Empty<SortSpec>();
+            var r = await reportService.GetReportAsync(def.PublicId, tablePublicId, ct);
+            return (r.Query.SortBy ?? Array.Empty<QbSortBy>()).Select(s => new SortSpec { FieldId = s.FieldId, Desc = s.Order == "DESC" }).ToList();
+        }
+        catch (Exception e) when (e is not OperationCanceledException) { return Array.Empty<SortSpec>(); }
+    }
+
     private sealed class SortComparer : IComparer<object?>
     {
         public static readonly SortComparer Instance = new();
@@ -243,7 +323,8 @@ public sealed partial class QbRecordService
             if (b is null) return 1;
             if (a is decimal da && b is decimal db) return da.CompareTo(db);
             if (a is DateTime ta && b is DateTime tb) return ta.CompareTo(tb);
-            return string.Compare(a.ToString(), b.ToString(), StringComparison.OrdinalIgnoreCase);
+            // Live realm: text sorts by letters, accents with their base letter (Ü with U), case ignored.
+            return string.Compare(a.ToString(), b.ToString(), CultureInfo.InvariantCulture, CompareOptions.IgnoreCase);
         }
 
         private static object? Norm(object? v) => v switch

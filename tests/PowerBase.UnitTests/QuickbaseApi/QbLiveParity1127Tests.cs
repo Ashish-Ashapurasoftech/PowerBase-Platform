@@ -79,3 +79,75 @@ public class QbLiveParityEncodingTests
         PowerBase.API.QuickbaseApi.V1.Services.QbFieldPropertiesBuilder.TypeOf(f).FieldType.Should().Be("multitext");
     }
 }
+
+/// <summary>Rules measured with every API on the parity tables (2026-11-27, second pass).</summary>
+public class QbLiveParityAllApiTests
+{
+    [Theory]
+    [InlineData("03-01-2026", true, "2026-01-03")]
+    [InlineData("03-01-2026", false, "2026-03-01")]
+    [InlineData("03-15-2026", true, "2026-03-15")]   // cannot be day-first: falls back to month-first
+    [InlineData("15-03-26", true, "2026-03-15")]
+    public void ParseDate_HonoursDayFirstApps(string text, bool dayFirst, string expected) =>
+        QbXmlRecordActions.ParseDate(text, dayFirst)!.Value.ToString("yyyy-MM-dd").Should().Be(expected);
+
+    [Fact]
+    public void Options_AcceptQuickbaseSkpSpelling()
+    {
+        var o = QbXmlQueryActions.ParseOptions("num-2.skp-1");
+        o.Num.Should().Be(2);
+        o.Skip.Should().Be(1);
+    }
+
+    [Fact]
+    public void ErrorStatus_InsufficientPermissionsIs403() =>
+        QbXmlErrors.HttpStatus(QbXmlErrors.INSUFFICIENT_PERMISSIONS).Should().Be(403);
+
+    [Fact]
+    public void BlankText_IsStoredAsNoValue()
+    {
+        var f = new PowerBase.Domain.Entities.AppField { TypeCode = "Text", Fid = 6 };
+        PowerBase.API.QuickbaseApi.V1.Services.QbRecordService.CheckValue(f, "").Should().BeNull();
+    }
+}
+
+/// <summary>Sort and query rules measured on the parity tables (2026-11-27, third pass).</summary>
+public class QbLiveParitySortQueryTests
+{
+    private static PowerBase.Domain.Entities.AppField F(string type, string? settings = null) =>
+        new() { TypeCode = type, Fid = 9, Settings = settings };
+
+    [Fact]
+    public void Choice_SortsByItsListWithBlankFirst()
+    {
+        var f = F("SingleSelect", "{\"options\":[\"Red\",\"Green\",\"Blue\"]}");
+        var vals = new[] { "Blue", "", "Red", "Green" }.OrderBy(v => (decimal)PowerBase.API.QuickbaseApi.V1.Services.QbRecordService.QbOrderValue(f, v)!).ToList();
+        vals.Should().Equal("", "Red", "Green", "Blue");
+    }
+
+    [Fact]
+    public void BlankNumber_SortsJustAboveZero()
+    {
+        var f = F("Number");
+        var blank = (decimal)PowerBase.API.QuickbaseApi.V1.Services.QbRecordService.QbOrderValue(f, null)!;
+        blank.Should().BeGreaterThan(0m).And.BeLessThan(0.001m);
+    }
+
+    [Fact]
+    public void BlankCheckbox_SortsAsUnchecked() =>
+        PowerBase.API.QuickbaseApi.V1.Services.QbRecordService.QbOrderValue(F("Boolean"), null).Should().Be(0m);
+
+    [Fact]
+    public void Where_DateMilliseconds_BecomeTheInstant()
+    {
+        var tree = QbWhereParser.Parse("{16.OAF.1773568800000}", new HashSet<int> { 16 }, _ => "timestamp", null);
+        tree.Nodes[0].Condition!.Value.Should().Be("2026-03-15T10:00:00.000Z");
+    }
+
+    [Fact]
+    public void Where_CheckboxZero_AlsoFindsBlank()
+    {
+        var tree = QbWhereParser.Parse("{19.EX.0}", new HashSet<int> { 19 }, _ => "checkbox", null);
+        tree.Nodes[0].Group!.Nodes.Select(n => n.Condition!.Operator).Should().Equal("eq", "isEmpty");
+    }
+}

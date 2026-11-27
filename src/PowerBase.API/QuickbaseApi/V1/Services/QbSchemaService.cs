@@ -107,7 +107,7 @@ public sealed class QbSchemaService
 
         var visible = HelperFields.Visible(access.Unrestricted ? allFields : access.VisibleFields)
             .Where(f => f.Fid.HasValue)
-            .OrderBy(f => f.Fid)
+            .OrderBy(f => QbFieldShape.IsSystem(f) ? 1 : 0).ThenBy(f => f.Fid)   // live realm: built-in fields 1-5 come last
             .ToList();
 
         Dictionary<long, List<QbFieldPermission>>? perms = null;

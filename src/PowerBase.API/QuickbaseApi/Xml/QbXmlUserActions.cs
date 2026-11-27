@@ -128,6 +128,10 @@ public sealed class QbXmlUserActions
 
     public async Task<QbXmlResponse> GetUserInfoAsync(QbXmlRequest req, CancellationToken ct)
     {
+        // Live realm: API_GetUserInfo is a realm call (/db/main); sent to an application id it is refused (HTTP 400).
+        if (!string.IsNullOrWhiteSpace(req.DbId) && !string.Equals(req.DbId.Trim(), "main", StringComparison.OrdinalIgnoreCase))
+            throw new QbXmlException(QbXmlErrors.NO_SUCH_OPERATION, "No Such Operation",
+                "This operation is not defined for applications, however, the URL contained an application ID. Please check the URL.") { Status = 400 };
         User user;
         var email = req.Get("email");
         if (string.IsNullOrWhiteSpace(email))

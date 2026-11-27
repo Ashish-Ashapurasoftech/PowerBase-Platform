@@ -60,7 +60,7 @@ public sealed class QbXmlController : ControllerBase
                 _logger.LogError(ex, "Quickbase XML call {Action} on {DbId} failed", action, dbid);
             var errorXml = new QbXmlResponse(action).ToXml(req?.Udata, err.Code, err.Message, err.Detail, err.Extra);
             if (QbXmlQueryActions.UsesCrlf(action)) errorXml = QbXmlQueryActions.ToCrlf(errorXml);
-            return Xml(errorXml, QbXmlErrors.HttpStatus(err.Code));
+            return Xml(errorXml, err.Status ?? QbXmlErrors.HttpStatus(err.Code));
         }
     }
 

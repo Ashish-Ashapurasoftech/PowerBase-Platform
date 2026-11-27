@@ -55,6 +55,14 @@ public sealed class QbUserValueResolver
         var distinct = users.GroupBy(u => u.UserPublicId).Select(g => g.First()).ToList();
         object? Fill(object? v)
         {
+            // A file value: each version's creator is a user object too (live realm: email / id / name / userName).
+            if (v is IDictionary<string, object?> file && file.TryGetValue("versions", out var vs) && vs is System.Collections.IList versions)
+            {
+                foreach (var ver in versions)
+                    if (ver is IDictionary<string, object?> vd && vd.TryGetValue("creator", out var creator) && creator is IDictionary<string, object?>)
+                        vd["creator"] = Fill(creator);
+                return v;
+            }
             if (v is not IDictionary<string, object?> map || (map.TryGetValue("id", out var id) && id is not null)) return v;
             var name = map.TryGetValue("name", out var n) ? n as string : null;
             var email = map.TryGetValue("email", out var em) ? em as string : null;

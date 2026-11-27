@@ -31,9 +31,11 @@ public sealed class QbReportService
     private readonly IAppRepository _apps;
     private readonly QbReferenceTypes _referenceTypes;
 
+    private readonly IServiceProvider? _services;
     public QbReportService(IReportRepository reports, IAppTableRepository tables, IAppFieldRepository fields, IUserRepository users,
-        IAppAccessService access, GetReportQueryHandler getReport, RunReportQueryHandler runReport, QbUserValueResolver userValues, IAppRepository apps, QbReferenceTypes referenceTypes)
+        IAppAccessService access, GetReportQueryHandler getReport, RunReportQueryHandler runReport, QbUserValueResolver userValues, IAppRepository apps, QbReferenceTypes referenceTypes, IServiceProvider? services = null)
     {
+        _services = services;
         _referenceTypes = referenceTypes;
         _apps = apps;
         _userValues = userValues;
@@ -239,6 +241,37 @@ public sealed class QbReportService
         var (report, table) = await LoadAsync(reportId, tableId, "member", ct);
         var start = skip ?? 0;
         var take = Math.Min(top ?? DEFAULT_TOP, MAX_TOP);
+
+        // A plain table report runs as the same query API_DoQuery qid= runs (filter, columns, sort), so its rows come back in
+        // Quickbase's order: choice lists, blank numbers / boxes, ties by the table's default sort then Record ID#.
+        if (report.ReportType == "Table" && _services?.GetService(typeof(QbRecordService)) is QbRecordService records)
+        {
+            var shape = await GetReportAsync(reportId, tableId, ct);
+            if (shape.Query.FormulaFields.Count == 0 && shape.Query.GroupBy is not { Count: > 0 })
+            {
+                var request = new QbQueryRequest
+                {
+                    From = QbIds.Format(tableId),
+                    Select = (shape.Query.Fields ?? Array.Empty<long>()).Select(f => System.Text.Json.JsonSerializer.SerializeToElement(f)).ToList(),
+                    Where = string.IsNullOrWhiteSpace(shape.Query.Filter) ? null : shape.Query.Filter,
+                    SortBy = shape.Query.SortBy is { Count: > 0 } sb
+                        ? System.Text.Json.JsonSerializer.SerializeToElement(sb.Select(s => new { fieldId = s.FieldId, order = s.Order }))
+                        : System.Text.Json.JsonSerializer.SerializeToElement(false),
+                    Options = new QbQueryOptions { Skip = start, Top = take },
+                };
+                var run = await records.QueryAsync(request, ct);
+                return new QbRunReportResponse
+                {
+                    Data = run.Data,
+                    Fields = run.Fields,
+                    Metadata = new QbRunMetadata
+                    {
+                        TotalRecords = run.Metadata.TotalRecords, NumRecords = run.Metadata.NumRecords, NumFields = run.Metadata.NumFields,
+                        Skip = start, Top = top,
+                    },
+                };
+            }
+        }
 
         var fields = await _fields.ListByTableAsync(table.Id, ct);
         var byFid = fields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
