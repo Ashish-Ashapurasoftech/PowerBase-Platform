@@ -82,9 +82,9 @@ public static class PermissionCodes
     };
 
     /// <summary>
-    /// The table-scoped permissions the API enforces per table. The *:read ones are left out on purpose: the same codes
-    /// load a table's fields, reports and forms for everyday use, so a per-table "View" only gates the builder screens
-    /// (enforced in the client) and never blocks working with the table's records.
+    /// The table-scoped permissions the API always enforces per table. The *:read ("View") ones are enforced per table only
+    /// for requests from builder screens or from outside the app (PowerBase.Application.Common.PageContext): the same
+    /// codes load a table's fields, reports and forms on data pages, where Data Permissions decide.
     /// </summary>
     public static readonly IReadOnlySet<string> TableScopedEnforced = new HashSet<string>
     {

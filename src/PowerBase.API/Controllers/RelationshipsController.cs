@@ -45,6 +45,9 @@ public class RelationshipsController : ControllerBase
     private readonly UpdateLookupSourceCommandHandler _updateLookupSource;
     private readonly GetLookupSourceOptionsQueryHandler _lookupSourceOptions;
 
+    /// <summary>Per-table Fields / Forms checks for relationship actions (Roles > Advanced Permissions).</summary>
+    private RelationshipTableAccess TableAccess => HttpContext.RequestServices.GetRequiredService<RelationshipTableAccess>();
+
     public RelationshipsController(
         CreateRelationshipCommandHandler createHandler,
         DeleteRelationshipCommandHandler deleteHandler,
@@ -95,6 +98,13 @@ public class RelationshipsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Create(Guid appId, [FromBody] CreateRelationshipRequest request, CancellationToken ct)
     {
+        // Creating a relationship is one action that changes both tables, so every part needs its permission there:
+        // reference field + lookups on the child and Report Link / "Add …" fields on the parent (Create Fields on both),
+        // the child's "Embedded for {parent}" report (Create Reports on the child) and the "{child} details" section
+        // on the parent's forms (Update Forms on the parent). Roles > Advanced Permissions.
+        await TableAccess.RequireOnTablesAsync(request.ParentTablePublicId, request.ChildTablePublicId, PermissionCodes.FieldsCreate, ct);
+        await TableAccess.RequireOnTablesAsync(request.ChildTablePublicId, request.ChildTablePublicId, PermissionCodes.ReportsCreate, ct);
+        await TableAccess.RequireOnTablesAsync(request.ParentTablePublicId, request.ParentTablePublicId, PermissionCodes.FormsUpdate, ct);
         var command = new CreateRelationshipCommand(
             appId,
             request.ParentTablePublicId,
@@ -160,6 +170,7 @@ public class RelationshipsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> AddLookups(Guid appId, Guid id, [FromBody] AddLookupFieldsRequest request, CancellationToken ct)
     {
+        await TableAccess.RequireAsync(id, PermissionCodes.FieldsCreate, RelationshipTableAccess.Side.Child, ct); // lookups live on the child
         var command = new AddLookupFieldsCommand(id,
             request.Lookups.Select(l => new AddLookupSpec(l.SourceFid, l.Label)).ToList());
         var result = await _addLookups.HandleAsync(command, ct);
@@ -175,6 +186,7 @@ public class RelationshipsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> AddSummary(Guid appId, Guid id, [FromBody] AddSummaryFieldRequest request, CancellationToken ct)
     {
+        await TableAccess.RequireAsync(id, PermissionCodes.FieldsCreate, RelationshipTableAccess.Side.Parent, ct); // summaries live on the parent
         var command = new AddSummaryFieldCommand(id, request.Label, request.Function, request.TargetFid, request.MatchingCriteria,
             new CombinedTextOptions(request.Delimiter ?? SummaryFunctions.DefaultCombinedTextDelimiter,
                 request.SortFid, request.SortDescending, request.DistinctValues));
@@ -193,6 +205,7 @@ public class RelationshipsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> UpdateSummary(Guid appId, Guid id, Guid fieldId, [FromBody] UpdateSummaryFieldRequest request, CancellationToken ct)
     {
+        await TableAccess.RequireOnFieldTableAsync(fieldId, PermissionCodes.FieldsUpdate, ct);
         var command = new UpdateSummaryFieldCommand(id, fieldId, request.Label, request.Function, request.TargetFid, request.MatchingCriteria,
             new CombinedTextOptions(request.Delimiter ?? SummaryFunctions.DefaultCombinedTextDelimiter,
                 request.SortFid, request.SortDescending, request.DistinctValues),
@@ -209,6 +222,7 @@ public class RelationshipsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> UpdateDisplayKey(Guid appId, Guid id, [FromBody] UpdateDisplayKeyRequest request, CancellationToken ct)
     {
+        await TableAccess.RequireAsync(id, PermissionCodes.FieldsUpdate, RelationshipTableAccess.Side.Child, ct); // the reference field (child)
         var result = await _updateDisplayKey.HandleAsync(new UpdateDisplayKeyCommand(id, request.DisplayKeyFieldFid), ct);
         return Ok(new ApiResponse<RelationshipDto>(result));
     }
@@ -222,6 +236,7 @@ public class RelationshipsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> UpdateProxyField(Guid appId, Guid id, [FromBody] UpdateProxyFieldRequest request, CancellationToken ct)
     {
+        await TableAccess.RequireAsync(id, PermissionCodes.FieldsUpdate, RelationshipTableAccess.Side.Child, ct); // the reference field (child)
         var result = await _updateProxyField.HandleAsync(new UpdateProxyFieldCommand(id, request.ProxyFid), ct);
         return Ok(new ApiResponse<RelationshipDto>(result));
     }
@@ -235,6 +250,7 @@ public class RelationshipsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> UpdateParentLink(Guid appId, Guid id, Guid fieldId, [FromBody] UpdateParentLinkRequest request, CancellationToken ct)
     {
+        await TableAccess.RequireOnFieldTableAsync(fieldId, PermissionCodes.FieldsUpdate, ct);
         var result = await _updateParentLink.HandleAsync(new UpdateParentLinkCommand(id, fieldId, request.DisplayAsLinkToParent), ct);
         return Ok(new ApiResponse<RelationshipDto>(result));
     }
@@ -274,6 +290,7 @@ public class RelationshipsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> UpdateReferenceFilter(Guid appId, Guid id, [FromBody] UpdateReferenceFilterRequest request, CancellationToken ct)
     {
+        await TableAccess.RequireAsync(id, PermissionCodes.FieldsUpdate, RelationshipTableAccess.Side.Child, ct); // the reference field (child)
         var conditions = request.Conditions
             .Select(c => new ReferenceFilterConditionInput(c.FormFid, c.ParentFid, c.JunctionTableId, c.JunctionParentFid, c.JunctionValueFid))
             .ToList();
@@ -289,6 +306,7 @@ public class RelationshipsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> RemoveField(Guid appId, Guid id, Guid fieldId, CancellationToken ct)
     {
+        await TableAccess.RequireOnFieldTableAsync(fieldId, PermissionCodes.FieldsDelete, ct);
         var result = await _removeField.HandleAsync(new RemoveRelationshipFieldCommand(id, fieldId), ct);
         return Ok(new ApiResponse<RelationshipDto>(result));
     }
@@ -301,6 +319,7 @@ public class RelationshipsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> AddFormSection(Guid relId, [FromBody] AddRelationshipFormSectionRequest request, CancellationToken ct)
     {
+        await TableAccess.RequireAsync(relId, PermissionCodes.FormsUpdate, RelationshipTableAccess.Side.Parent, ct); // adds a section to the parent's forms
         var added = await _addFormSection.HandleAsync(new AddRelationshipFormSectionCommand(relId, request.ReportPublicId, request.ReportName), ct);
         return Ok(new ApiResponse<int>(added));
     }
@@ -314,6 +333,8 @@ public class RelationshipsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Delete(Guid appId, Guid id, [FromQuery] bool force, CancellationToken ct)
     {
+        // Removes the reference field (child) and the link / summary fields (parent).
+        await TableAccess.RequireAsync(id, PermissionCodes.FieldsDelete, RelationshipTableAccess.Side.Both, ct);
         await _deleteHandler.HandleAsync(new DeleteRelationshipCommand(id, force), ct);
         return NoContent();
     }

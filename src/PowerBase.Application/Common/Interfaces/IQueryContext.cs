@@ -8,6 +8,12 @@ public interface IQueryContext
     string UserName { get; }
     string UserEmail { get; }
     string IpAddress { get; }
+    /// <summary>The app page (route path) the browser made this request from — sent by the PowerBase frontend in
+    /// <c>PageContext.HeaderName</c>. Null for calls that don't come from the app (integrations, jobs). Used to apply
+    /// per-table "View" builder permissions only on builder screens (see AppAccessService).</summary>
+    string? ClientPage => null;
+    /// <summary>The API request path (e.g. /reports/{id}) of a GET request; null otherwise or outside a request.</summary>
+    string? ApiReadPath => null;
     IReadOnlySet<string> Permissions { get; }
     bool IsPipelineExecution { get; set; }
     int PipelineDepth { get; set; }

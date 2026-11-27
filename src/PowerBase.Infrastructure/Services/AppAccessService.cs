@@ -96,9 +96,22 @@ public class AppAccessService : IAppAccessService
     }
 
     /// <summary>Builder permissions a role can narrow per table (Roles > Advanced Permissions). Super admins are not
-    /// narrowed; *:read codes are not enforced here (see PermissionCodes.TableScopedEnforced).</summary>
-    private bool IsTableScoped(string permissionCode) =>
-        _permRepo is not null && !_queryContext.IsSuperAdmin && PermissionCodes.TableScopedEnforced.Contains(permissionCode);
+    /// narrowed. Create / Update / Delete / Form Rules always; the *:read ("View") codes only for builder screens and
+    /// direct API calls (see PageContext).</summary>
+    private bool IsTableScoped(string permissionCode)
+    {
+        if (_permRepo is null || _queryContext.IsSuperAdmin) return false;
+        if (PermissionCodes.TableScopedEnforced.Contains(permissionCode)) return true;
+        // Per-table "View" (tables / fields / reports / forms :read) guards an item's definition on builder screens and for
+        // direct API calls; data pages load the same definitions and are governed by Data Permissions (PageContext).
+        return TableViewCodes.Contains(permissionCode)
+            && PowerBase.Application.Common.PageContext.EnforcesTableView(permissionCode, _queryContext.ApiReadPath, _queryContext.ClientPage);
+    }
+
+    private static readonly HashSet<string> TableViewCodes =
+    [
+        PermissionCodes.TablesRead, PermissionCodes.FieldsRead, PermissionCodes.ReportsRead, PermissionCodes.FormsRead,
+    ];
 
     /// <summary>The user holds the permission on this table: one of their roles has it and does not exclude the table.</summary>
     private async Task RequireTablePermissionAsync(long appId, long tableId, string permissionCode, CancellationToken ct)

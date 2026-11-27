@@ -619,6 +619,7 @@ builder.Services.AddScoped<UpdateAppRoleCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Apps.Commands.SetDefaultAppRole.SetDefaultAppRoleCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Apps.Commands.SetAppRoleHomePage.SetAppRoleHomePageCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Apps.Queries.GetRoleUiSettings.GetRoleUiSettingsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.RelationshipTableAccess>();
 builder.Services.AddScoped<PowerBase.Application.Apps.Queries.GetRoleTableExclusions.GetRoleTableExclusionsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Apps.Commands.UpdateRoleUiSettings.UpdateRoleUiSettingsCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pages.Queries.ResolveHomePage.ResolveHomePageQueryHandler>();

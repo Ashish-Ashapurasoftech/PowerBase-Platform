@@ -11,6 +11,8 @@ public class QueryContext : IQueryContext
     public string UserName { get; set; } = string.Empty;
     public string UserEmail { get; set; } = string.Empty;
     public string IpAddress { get; set; } = string.Empty;
+    public string? ClientPage { get; set; }
+    public string? ApiReadPath { get; set; }
     public IReadOnlySet<string> Permissions { get; set; } = new HashSet<string>();
     public bool IsPipelineExecution { get; set; }
     public int PipelineDepth { get; set; } = 1;
