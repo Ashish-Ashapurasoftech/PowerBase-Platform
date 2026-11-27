@@ -10,7 +10,7 @@ namespace PowerBase.UnitTests.Import.Qbl;
 
 /// <summary>
 /// Strict pipeline import over the customer's real files (2026-11-19): 16 application exports (88 apps) and the pipeline-only
-/// export AllActivePipelines.yaml. A pipeline is imported only when all of its steps convert exactly; every other one is
+/// export AllActivePipelines.yaml, bound by the Quickbase ids stored on the imported apps (snapshot of 2026-11-24). A pipeline is imported only when all of its steps convert exactly; every other one is
 /// reported with its reasons. Skipped when the files are not on this machine.
 /// </summary>
 public class QblPipelineStrictRealFilesTests(ITestOutputHelper output)
@@ -18,21 +18,12 @@ public class QblPipelineStrictRealFilesTests(ITestOutputHelper output)
     private const string FOLDER = @"C:\Users\Administrator\Downloads\drive-download-20261119T051341Z-1-001";
     private static string PipelineFile => Path.Combine(FOLDER, "AllActivePipelines.yaml");
 
-    private static IReadOnlyList<PipelineOnlyApp> AllApps()
-    {
-        var apps = new List<PipelineOnlyApp>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var file in Directory.GetFiles(FOLDER, "QBL-*.yaml").OrderBy(f => f.Contains("ba97eac7") ? 1 : 0).ThenBy(f => f))
-            foreach (var app in QblPipelineOnlyRealFilesTests.AppsFromExport(file))
-                if (seen.Add(app.Name))
-                    apps.Add(app with { Id = apps.Count + 1, Tables = app.Tables.Select(t => t with { Id = 1000 + apps.Count * 1000 + (t.Id % 1000) }).ToList() });
-        return apps;
-    }
+    private static IReadOnlyList<PipelineOnlyApp> AllApps() => QblPipelineOnlyRealFilesTests.SnapshotApps();
 
     [Fact]
     public void RealFiles_Strict_EveryKeptPipelineIsComplete_EveryOtherHasAReason()
     {
-        if (!Directory.Exists(FOLDER) || !File.Exists(PipelineFile)) return;
+        if (!Directory.Exists(FOLDER) || !File.Exists(PipelineFile) || !File.Exists(QblPipelineOnlyRealFilesTests.SNAPSHOT)) return;
 
         var apps = AllApps();
         var trace = new StringBuilder();

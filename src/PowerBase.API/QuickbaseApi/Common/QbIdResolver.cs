@@ -7,7 +7,8 @@ namespace PowerBase.API.QuickbaseApi.Common;
 
 /// <summary>
 /// Every identifier the Quickbase-compatible API receives may be either our PublicId (a Guid) or our numeric Id —
-/// Quickbase callers often send numbers (e.g. report "5"). A Guid is looked up by PublicId, a positive whole number by Id.
+/// Quickbase callers often send numbers (e.g. report "5"). A Guid is looked up by PublicId, a positive whole number by Id,
+/// and (apps/tables only) a Quickbase dbid like "bv77y482c" by meta.App.QBAppID / meta.AppTable.QBTableID.
 /// Lookups by number stay inside the caller's tenant database (and, for users, the caller's account), and every API still
 /// runs its normal permission checks on the resolved record.
 /// </summary>
@@ -34,7 +35,7 @@ public sealed class QbIdResolver
     }
 
     /// <summary>Kind of identifier a raw value is.</summary>
-    public enum IdKind { Missing, PublicId, Number, Invalid }
+    public enum IdKind { Missing, PublicId, Number, QuickbaseId, Invalid }
 
     public static IdKind Classify(string? raw, out Guid publicId, out long number)
     {
@@ -44,12 +45,16 @@ public sealed class QbIdResolver
         var v = raw.Trim();
         if (Guid.TryParse(v, out publicId)) return IdKind.PublicId;
         if (long.TryParse(v, NumberStyles.None, CultureInfo.InvariantCulture, out number) && number > 0) return IdKind.Number;
+        if (IsQuickbaseId(v)) return IdKind.QuickbaseId;
         return IdKind.Invalid;
     }
 
+    /// <summary>A Quickbase dbid such as <c>bv77y482c</c>: letters and digits only (stored in meta.App.QBAppID / meta.AppTable.QBTableID).</summary>
+    public static bool IsQuickbaseId(string v) => v.Length is >= 2 and <= 64 && v.All(char.IsAsciiLetterOrDigit) && !v.All(char.IsAsciiDigit);
+
     private static Exception Bad(string raw, string param) => param is "to" or "from" or "tableId" or "appId" or "dbid"
         ? QbApiException.InvalidRequest(V1.Services.QbRecordService.APP_GONE)          // Quickbase's answer for an id it cannot use
-        : QbApiException.BadRequest($"Invalid value '{raw}' for parameter '{param}': expected a Guid or a numeric id");
+        : QbApiException.BadRequest($"Invalid value '{raw}' for parameter '{param}': expected a Guid, a numeric id or a Quickbase id");
 
     /// <summary>Quickbase wording: "Required key 'x' not found" for body keys, "Required query 'x' not found" for URL parameters.</summary>
     private static Exception Required(string param) => QbApiException.BadRequest(param is "to" or "from" or "data" or "where"
@@ -63,6 +68,9 @@ public sealed class QbIdResolver
             case IdKind.Number:
                 try { return await _apps.GetPublicIdByIdAsync(n, ct); }
                 catch (NotFoundException) { throw QbApiException.InvalidRequest(V1.Services.QbRecordService.APP_GONE); }
+            case IdKind.QuickbaseId:
+                return await _apps.FindPublicIdByQbAppIdAsync(raw!.Trim(), ct)
+                    ?? throw QbApiException.InvalidRequest(V1.Services.QbRecordService.APP_GONE);
             case IdKind.Missing: throw Required(param);
             default: throw Bad(raw!, param);
         }
@@ -76,6 +84,9 @@ public sealed class QbIdResolver
             case IdKind.Number:
                 try { return (await _tables.GetByIdAsync(n, ct)).PublicId; }
                 catch (NotFoundException) { throw QbApiException.InvalidRequest(V1.Services.QbRecordService.APP_GONE); }
+            case IdKind.QuickbaseId:
+                return await _tables.FindPublicIdByQbTableIdAsync(raw!.Trim(), ct)
+                    ?? throw QbApiException.InvalidRequest(V1.Services.QbRecordService.APP_GONE);
             case IdKind.Missing: throw Required(param);
             default: throw Bad(raw!, param);
         }

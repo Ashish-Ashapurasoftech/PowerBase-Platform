@@ -55,6 +55,10 @@ public interface IPipelineRepository
 
     Task<PipelineConnection?> GetConnectionByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineConnection>> GetConnectionsByPipelineIdAsync(long pipelineId, CancellationToken ct = default);
+    /// <summary>Connections of <paramref name="type"/> the user created in any (not deleted) PowerFlow of the tenant, newest first —
+    /// the user's saved accounts, offered again in every step as Quickbase does.</summary>
+    Task<IReadOnlyList<PipelineConnection>> ListConnectionsByCreatorAsync(long userId, string type, CancellationToken ct = default)
+        => Task.FromResult<IReadOnlyList<PipelineConnection>>([]);
     Task<(Guid PublicId, long Id)> CreateConnectionAsync(PipelineConnection connection, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<int> UpdateConnectionAsync(PipelineConnection connection, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task DeleteConnectionAsync(Guid publicId, CancellationToken ct = default);

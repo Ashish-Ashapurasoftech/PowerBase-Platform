@@ -69,6 +69,8 @@ public interface IAppFieldRepository
 
     /// <summary>Sets whether the field's values may be used as another field's choices ("Shared values").</summary>
     Task SetSharedValuesAsync(long id, bool isSharedValues, CancellationToken ct = default, IDbTransaction? transaction = null);
+    /// <summary>Sets the field's help text (null clears it).</summary>
+    Task SetHelpTextAsync(long id, string? helpText, CancellationToken ct = default, IDbTransaction? transaction = null);
 
     /// <summary>Changes a field's type (and settings/required) in place, keeping its Fid and physical column.
     /// Used when converting an existing physical field into a relationship Reference field.</summary>

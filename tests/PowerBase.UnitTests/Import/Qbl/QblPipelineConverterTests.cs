@@ -605,6 +605,16 @@ public class QblPipelineConverterTests
     }
 
     [Fact]
+    public void CreateRecord_KeepsEveryFieldChosenOnTheStep_AsItsOutputFields()
+    {
+        // As in Quickbase, an Update Record step acting on the created record can set any field chosen on the Create step.
+        var create = Root(ConvertOne(AllSteps), "ref_ab");
+
+        var outputs = ((List<object?>)create.Config["outputFields"]!).Select(f => Field(f).Label).ToList();
+        outputs.Should().Contain("Employee Name");
+    }
+
+    [Fact]
     public void UpdateAndDelete_TakeTheirTableAndRecordFromTheTargetStep()
     {
         var pipeline = ConvertOne(AllSteps);

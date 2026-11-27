@@ -692,8 +692,12 @@ public class QblPipelineMoreStepsTests
         request.Config["body"].Should().Be("{\"id\": 1}");
         ((List<object?>)request.Config["stepHeaders"]!).Cast<Dictionary<string, object?>>().Select(h => $"{h["key"]}={h["value"]}")
             .Should().Equal("Authorization=Token abc", "X-Realm=ysl");
-        request.IsComplete.Should().BeFalse();
-        pipeline.Issues.Should().Contain(i => i.Code == "PIPELINE_HTTP_CONNECTION_MISSING");
+        // Quickbase's Webhooks channel has no account: the importer creates one without authentication for this base URL.
+        request.IsComplete.Should().BeTrue();
+        request.Config["accountName"].Should().Be("signature.example.com");
+        request.Config.Should().ContainKey(QblPipelineConverter.AUTO_HTTP_ACCOUNT);
+        pipeline.Issues.Should().Contain(i => i.Code == "PIPELINE_HTTP_ACCOUNT_CREATED");
+        pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_HTTP_CONNECTION_MISSING");
         pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_STEP_UNSUPPORTED" || i.Code == "PIPELINE_SETTING_NOT_IMPORTED");
     }
 
@@ -1178,8 +1182,104 @@ public class QblPipelineMoreStepsTests
         pipeline.Issues.Should().NotContain(i => i.Code == "PIPELINE_ADDRESS_PARTS" || i.Code == "PIPELINE_ADDRESS_PART_INPUT");
     }
 
+    private static string CsvStep(string meta, string mappings) => $$"""
+                  - Type: QB::PipelineStep::Quickbase
+                    Properties:
+                      Id: au
+                      Name: Import with CSV
+                      Channel: { Resource: bulk_record_set, Id: quickbase, Selector: csv_import }
+                    InputsMeta:
+                      $Meta:
+                        Type: QB::PipelineStep::InputsMeta
+                        Properties: {{meta}}
+                        PipelineStep_DataSources:
+                          $Ds:
+                            Type: QB::PipelineStep::DataSource::Table
+                            Properties:
+                              Table: !Ref { App: $App_Docs, Table: $Table_Employee1 }
+                              Name: table
+                          $DsMerge:
+                            Type: QB::PipelineStep::DataSource::Fields
+                            Properties:
+                              Fields: [ !Ref { App: $App_Docs, Table: $Table_Employee1, Field: $Field_Employee_Code } ]
+                              Name: merge_field
+            {{mappings}}
+            """;
+
+    private static string CsvMapping(string key, string field) => $$"""
+                          $Ds_{{key}}:
+                            Type: QB::PipelineStep::DataSource::Fields
+                            Properties:
+                              Fields: [ !Ref { App: $App_Docs, Table: $Table_Employee1, Field: {{field}} } ]
+                              Name: qb_field_for_{{key}}
+            """;
+
     [Fact]
-    public void ImportWithCsv_KeepsTheUrl_AndListsTheQuickbaseColumnsForTheTemplate()
+    public void CsvImport_ImportsEveryQuickbaseOption_AsTheImportWithCsvStep()
+    {
+        var pipeline = Convert(Trigger(), CsvStep(
+            "{ Csv_Url: 'https://example.test/import.csv', Header_Row: 'Employee Code,Employee Name', Row_Separator: ',', Row_Quote_Char: \"'\", Skip_First_Line: true }",
+            CsvMapping("employee_code", "$Field_Employee_Code") + "\n" + CsvMapping("employee_name", "$Field_Employee_Name")));
+
+        var import = Step(pipeline, "ref_au");
+        import.Subtype.Should().Be("csv-import");
+        pipeline.Issues.Should().NotContain(i => i.StepId == "au");
+        import.IsComplete.Should().BeTrue();
+        import.Config["tableLabel"].Should().BeOfType<PblPipelineTableValue>();
+        import.Config["tableId"].Should().BeOfType<PblPipelineTableValue>();
+        ((PblPipelineFieldValue)import.Config["mergeField"]!).Label.Should().Be("Employee Code");
+        import.Config["headerRow"].Should().Be("Employee Code,Employee Name");
+        import.Config["rowSeparator"].Should().Be(",");
+        import.Config["rowQuoteChar"].Should().Be("'");
+        import.Config["skipFirstLine"].Should().Be(true);
+        import.Config["csvUrl"].Should().NotBeNull();
+        var map = (Dictionary<string, object?>)import.Config["columnMappings"]!;
+        map.ToDictionary(p => p.Key, p => ((PblPipelineFieldValue)p.Value!).Label)
+            .Should().Equal(new Dictionary<string, string> { ["Employee Code"] = "Employee Code", ["Employee Name"] = "Employee Name" });
+        pipeline.Issues.Should().NotContain(i => i.StepId == "au");
+    }
+
+    [Fact]
+    public void CsvImport_DefaultsAreQuickbaseDefaults_WhenOptionsAreLeftOut()
+    {
+        var pipeline = Convert(Trigger(), CsvStep("{ Csv_Url: 'https://example.test/a.csv', Header_Row: 'Employee Code' }",
+            CsvMapping("employee_code", "$Field_Employee_Code")));
+
+        var import = Step(pipeline, "ref_au");
+        import.Config["rowSeparator"].Should().Be(",");
+        import.Config["rowQuoteChar"].Should().Be("\"");
+        import.Config["skipFirstLine"].Should().Be(false);
+        import.IsComplete.Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData(";", ";", "Employee Code;Employee Name")]
+    [InlineData("\\t", "\\t", "Employee Code\tEmployee Name")]
+    public void CsvImport_SemicolonAndTab_SplitTheHeaderRowWithThatSeparator(string separator, string saved, string header)
+    {
+        var yamlHeader = header.Replace("\t", "\\t");
+        var pipeline = Convert(Trigger(), CsvStep($"{{ Csv_Url: 'x', Header_Row: \"{yamlHeader}\", Row_Separator: \"{separator}\" }}",
+            CsvMapping("employee_code", "$Field_Employee_Code") + "\n" + CsvMapping("employee_name", "$Field_Employee_Name")));
+
+        var import = Step(pipeline, "ref_au");
+        import.Config["rowSeparator"].Should().Be(saved);
+        ((Dictionary<string, object?>)import.Config["columnMappings"]!).Keys.Should().Equal("Employee Code", "Employee Name");
+    }
+
+    [Fact]
+    public void CsvImport_StaleQuickbaseMapping_NotInTheHeaderRow_IsLeftOutWithANote()
+    {
+        var pipeline = Convert(Trigger(), CsvStep("{ Csv_Url: 'x', Header_Row: 'Employee Code' }",
+            CsvMapping("employee_code", "$Field_Employee_Code") + "\n" + CsvMapping("call_stamp", "$Field_Employee_Name")));
+
+        var import = Step(pipeline, "ref_au");
+        ((Dictionary<string, object?>)import.Config["columnMappings"]!).Keys.Should().Equal("Employee Code");
+        import.IsComplete.Should().BeTrue();
+        pipeline.Issues.Should().ContainSingle(i => i.Code == "PIPELINE_CSV_COLUMN_NOT_IN_HEADER").Which.Message.Should().Contain("call_stamp");
+    }
+
+    [Fact]
+    public void CsvImport_MissingCsvUrlHeaderAndMergeField_LeaveADraft()
     {
         var pipeline = Convert(Trigger(), """
                   - Type: QB::PipelineStep::Quickbase
@@ -1190,29 +1290,40 @@ public class QblPipelineMoreStepsTests
                     InputsMeta:
                       $Meta:
                         Type: QB::PipelineStep::InputsMeta
-                        Properties: { Csv_Url: 'https://example.test/a.csv', Header_Row: '1', Row_Quote_Char: '"' }
+                        Properties: { Skip_First_Line: false }
                         PipelineStep_DataSources:
                           $Ds:
                             Type: QB::PipelineStep::DataSource::Table
                             Properties:
                               Table: !Ref { App: $App_Docs, Table: $Table_Employee1 }
                               Name: table
-                          $Ds2:
-                            Type: QB::PipelineStep::DataSource::Fields
-                            Properties:
-                              Fields:
-                                - !Ref { App: $App_Docs, Table: $Table_Employee1, Field: $Field_Employee_Code }
-                              Name: qb_field_for_email
             """);
 
         var import = Step(pipeline, "ref_au");
-        import.Config["csvFile"].Should().Be("https://example.test/a.csv");
-        import.Config["tableId"].Should().BeOfType<PblPipelineTableValue>();
         import.IsComplete.Should().BeFalse();
-        pipeline.Issues.Should().ContainSingle(i => i.Code == "PIPELINE_IMPORT_TEMPLATE_MISSING")
-            .Which.Message.Should().Contain("column 'email' → 'Employee Code'").And.Contain("Header Row '1'");
-        pipeline.Issues.Should().NotContain(i => i.StepId == "au" && i.Code == "PIPELINE_SETTING_NOT_IMPORTED");
+        pipeline.Issues.Where(i => i.Code == "PIPELINE_INPUT_MISSING").Select(i => i.Message)
+            .Should().HaveCount(3).And.Contain(m => m.Contains("Merge field")).And.Contain(m => m.Contains("CSV URL")).And.Contain(m => m.Contains("Header row"));
     }
+
+    /// <summary>The Quickbase mapping keys seen in the customer file, from their Header row columns.</summary>
+    [Theory]
+    [InlineData("Client #", "client")]
+    [InlineData("DoB", "do_b")]
+    [InlineData("MedicaidId", "medicaid_id")]
+    [InlineData("Timeof Trip", "timeof_trip")]
+    [InlineData("Medicaid  ID", "medicaid_id")]
+    [InlineData("D/C DATE", "d_c_date")]
+    [InlineData("Is in Last 60 days?", "is_in_last_60_days")]
+    [InlineData("TIME (ISO-8601)\tIP", "time_iso_8601_ip")]
+    [InlineData("Annual limit status|OASAS Special project code", "annual_limit_status_oasas_special_project_code")]
+    [InlineData("LastChangedStatus", "last_changed_status")]
+    public void CsvColumnKeys_MatchQuickbaseKeys(string column, string key) =>
+        QblPipelineConverterKeys.CsvColumnKeys(column, ',').Should().Equal((column, key));
+
+    [Fact]
+    public void CsvColumnKeys_RepeatedKeys_GetSuffixesLikeQuickbase() =>
+        QblPipelineConverterKeys.CsvColumnKeys("Need #,Need,Name,Name", ',')
+            .Should().Equal(("Need #", "need"), ("Need", "need_0"), ("Name", "name"), ("Name_0", "name_0"));
 
     // ---- "on date" filters with a time zone ----
 

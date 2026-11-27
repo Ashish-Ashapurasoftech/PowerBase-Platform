@@ -39,6 +39,9 @@ public static class QblPipelineConverter
     };
 
     /// <summary>The user details a token can read after a user field (<c>{{aa.owner.email}}</c>).</summary>
+    /// <summary>Config marker: the importer creates an HTTP account without authentication for the step's base URL.</summary>
+    public const string AUTO_HTTP_ACCOUNT = "_qbWebhookAccount";
+
     private static readonly HashSet<string> UserDetails = new(StringComparer.Ordinal) { "id", "name", "first_name", "last_name", "email", "screen_name" };
 
     /// <summary>The parts a token can read after a file field (<c>{{ad.file_field.file_transfer_handle}}</c>).</summary>
@@ -455,6 +458,9 @@ public static class QblPipelineConverter
             SkipBrokenDependencies();
             _pipeline.AppRef = PickApp();
             _pipeline.Steps = Build(_roots);
+            // A PowerFlow whose steps name no table data source (only a Quickbase API call, rewritten to an existing table) belongs
+            // to the app of that table.
+            _pipeline.AppRef ??= AllSteps(_pipeline.Steps).SelectMany(s => TableValues(s.Config)).Select(t => t.AppRef).FirstOrDefault(a => !string.IsNullOrEmpty(a));
             RequireValidStart();
             return _pipeline;
         }
@@ -693,6 +699,19 @@ public static class QblPipelineConverter
             return target.Entry?.Type != "loop" || reader.IsInside(target);
         }
 
+        private static IEnumerable<PblPipelineStep> AllSteps(IEnumerable<PblPipelineStep> steps) => steps.SelectMany(s =>
+            new[] { s }.Concat(AllSteps(s.Children)).Concat(AllSteps(s.ElseChildren)).Concat(AllSteps(s.SuccessChildren)).Concat(AllSteps(s.ErrorChildren)));
+
+        private static IEnumerable<PblPipelineTableValue> TableValues(object? value) => value switch
+        {
+            PblPipelineTableValue t => [t],
+            PblPipelineTextValue t => t.Parts.SelectMany(TableValues),
+            IDictionary<string, object?> d => d.Values.SelectMany(TableValues),
+            string => [],
+            System.Collections.IEnumerable e => e.Cast<object?>().SelectMany(TableValues),
+            _ => [],
+        };
+
         private string? PickApp()
         {
             var steps = _all.Where(s => !s.Removed).ToList();
@@ -706,7 +725,7 @@ public static class QblPipelineConverter
         {
             var first = _pipeline.Steps.FirstOrDefault();
             if (first is null || first.Type == "trigger" || first.Subtype is "search-records" or "look-up-record" or "copy-records" or "prepare-bulk-upsert"
-                    or "pause" or "import-with-csv" or "handle-errors" or "send-email-outlook" or "make-request"
+                    or "pause" or "import-with-csv" or "csv-import" or "handle-errors" or "send-email-outlook" or "make-request"
                     // As in Quickbase, these actions can start a PowerFlow run by hand or on a schedule.
                     or "create-record" or "update-record" or "delete-record" or "upload-file" or "call-another-pipeline")
                 return;
@@ -776,7 +795,7 @@ public static class QblPipelineConverter
                 case "stop": break;
                 case "handle-errors": context.HandleErrors(); break;
                 case "upload-file": context.UploadFile(); break;
-                case "import-with-csv": context.ImportWithCsv(); break;
+                case "csv-import": context.CsvImport(); break;
                 case "send-email-outlook": context.SendEmail(); break;
                 case "pipeline-called": context.PipelineCalled(); break;
                 case "call-another-pipeline": context.CallAnotherPipeline(); break;
@@ -992,9 +1011,22 @@ public static class QblPipelineConverter
 
             /// <summary>A field named by key (<c>Employee_Name</c>, <c>name</c>, <c>id</c>) in <paramref name="table"/>. Fields that
             /// <paramref name="owner"/> lists in its <paramref name="preferSource"/> data source win over other fields with the same key.</summary>
-            private QblFieldInfo? FieldByKey((string App, string Table) table, string key, SourceStep? owner = null, string? preferSource = null)
+            private QblFieldInfo? FieldByKey((string App, string Table) table, string key, SourceStep? owner = null, string? preferSource = null, bool writable = false)
             {
-                var fields = reader.Index.Fields(table.App, table.Table);
+                // A step that sets fields lists only fields it can write: Quickbase numbers the keys of those alone ("DSSWeek" formula
+                // and "DSS Week" text: the input Dss_Week is the text field). A calculated field is the answer only when no writable one is.
+                if (writable)
+                {
+                    var all = reader.Index.Fields(table.App, table.Table);
+                    var writableFields = all.Where(f => !f.IsComputed).ToList();
+                    if (writableFields.Count < all.Count() && FieldByKeyIn(writableFields, key, owner, preferSource) is { } found)
+                        return found;
+                }
+                return FieldByKeyIn(reader.Index.Fields(table.App, table.Table), key, owner, preferSource);
+            }
+
+            private QblFieldInfo? FieldByKeyIn(IEnumerable<QblFieldInfo> fields, string key, SourceStep? owner, string? preferSource)
+            {
                 if (BuiltInKeys.TryGetValue(key, out var builtInType) && fields.Where(f => f.Type == builtInType).ToList() is [var builtIn])
                     return builtIn;
 
@@ -1006,6 +1038,20 @@ public static class QblPipelineConverter
                     var compact = wanted.Replace("_", "", StringComparison.Ordinal);
                     candidates = fields.Where(f => !f.IsAddressPart && NormalizeKey(f.Label).Replace("_", "", StringComparison.Ordinal) == compact).ToList();
                 }
+                // Quickbase keys fields by label; when labels give the same key ("DSP Address" / "DSP - Address", "ID" next to the
+                // built-in id) the field with the lowest id gets the plain key and the next ones key_0, key_1, … (a built-in field
+                // with that key comes first). Seen in the exports: id_0 is the user field "ID"; dsp_address and its parts are the
+                // Address field (fid 303), not the lookup "DSP - Address" (fid 311).
+                if (candidates.Count == 0 && Regex.Match(wanted, @"^(.+)_(\d+)$") is { Success: true } numbered)
+                {
+                    var stem = numbered.Groups[1].Value;
+                    var ordered = SameKeyInOrder(fields, stem);
+                    var index = int.Parse(numbered.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture) + 1;
+                    if (ordered.Count > index) candidates = [ordered[index]];
+                }
+                // The plain key of labels that share it belongs to the first of them (built-in, then lowest field id).
+                if (candidates.Count >= 1 && SameKeyInOrder(fields, wanted) is { Count: > 1 } sameKey && sameKey.All(f => f.SourceId is not null || f.IsBuiltIn))
+                    candidates = [sameKey[0]];
                 if (candidates.Count > 1 && owner is not null && preferSource is not null && owner.DataSources.TryGetValue(preferSource, out var preferred)
                     && preferred.Properties.TryGetValue("Fields", out var raw) && raw is IEnumerable<object?> refs)
                 {
@@ -1015,13 +1061,36 @@ public static class QblPipelineConverter
                 return candidates.Count == 1 ? candidates[0] : null;
             }
 
+            /// <summary>The fields whose label gives <paramref name="key"/>, in the order Quickbase numbers their keys: a built-in field
+            /// first, then by field id.</summary>
+            private static List<QblFieldInfo> SameKeyInOrder(IEnumerable<QblFieldInfo> fields, string key)
+            {
+                var all = fields.Where(f => !f.IsAddressPart).ToList();
+                var builtIn = BuiltInKeys.TryGetValue(key, out var type) ? all.Where(f => f.Type == type).Take(1) : [];
+                // Quickbase splits camel case when it makes a key ("DSSWeek" and "DSS Week" are both dss_week), so labels are
+                // compared by their letters and digits.
+                var compactKey = NormalizeKey(key).Replace("_", "", StringComparison.Ordinal);
+                var users = all.Where(f => !f.IsBuiltIn && NormalizeKey(f.Label).Replace("_", "", StringComparison.Ordinal) == compactKey).OrderBy(f => f.SourceId ?? int.MaxValue);
+                return builtIn.Concat(users).Distinct().ToList();
+            }
+
             private QblFieldInfo? AddressPart((string App, string Table) table, string key)
             {
                 // Quickbase names a part after its address field: "T Address" + "City" → T_Address_City.
                 static string Compact(string text) => NormalizeKey(text).Replace("_", "", StringComparison.Ordinal);
                 var wanted = Compact(key);
-                return reader.Index.Fields(table.App, table.Table).FirstOrDefault(f => f.IsAddressPart
+                var found = reader.Index.Fields(table.App, table.Table).FirstOrDefault(f => f.IsAddressPart
                     && (Compact(f.Label) == wanted || (reader.Index.AddressOf(f) is { } address && Compact(address.Label + " " + f.Label) == wanted)));
+                // A numbered address key (Full_Address_0_City: Quickbase numbers a key that is already taken): only when one address
+                // field of the table has that name.
+                if (found is null && Regex.Match(key, @"^(.+?)_\d+_(.+)$") is { Success: true } numbered)
+                {
+                    var stem = Compact(numbered.Groups[1].Value);
+                    var addresses = reader.Index.Fields(table.App, table.Table).Where(f => f.IsAddressPart && reader.Index.AddressOf(f) is { } a && Compact(a.Label) == stem)
+                        .Select(f => reader.Index.AddressOf(f)!.FieldRef).Distinct().Count();
+                    if (addresses == 1) found = AddressPart(table, numbered.Groups[1].Value + "_" + numbered.Groups[2].Value);
+                }
+                return found;
             }
 
             /// <summary>A value that may hold Jinja tokens. Only <c>{{stepId.key}}</c> naming a record field of an earlier, reachable
@@ -1327,7 +1396,8 @@ public static class QblPipelineConverter
                     return null;
                 }
                 var definition = CallDefinition(target);
-                var argument = keys.Length == 1 ? definition?.Arguments.FirstOrDefault(a => string.Equals(a, keys[0], StringComparison.OrdinalIgnoreCase)) : null;
+                // Quickbase keys a camelCase argument in snake case ({{a.deployment_id}} for deploymentId).
+                var argument = keys.Length == 1 ? definition?.Arguments.FirstOrDefault(a => SameArgument(a, keys[0])) : null;
                 if (argument is null)
                     return $"'{string.Join('.', keys)}' is not a call argument of step '{target.Name}' ({target.Label})";
                 parts = [$"{{{{steps.{target.RefId}.{argument}}}}}"];
@@ -1342,7 +1412,7 @@ public static class QblPipelineConverter
                 foreach (var (key, raw) in Inputs)
                 {
                     _usedInputs.Add(key);
-                    var field = table is null ? null : FieldByKey(table.Value, key, owner, preferSource);
+                    var field = table is null ? null : FieldByKey(table.Value, key, owner, preferSource, writable: true);
                     if (field is null)
                     {
                         if (addressParts && table is not null && AddressPart(table.Value, key) is { } addressPart
@@ -1481,6 +1551,16 @@ public static class QblPipelineConverter
                 }
                 var key = Scalar(expression, "Field");
                 var field = key is null || source.Table is null ? null : FieldByKey(source.Table.Value, key);
+                string? detail = null;
+                // "user.email" / "user.id": a person detail of a User field, as the PowerFlows filter reads it (fid_N.email).
+                // "file.file_name": the file's name — a File field is filtered by the names of its files.
+                if (field is null && key is not null && source.Table is not null && key.LastIndexOf('.') is var dot and > 0)
+                {
+                    var owner = FieldByKey(source.Table.Value, key[..dot]);
+                    var sub = key[(dot + 1)..];
+                    if (owner is not null && UserFieldTypes.Contains(owner.Type) && UserDetails.Contains(sub)) { field = owner; detail = sub; }
+                    else if (owner is not null && owner.Type == "QB::Field::FileAttachment" && sub == "file_name") field = owner;
+                }
                 if (field is null)
                 {
                     Incomplete("PIPELINE_FIELD_NOT_FOUND", $"Filter field '{key}' does not match a field of the step's table; the filter was left empty.");
@@ -1490,7 +1570,7 @@ public static class QblPipelineConverter
                     return null;
                 return new Dictionary<string, object?>(StringComparer.Ordinal)
                 {
-                    ["type"] = "rule", ["field"] = Value(field), ["operator"] = op, ["value"] = value, ["logicalOp"] = "AND",
+                    ["type"] = "rule", ["field"] = detail is null ? Value(field) : Value(field) with { Part = detail }, ["operator"] = op, ["value"] = value, ["logicalOp"] = "AND",
                 };
             }
 
@@ -1527,10 +1607,14 @@ public static class QblPipelineConverter
                         return null;
                     }
                 }
-                var left = Text($"{{{{{targetId}.{key}}}}}", "Condition field");
+                // "metadata.a.record.previous.status": the field before the change, which is its own token ({{metadata.a…}}), not a
+                // field of the tested step.
+                var isMetadata = key.StartsWith("metadata.", StringComparison.Ordinal);
+                var left = Text(isMetadata ? $"{{{{{key}}}}}" : $"{{{{{targetId}.{key}}}}}", "Condition field");
                 if (left is string { Length: 0 })
                     return null;
-                var field = tested.Table is null ? null : FieldByKey(tested.Table.Value, key, tested, "export_fields");
+                var fieldKey = isMetadata && key.Split('.') is { Length: >= 5 } metaParts && metaParts[2] == "record" && metaParts[3] == "previous" ? metaParts[4] : key;
+                var field = tested.Table is null ? null : FieldByKey(tested.Table.Value, fieldKey, tested, "export_fields");
                 if (MapOperator(expression, FilterCategory(field?.Type, expression), forCondition: true, field?.Type) is not var (op, value))
                     return null;
                 return new Dictionary<string, object?>(StringComparer.Ordinal)
@@ -1713,8 +1797,72 @@ public static class QblPipelineConverter
 
             private static string Relative(string mode, int days, string zone) => $"@relative-date|{mode}|{(mode == "today" ? 0 : days)}|{zone}";
 
+            private static readonly Regex QueryClause = new(@"\{\s*'?(\d+)'?\s*\.\s*([A-Za-z]+)\s*\.\s*(?:'((?:[^']|'')*)'|([^}]*?))\s*\}", RegexOptions.Compiled);
+
+            /// <summary>Quickbase query syntax in a trigger / search "Query" setting (<c>{42.EX.0}AND{'16'.CT.'Group'}</c>): the same
+            /// rules as PowerFlows filters, all AND-ed (one box) or all OR-ed (a box each). Null when a clause or the mix of AND / OR
+            /// has no exact equivalent; the setting is then reported as before.</summary>
+            private List<List<Dictionary<string, object?>>>? QueryFilter(string query)
+            {
+                if (source.Table is null) return null;
+                var clauses = QueryClause.Matches(query);
+                if (clauses.Count == 0) return null;
+                // Only clauses joined by AND / OR, nothing else (no parentheses).
+                var joins = QueryClause.Replace(query, "\u0001").Split('\u0001').Select(s => s.Trim().ToUpperInvariant()).ToList();
+                if (joins[0].Length > 0 || joins[^1].Length > 0 || joins.Skip(1).SkipLast(1).Any(j => j is not ("AND" or "OR"))) return null;
+                var ors = joins.Skip(1).SkipLast(1).Distinct().ToList();
+                if (ors.Count > 1) return null;
+                var fields = reader.Index.Fields(source.Table.Value.App, source.Table.Value.Table);
+                var rules = new List<Dictionary<string, object?>>();
+                foreach (Match clause in clauses)
+                {
+                    var fid = int.Parse(clause.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+                    var field = fields.FirstOrDefault(f => f.SourceId == fid && !f.IsAddressPart);
+                    if (field is null) return null;
+                    var raw = clause.Groups[3].Success ? clause.Groups[3].Value.Replace("''", "'") : clause.Groups[4].Value.Trim();
+                    var checkbox = field.Type is "QB::Field::Checkbox" or "QB::Field::Checkbox::Formula";
+                    var number = FilterCategory(field.Type, new Dictionary<string, object?>()) == "NUMBER";
+                    var date = field.Type.Contains("Date", StringComparison.Ordinal);
+                    var truthy = raw is "1" or "true" or "yes";
+                    (string Op, object? Value)? rule = clause.Groups[2].Value.ToUpperInvariant() switch
+                    {
+                        "EX" when checkbox => (truthy ? "is_true" : "is_false", ""),
+                        "XEX" when checkbox => (truthy ? "is_false" : "is_true", ""),
+                        "EX" when raw.Length == 0 => ("is-empty", ""),
+                        "XEX" when raw.Length == 0 => ("is-not-empty", ""),
+                        "EX" when !date => ("is", Text(raw, "Query value")),
+                        "XEX" when !date => ("is-not", Text(raw, "Query value")),
+                        "CT" when !checkbox && !number && !date => ("contains", Text(raw, "Query value")),
+                        "XCT" when !checkbox && !number && !date => ("not-contains", Text(raw, "Query value")),
+                        "SW" when !checkbox && !number && !date => ("starts-with", Text(raw, "Query value")),
+                        "GT" when number => ("greater_than", Text(raw, "Query value")),
+                        "LT" when number => ("less_than", Text(raw, "Query value")),
+                        "AF" when date => ("is-after", Text(raw, "Query value")),
+                        "BF" when date => ("is-before", Text(raw, "Query value")),
+                        _ => null,
+                    };
+                    if (rule is null) return null;
+                    rules.Add(new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        ["type"] = "rule", ["field"] = Value(field), ["operator"] = rule.Value.Op, ["value"] = rule.Value.Value, ["logicalOp"] = "AND",
+                    });
+                }
+                return ors.Count == 1 && ors[0] == "OR" ? rules.Select(r => new List<Dictionary<string, object?>> { r }).ToList() : [rules];
+            }
+
             private void Filters()
             {
+                if (!source.Node.Properties.ContainsKey("Filters") && source.Meta.TryGetValue("Query", out var rawQuery)
+                    && rawQuery?.ToString() is { Length: > 0 } query && QueryFilter(query) is { } queryGroups)
+                {
+                    _usedMeta.Add("Query");
+                    Config["isSimpleFilter"] = true;
+                    Config["filters"] = queryGroups.SelectMany(g => g).Select(r => (object?)new Dictionary<string, object?>(r, StringComparer.Ordinal)).ToList();
+                    Config["filterGroups"] = queryGroups
+                        .Select(g => (object?)new Dictionary<string, object?>(StringComparer.Ordinal) { ["logicalOp"] = "AND", ["rules"] = g.Cast<object?>().ToList() })
+                        .ToList();
+                    return;
+                }
                 if (TryFilter(forCondition: false, out var groups) && groups is not null)
                 {
                     Config["isSimpleFilter"] = true;
@@ -1881,6 +2029,9 @@ public static class QblPipelineConverter
                 AppAndTable(withApp: true, TableKeys);
                 _usedSources.Add("export_fields");
                 Config["fieldMappings"] = Mappings(FieldInputs(source.Table, source, "export_fields", addressParts: true));
+                // Every field chosen on the Quickbase step, a field left without a value too: an Update Record step acting on this
+                // record can set any of them (as in Quickbase), though nothing is written to the ones without a value.
+                Config["outputFields"] = FieldList("export_fields", keepAddressParts: true);
             }
 
             public void UpdateRecord()
@@ -2030,6 +2181,12 @@ public static class QblPipelineConverter
                     HttpRequest();
                 else if (source.Channel == "webhooks" && !CallsMappableQuickbaseApi() && !QuickbaseUrlRewriter.ContainsQuickbaseUrl(Setting("Url")?.ToString()))
                     WebhookRequest();
+                // A Quickbase-channel request to a fixed address outside Quickbase (e.g. a client's own service): PowerBase's account only
+                // reaches PowerBase, so it becomes the same HTTP request a Webhooks-channel one does.
+                else if (source.Channel != "webhooks" && Setting("Url")?.ToString()?.Trim() is { } external && !external.Contains("{{", StringComparison.Ordinal)
+                         && Uri.TryCreate(external, UriKind.Absolute, out var externalUri) && externalUri.Scheme is "http" or "https"
+                         && !QuickbaseUrlRewriter.ContainsQuickbaseUrl(external))
+                    WebhookRequest();
                 else
                     PowerBaseRequest();
             }
@@ -2056,6 +2213,14 @@ public static class QblPipelineConverter
                     Config["path"] = Text(url[Config["baseUrl"]!.ToString()!.Length..].TrimStart('/'), "URL");
                     if (absolute.Host.EndsWith("quickbase.com", StringComparison.OrdinalIgnoreCase))
                         Incomplete("PIPELINE_REQUEST_URL_QUICKBASE", $"The request URL '{url}' calls the Quickbase API, which PowerBase's API does not mirror; it was kept as is. Change it before turning the PowerFlow on.");
+                    else
+                    {
+                        // Quickbase's Webhooks channel needs no account (its own headers carry any credentials): the importer
+                        // creates the same — an HTTP account without authentication for this address, named after its host.
+                        Config["accountName"] = absolute.Host;
+                        Config[AUTO_HTTP_ACCOUNT] = true;
+                        reader.Note(source, "PIPELINE_HTTP_ACCOUNT_CREATED", $"An HTTP account '{absolute.Host}' without authentication was created for {Config["baseUrl"]} (Quickbase's Webhooks channel uses no account; the step's own headers are kept).", changesExecution: false);
+                    }
                 }
                 else
                 {
@@ -2069,7 +2234,8 @@ public static class QblPipelineConverter
 
                 var headers = RequestHeaders().Select(h => (object?)new Dictionary<string, object?>(StringComparer.Ordinal) { ["key"] = h.Name, ["value"] = h.Value }).ToList();
                 Config["stepHeaders"] = headers.Count > 0 ? headers : new List<object?> { new Dictionary<string, object?>(StringComparer.Ordinal) { ["key"] = "", ["value"] = "" } };
-                Incomplete("PIPELINE_HTTP_CONNECTION_MISSING", "This request has no HTTP account in Quickbase; name and save one for its base URL in the step before turning the PowerFlow on.");
+                if (!Config.ContainsKey(AUTO_HTTP_ACCOUNT))
+                    Incomplete("PIPELINE_HTTP_CONNECTION_MISSING", "This request has no HTTP account in Quickbase; name and save one for its base URL in the step before turning the PowerFlow on.");
             }
 
             /// <summary>Quickbase request headers: a "Name" and a "Value" text, one header per line.</summary>
@@ -2156,6 +2322,9 @@ public static class QblPipelineConverter
                 Config["body"] = Setting("Body") is { } body ? Text(body, "Body") : string.Empty;
 
                 var url = Setting("Url")?.ToString()?.Trim();
+                // A Quickbase-channel request may name only the path (/db/{dbid}?a=API_x, /v1/...): it calls the realm's Quickbase API,
+                // so it is checked and mapped exactly like the full address (an unsupported action is reported, never kept).
+                url = QuickbaseApiUrlMap.AbsoluteQuickbaseUrl(url);
                 if (url is not null && QuickbaseUrlRewriter.ContainsQuickbaseUrl(url))
                 {
                     if (!url.Contains("{{", StringComparison.Ordinal) && Uri.TryCreate(url, UriKind.Absolute, out var absolute) && MapQuickbaseApi(absolute, out _))
@@ -2281,6 +2450,11 @@ public static class QblPipelineConverter
                             if (part is string piece && Split(piece) is { } pieces) all.AddRange(pieces);
                             else all.Add(part);
                         return new PblPipelineTextValue(all);
+                    // Inside an expression the Quickbase id stays: PowerBase's Quickbase-compatible API finds a table by the Quickbase
+                    // id stored when it was imported (meta.AppTable.QBTableID), so a call to an imported table works unchanged.
+                    case var _ when qbTableIds.All(id => reader.Index.TableByQbId(id) is not null):
+                        reader.Note(source, "PIPELINE_REQUEST_QB_TABLE_ID_KEPT", $"The request body names Quickbase table '{string.Join("', '", qbTableIds)}' inside an expression; the id is kept and PowerBase's Quickbase-compatible API finds the imported table by it.", changesExecution: false);
+                        return body;
                     default:
                         Incomplete("PIPELINE_REQUEST_NEEDS_REVIEW", $"The request body names Quickbase table '{string.Join("', '", qbTableIds)}' inside an expression; put the imported table's id there before turning the PowerFlow on.");
                         return body;
@@ -2337,36 +2511,94 @@ public static class QblPipelineConverter
                     Config["fileUrl"] = Text(url, "File URL");
                 else
                     Incomplete("PIPELINE_INPUT_MISSING", "The file URL is not in the file; set it before turning the PowerFlow on.");
-                Incomplete("PIPELINE_INPUT_MISSING", "The file attachment field to upload into is not in the file; choose it before turning the PowerFlow on.");
+                // Quickbase names the file attachment field by its id ("Field: 9") on the record of the target step.
+                _usedInputs.Add("Field");
+                var fileField = Inputs.TryGetValue("Field", out var rawField) && int.TryParse(rawField?.ToString(), out var fileFid) && Target.Table is { } targetTable
+                    ? reader.Index.Fields(targetTable.App, targetTable.Table).FirstOrDefault(f => f.SourceId == fileFid && f.Type == "QB::Field::FileAttachment")
+                    : null;
+                if (fileField is not null && Target.Table is { } table)
+                {
+                    var value = Value(fileField);
+                    Config["tableId"] = new PblPipelineTableValue(table.App, table.Table);
+                    Config["targetFileField"] = value;
+                    Config["selectedFileFields"] = new List<object?>
+                    {
+                        new Dictionary<string, object?>(StringComparer.Ordinal) { ["stepId"] = Target.RefId, ["stepLabel"] = Target.Name, ["field"] = value },
+                    };
+                }
+                else
+                    Incomplete("PIPELINE_INPUT_MISSING", "The file attachment field to upload into is not in the file; choose it before turning the PowerFlow on.");
             }
 
-            public void ImportWithCsv()
+            /// <summary>Quickbase "Import with CSV" (bulk_record_set/csv_import) → the PowerFlows step of the same name (csv-import),
+            /// option by option: table, Merge field, CSV URL, Row separator, Row quote char, "Is the first row a list of field names?",
+            /// Header row and one "Field to map to column" per Header row column. Quickbase keys each column mapping by the column's
+            /// name in snake_case ("Client #" → qb_field_for_client, "DoB" → qb_field_for_do_b, a repeated key gets "_0"); PowerFlows
+            /// keys it by the column name itself, as its editor does.</summary>
+            public void CsvImport()
             {
                 Connection();
-                AppAndTable(withApp: true, TableKeys);
-                _usedMeta.Add("Csv_Url");
-                if (source.Meta.TryGetValue("Csv_Url", out var url))
-                    Config["csvFile"] = Text(url, "CSV URL");
+                AppAndTable(withApp: true, "tableLabel", "tableId");
+
+                object? Setting(string key)
+                {
+                    if (source.Meta.TryGetValue(key, out var meta)) { _usedMeta.Add(key); return meta; }
+                    if (Inputs.TryGetValue(key, out var input)) { _usedInputs.Add(key); return input; }
+                    return null;
+                }
+
+                if (source.DataSources.ContainsKey("merge_field"))
+                {
+                    if (SingleField("merge_field") is { } merge) Config["mergeField"] = merge;
+                }
+                else
+                    Incomplete("PIPELINE_INPUT_MISSING", "The Merge field is not in the file; choose it before turning the PowerFlow on.");
+
+                if (Setting("Csv_Url") is { } url && (url.ToString() ?? "").Trim().Length > 0)
+                    Config["csvUrl"] = Text(url, "CSV URL");
                 else
                     Incomplete("PIPELINE_INPUT_MISSING", "The CSV URL is not in the file; set it before turning the PowerFlow on.");
 
-                // PowerFlows reads the CSV through an import template (columns, header row, quote character); Quickbase keeps
-                // these on the step, so they are listed for the template instead of being dropped silently.
-                var columns = source.DataSources.Keys.Where(k => k.StartsWith("qb_field_for_", StringComparison.Ordinal)).ToList();
-                foreach (var column in columns) _usedSources.Add(column);
-                var settings = new[] { "Header_Row", "Row_Quote_Char" }.Where(source.Meta.ContainsKey).ToList();
-                foreach (var setting in settings) _usedMeta.Add(setting);
-                var described = columns.Select(c => $"column '{c["qb_field_for_".Length..]}' → {DescribeField(c)}")
-                    .Concat(settings.Select(s => $"{s.Replace('_', ' ')} '{source.Meta[s]}'"));
-                Incomplete("PIPELINE_IMPORT_TEMPLATE_MISSING",
-                    "PowerFlows imports CSV through an import template, which is not in the file. Choose or create one before turning the PowerFlow on"
-                    + (columns.Count + settings.Count > 0 ? $" (Quickbase settings: {string.Join("; ", described)})." : "."));
-            }
+                var separatorText = Setting("Row_Separator")?.ToString();
+                var separator = separatorText switch { ";" => ';', "\t" or "\\t" => '\t', _ => ',' };
+                Config["rowSeparator"] = separator switch { ';' => ";", '\t' => "\\t", _ => "," };
+                if (separatorText is { Length: > 0 } && separatorText is not ("," or ";" or "\t" or "\\t"))
+                    Incomplete("PIPELINE_INPUT_INVALID", $"Row separator '{separatorText}' is not one of Comma, Semicolon or Tab; Comma was set.");
 
-            private string DescribeField(string sourceName)
-            {
-                var fields = FieldList(sourceName);
-                return fields.Count == 1 && fields[0] is PblPipelineFieldValue field ? $"'{field.Label}'" : "(field not found)";
+                var quoteText = Setting("Row_Quote_Char")?.ToString();
+                Config["rowQuoteChar"] = quoteText is "'" or "|" ? quoteText : "\"";
+                if (quoteText is { Length: > 0 } && quoteText is not ("\"" or "'" or "|"))
+                    Incomplete("PIPELINE_INPUT_INVALID", $"Row quote char '{quoteText}' is not one of Double quote, Single quote or Pipe; Double quote was set.");
+
+                Config["skipFirstLine"] = IsTrue(Setting("Skip_First_Line"));
+
+                var headerRaw = Setting("Header_Row");
+                var headerText = headerRaw?.ToString() ?? "";
+                if (headerText.Trim().Length > 0)
+                    Config["headerRow"] = Text(headerRaw, "Header row");
+                else
+                    Incomplete("PIPELINE_INPUT_MISSING", "The Header row is not in the file; set it before turning the PowerFlow on.");
+
+                var mappings = new Dictionary<string, object?>(StringComparer.Ordinal);
+                var pending = source.DataSources.Keys.Where(k => k.StartsWith("qb_field_for_", StringComparison.Ordinal)).ToHashSet(StringComparer.Ordinal);
+                foreach (var (column, qbKey) in QblPipelineConverterKeys.CsvColumnKeys(headerText, separator))
+                {
+                    var name = "qb_field_for_" + qbKey;
+                    var found = pending.Contains(name) ? name
+                        : pending.FirstOrDefault(k => k["qb_field_for_".Length..].Replace("_", "", StringComparison.Ordinal) == qbKey.Replace("_", "", StringComparison.Ordinal));
+                    if (found is null) continue;
+                    pending.Remove(found);
+                    if (SingleField(found) is { } field) mappings[column] = field;
+                }
+                Config["columnMappings"] = mappings;
+                // Quickbase keeps the mapping of a column removed from the Header row, but no longer shows or uses it.
+                foreach (var stale in pending)
+                {
+                    _usedSources.Add(stale);
+                    reader.Note(source, "PIPELINE_CSV_COLUMN_NOT_IN_HEADER",
+                        $"Mapping '{stale["qb_field_for_".Length..]}' belongs to no column of the Header row; Quickbase does not use it, so it was left out.",
+                        changesExecution: false);
+                }
             }
 
             private static readonly (string Input, string Key)[] EmailInputs =
@@ -2407,6 +2639,12 @@ public static class QblPipelineConverter
                 catch (PipelineNonRetryableException) { return null; }
             }
 
+            /// <summary>A call argument (<c>deploymentId</c>) and the key Quickbase gives it in inputs and tokens (<c>Deployment_Id</c>,
+            /// <c>deployment_id</c>): the same letters and digits.</summary>
+            private static bool SameArgument(string argument, string key) =>
+                string.Equals(argument, key, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(Regex.Replace(argument, "[^A-Za-z0-9]", ""), Regex.Replace(key, "[^A-Za-z0-9]", ""), StringComparison.OrdinalIgnoreCase);
+
             /// <summary>The call definition (<c>name(arg1, arg2)</c>) both callable steps share.</summary>
             private CallablePipelineDefinition? Definition()
             {
@@ -2429,7 +2667,7 @@ public static class QblPipelineConverter
                 var arguments = new Dictionary<string, object?>(StringComparer.Ordinal);
                 foreach (var argument in definition?.Arguments ?? [])
                 {
-                    var input = Inputs.Keys.FirstOrDefault(k => string.Equals(k, argument, StringComparison.OrdinalIgnoreCase));
+                    var input = Inputs.Keys.FirstOrDefault(k => SameArgument(argument, k));
                     if (input is null)
                     {
                         Incomplete("PIPELINE_INPUT_MISSING", $"No value for call argument '{argument}' is in the file; set it before turning the PowerFlow on.");
@@ -2451,5 +2689,31 @@ public static class QblPipelineConverter
         private FieldIndex Index => index;
 
         private QblFieldInfo? Field(string app, string table, string field) => index.Field(app, table, field);
+    }
+}
+
+/// <summary>Quickbase mapping keys of Import with CSV columns.</summary>
+public static class QblPipelineConverterKeys
+{
+    /// <summary>Each named Header row column with (1) the key PowerFlows maps it by (the name; a repeated name gets "_0",
+    /// "_1") and (2) the key Quickbase gives it: snake_case of the name (camelCase split); a repeated key gets "_0".</summary>
+    public static List<(string Column, string QbKey)> CsvColumnKeys(string headerRow, char separator)
+    {
+        var result = new List<(string, string)>();
+        var pbSeen = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var qbSeen = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var name in headerRow.Split(separator).Select(n => n.Trim()))
+        {
+            var pbCount = pbSeen.GetValueOrDefault(name);
+            pbSeen[name] = pbCount + 1;
+            if (name.Length == 0 || name.Contains("{{", StringComparison.Ordinal)) continue;
+            var column = pbCount == 0 ? name : $"{name}_{pbCount - 1}";
+            var snake = Regex.Replace(Regex.Replace(name, "([a-z0-9])([A-Z])", "$1_$2"), "([A-Z]+)([A-Z][a-z])", "$1_$2");
+            var key = Regex.Replace(new string(snake.ToLowerInvariant().Select(c => char.IsLetterOrDigit(c) ? c : '_').ToArray()), "_+", "_").Trim('_');
+            var qbCount = qbSeen.GetValueOrDefault(key);
+            qbSeen[key] = qbCount + 1;
+            result.Add((column, qbCount == 0 ? key : $"{key}_{qbCount - 1}"));
+        }
+        return result;
     }
 }

@@ -50,9 +50,9 @@ public class QblMakeRequestApiImportTests
     [
         new(Guid.Parse("00000000-0000-0000-0000-000000000001"), 1, "YSL Dev Docs",
         [
-            new(10, "Employee", null, [.. Sys, F(7, "Email", "Email"), F(20, "Name"), F(22, "Status")]),
-            new(11, "Orders", null, [.. Sys, F(6, "Total", "Number")]),
-        ]),
+            new(10, "Employee", null, [.. Sys, F(7, "Email", "Email"), F(20, "Name"), F(22, "Status")], "bwcrtu9k5"),
+            new(11, "Orders", null, [.. Sys, F(6, "Total", "Number")], "bordersq1"),
+        ], "bt2kqxkqk"),
     ];
 
     private static (PblPipeline Pipeline, PipelineOnlyBinding Binding) Import(string file)
@@ -77,6 +77,15 @@ public class QblMakeRequestApiImportTests
             """{"from":"bwcrtu9k5","select":[3,7,20],"where":"{22.EX.'Active'}"}""")));
 
         binding.Matches.Should().ContainSingle(m => m.QbTableId == "bwcrtu9k5").Which.TableName.Should().Be("Employee");
+    }
+
+    [Fact]
+    public void PipelineWithOnlyAQuickbaseApiCall_GoesIntoTheAppOfThatTable()
+    {
+        var (pipeline, binding) = Import(File(Step("aa", "POST", "https://api.quickbase.com/v1/records/query", """{"from":"bwcrtu9k5"}""")));
+
+        pipeline.AppRef.Should().Be(binding.Apps.Single().AppRef);
+        PowerBase.Application.Import.Services.PipelineOnlyImportService.SplitByApp([pipeline], [binding.Apps.Single().AppRef]).Kept.Should().ContainSingle();
     }
 
     [Fact]
@@ -144,16 +153,62 @@ public class QblMakeRequestApiImportTests
     }
 
     [Fact]
-    public void UnknownTable_InBody_CallsPowerBaseButIsFlagged()
+    public void UnknownTable_InBody_SkipsThePipeline()
+    {
+        var file = File(
+            Step("aa", "POST", "https://api.quickbase.com/v1/records/query", """{"from":"bwcrtu9k5","select":[7,20,22]}"""),
+            Step("ab", "POST", "https://api.quickbase.com/v1/records/query", """{"from":"zzzzzzzzz"}"""));
+        var binding = QblPipelineOnlyBinder.Bind(file, Apps());
+
+        // The Quickbase table the call reads was not imported: the PowerFlow could never work, so it is not imported at all.
+        binding.SkippedPipelines.Should().ContainSingle().Which.Reason.Should().Contain("zzzzzzzzz");
+        QblPipelineConverter.ConvertAll(QblSerializer.Deserialize(binding.Content), binding.Content).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void RelativePath_UnsupportedXmlAction_IsRemovedAndReported()
+    {
+        // Quickbase-channel requests may give only the path; PowerBase has no API_GetRoleInfo.
+        var (pipeline, _) = Import(File(
+            Step("aa", "POST", "https://api.quickbase.com/v1/records/query", """{"from":"bwcrtu9k5","select":[7,20,22]}"""),
+            Step("ab", "POST", "/db/{{aa.name}}?a=API_GetRoleInfo")));
+
+        Render(pipeline.Steps[1].Config["url"]).Should().BeEmpty();
+        pipeline.Steps[1].IsComplete.Should().BeFalse();
+        pipeline.Issues.Should().Contain(i => i.Message.Contains("API_GetRoleInfo"));
+    }
+
+    [Fact]
+    public void RelativePath_SupportedCall_IsMappedLikeTheFullAddress()
+    {
+        var (pipeline, _) = Import(File(Step("aa", "POST", "/v1/records", """{"to":"bwcrtu9k5","data":[{"20":{"value":"x"}}]}""")));
+
+        Render(pipeline.Steps.Single().Config["url"]).Should().Be("/v1/records");
+        Render(pipeline.Steps.Single().Config["body"]).Should().Contain("{table:");
+    }
+
+    [Fact]
+    public void QuickbaseChannel_ExternalAddress_BecomesAnHttpRequestWithAnAccount()
     {
         var (pipeline, _) = Import(File(
             Step("aa", "POST", "https://api.quickbase.com/v1/records/query", """{"from":"bwcrtu9k5","select":[7,20,22]}"""),
-            Step("ab", "POST", "https://api.quickbase.com/v1/records/query", """{"from":"zzzzzzzzz"}""")));
+            Step("ab", "GET", "https://signature.example.com/")));
 
-        // Never kept on Quickbase: the path is PowerBase's, and the unknown table in the body keeps the step a draft.
-        Render(pipeline.Steps[1].Config["url"]).Should().Be("/v1/records/query");
-        pipeline.Steps[1].IsComplete.Should().BeFalse();
-        pipeline.Issues.Should().Contain(i => i.Code == "PIPELINE_REQUEST_NEEDS_REVIEW" && i.Message.Contains("zzzzzzzzz"));
+        var step = pipeline.Steps[1];
+        step.Config["requestMode"].Should().Be("http");
+        step.Config["baseUrl"].Should().Be("https://signature.example.com");
+        step.Config.Should().ContainKey(QblPipelineConverter.AUTO_HTTP_ACCOUNT);
+        step.IsComplete.Should().BeTrue();
+    }
+
+    [Fact]
+    public void XmlRunImport_IsFlaggedForThePowerBaseImportId()
+    {
+        var (pipeline, _) = Import(File(
+            Step("aa", "POST", "https://ysl.quickbase.com/db/bwcrtu9k5?a=API_RunImport&id=10")));
+
+        pipeline.Steps.Single().IsComplete.Should().BeFalse();
+        pipeline.Issues.Should().Contain(i => i.Code == "PIPELINE_REQUEST_NEEDS_REVIEW" && i.Message.Contains("saved import '10'"));
     }
 
     [Fact]

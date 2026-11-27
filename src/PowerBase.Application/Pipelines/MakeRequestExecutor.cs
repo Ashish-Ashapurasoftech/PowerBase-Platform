@@ -18,14 +18,28 @@ public sealed class MakeRequestExecutor
     private static InvalidOperationException Invalid(string message) => new(message);
     private static readonly HashSet<string> ForbiddenHeaders = new(StringComparer.OrdinalIgnoreCase) { "Transfer-Encoding", "Content-Encoding", "Content-Length", "Host" };
 
+    /// <summary>A Quickbase API address that reaches a PowerBase request at run time (built from a record value or formula, e.g.
+    /// <c>https://realm.quickbase.com/db/{dbid}?a=API_EditRecord&amp;usertoken=…</c>): the same path on PowerBase's
+    /// Quickbase-compatible API, which finds tables and apps by their Quickbase ids. Quickbase credentials are dropped — the
+    /// PowerBase account signs the call.</summary>
+    private static Uri QuickbaseToCompatible(Uri quickbase)
+    {
+        var kept = quickbase.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Where(p => p.Split('=')[0] is var key && !key.Equals("usertoken", StringComparison.OrdinalIgnoreCase)
+                        && !key.Equals("apptoken", StringComparison.OrdinalIgnoreCase) && !key.Equals("ticket", StringComparison.OrdinalIgnoreCase));
+        var query = string.Join("&", kept);
+        return new Uri(new Uri("https://powerbase.internal/"), quickbase.AbsolutePath.TrimStart('/') + (query.Length > 0 ? "?" + query : ""));
+    }
+
     public static Uri BuildUrl(MakeRequestDefinition config, Func<string?, string> resolve)
     {
         if (config.IsPowerBase)
         {
             var value = resolve(config.Url);
             if (string.IsNullOrWhiteSpace(value) || value.StartsWith("//") || value.Contains('\\')) throw Invalid("A valid PowerBase URL is required.");
-            return Uri.TryCreate(value, UriKind.Absolute, out var absolute) && absolute.Scheme is "http" or "https"
-                ? absolute : new Uri(new Uri("https://powerbase.internal/"), value.TrimStart('/'));
+            if (Uri.TryCreate(value, UriKind.Absolute, out var absolute) && absolute.Scheme is "http" or "https")
+                return PowerBase.Application.Import.Qbl.QuickbaseApiUrlMap.IsQuickbaseApi(absolute) ? QuickbaseToCompatible(absolute) : absolute;
+            return new Uri(new Uri("https://powerbase.internal/"), value.TrimStart('/'));
         }
         var baseValue = resolve(string.IsNullOrWhiteSpace(config.BaseUrl) ? config.Url : config.BaseUrl);
         if (!Uri.TryCreate(baseValue, UriKind.Absolute, out var baseUri) || baseUri.Scheme is not ("http" or "https") || !string.IsNullOrEmpty(baseUri.UserInfo))

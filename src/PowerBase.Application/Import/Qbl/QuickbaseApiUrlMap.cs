@@ -39,6 +39,17 @@ public static class QuickbaseApiUrlMap
         url.Host.Equals("api.quickbase.com", StringComparison.OrdinalIgnoreCase)
         || url.Host.EndsWith(".quickbase.com", StringComparison.OrdinalIgnoreCase) && (url.AbsolutePath.StartsWith("/v1/", StringComparison.OrdinalIgnoreCase) || url.AbsolutePath.StartsWith("/db/", StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>A Quickbase-channel request may give only the path of the realm's API (/db/{dbid}?a=API_x, /v1/...): the full
+    /// Quickbase address it calls. Anything else is returned unchanged.</summary>
+    public static string? AbsoluteQuickbaseUrl(string? url)
+    {
+        var trimmed = url?.Trim();
+        if (trimmed is null) return null;
+        if (trimmed.StartsWith("/v1/", StringComparison.OrdinalIgnoreCase)) return "https://api.quickbase.com" + trimmed;
+        if (trimmed.StartsWith("/db/", StringComparison.OrdinalIgnoreCase)) return "https://realm.quickbase.com" + trimmed;
+        return trimmed;
+    }
+
     /// <summary>Quickbase XML API actions the PowerBase /db/{dbid} endpoint answers.</summary>
     public static readonly IReadOnlySet<string> XmlActions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
@@ -180,9 +191,24 @@ public static class QuickbaseApiUrlMap
                         && qid is { Length: > 0 } && qid is not ("1" or "2")
             ? $"qid '{qid}' is the Quickbase query number of a report; check it is the same report in PowerBase (or use qname=<report name>)"
             : null;
+        // API_RunImport: <id> is the number of a Quickbase saved import. PowerBase's saved imports have their own ids, and saved imports
+        // are not part of an application export, so the import must exist in PowerBase and its id be set (action in the URL, or the
+        // QUICKBASE-ACTION header with an <id> in the XML body).
+        var importId = query.FirstOrDefault(p => p.Key.Equals("id", StringComparison.OrdinalIgnoreCase)).Value?.Trim()
+                       ?? (body is null ? null : Regex.Match(body, @"<id>\s*([^<]+?)\s*</id>", RegexOptions.IgnoreCase) is { Success: true } m ? m.Groups[1].Value : null);
+        var runImport = string.Equals(action, "API_RunImport", StringComparison.OrdinalIgnoreCase)
+                        || (action is null && body is not null && Regex.IsMatch(body, "<qdbapi>", RegexOptions.IgnoreCase) && importId is not null);
+        var importReview = runImport
+            ? $"it runs Quickbase saved import '{importId ?? "?"}'; saved imports are not in the application export and PowerBase numbers its own imports, so create that import on the table in PowerBase and put its id (or Guid) in <id>"
+            : null;
+        var reviews = new[]
+        {
+            hasCredentialsInBody ? "the XML body carries Quickbase credentials (usertoken / ticket / apptoken); remove them, the PowerBase account signs the call" : null,
+            qidReview, importReview,
+        }.OfType<string>().ToList();
         // PowerBase answers GET and POST like Quickbase; the method is kept.
         return new Mapped(Merge(parts), method is "GET" ? "GET" : "POST", (method is "GET" ? "GET" : "POST") + " /db/{dbid}" + (action is null ? "" : "?a=" + action), Array.Empty<string>(), false,
-            hasCredentialsInBody ? "the XML body carries Quickbase credentials (usertoken / ticket / apptoken); remove them, the PowerBase account signs the call" : qidReview);
+            reviews.Count == 0 ? null : string.Join("; and ", reviews));
     }
 
     /// <summary>Quickbase report ids are numbers per table (1, 2, …); PowerBase report ids are its own, so the id must be chosen again.</summary>

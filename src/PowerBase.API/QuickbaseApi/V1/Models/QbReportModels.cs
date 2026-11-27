@@ -16,6 +16,8 @@ public sealed class QbReportResponse
     public QbReportQuery Query { get; init; } = new();
     /// <summary>Report-type specific properties (developer.quickbase.com/reportTypes).</summary>
     public IDictionary<string, object?> Properties { get; init; } = new Dictionary<string, object?>();
+    /// <summary>Quickbase: {"behavior": "table"} — the report follows its table's caching (PowerBase has no report cache).</summary>
+    public IDictionary<string, object?>? ReportCaching { get; init; }
     public string? UsedLast { get; init; }
     public long? UsedCount { get; init; }
 }

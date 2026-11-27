@@ -46,7 +46,7 @@ public class QblRealFilesNoQuickbaseUrlTests(ITestOutputHelper output)
         IReadOnlyList<PblPipeline> pipelines;
         if (QblPipelineOnlyBinder.IsPipelinesOnly(content))
         {
-            var binding = QblPipelineOnlyBinder.Bind(content, []);
+            var binding = QblPipelineOnlyBinder.Bind(content, File.Exists(QblPipelineOnlyRealFilesTests.SNAPSHOT) ? QblPipelineOnlyRealFilesTests.SnapshotApps() : []);
             pipelines = QblPipelineConverter.ConvertAll(QblSerializer.Deserialize(binding.Content), binding.Content);
         }
         else

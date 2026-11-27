@@ -30,7 +30,7 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
         bool isValidFirstStep = firstStep.Type == "trigger" ||
             (firstStep.Type == "query" && (firstStep.Subtype == "search-records" || firstStep.Subtype == "look-up-record")) ||
             firstStep.Subtype == "handle-errors" ||
-            (firstStep.Type == "action" && (firstStep.Subtype == "prepare-bulk-upsert" || firstStep.Subtype == "copy-records" || firstStep.Subtype == "make-request" || firstStep.Subtype == "pause" || firstStep.Subtype == "import-with-csv")) ||
+            (firstStep.Type == "action" && (firstStep.Subtype == "prepare-bulk-upsert" || firstStep.Subtype == "copy-records" || firstStep.Subtype == "make-request" || firstStep.Subtype == "pause" || firstStep.Subtype == "import-with-csv" || firstStep.Subtype == "csv-import")) ||
             (firstStep.Type == "email" && (firstStep.Subtype == "send-email" || firstStep.Subtype == "send-email-outlook")) ||
             // As in Quickbase: these actions can start a PowerFlow that is run by hand or on a schedule.
             (firstStep.Type == "action" && firstStep.Subtype is "create-record" or "update-record" or "delete-record" or "call-another-pipeline") ||
@@ -262,6 +262,10 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
                         {
                             context.AddFailure("Steps", $"Step '{step.RefId}' cannot target trigger '{targetRef}' because the trigger event does not return a single record.");
                         }
+                        else
+                        {
+                            AddUpdateFieldsNotOutput(context, step, triggerStep, triggerStep.RefId, stepById, steps[0]);
+                        }
                     }
                     else if (!traversedRefIds.Contains(targetRef))
                     {
@@ -277,6 +281,10 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
                         if (!isSingleRecordProvider)
                         {
                             context.AddFailure("Steps", $"Step '{step.RefId}' cannot target step '{targetRef}' because it does not return a single record.");
+                        }
+                        else
+                        {
+                            AddUpdateFieldsNotOutput(context, step, targetStep, targetRef, stepById, steps[0].Type == "trigger" ? steps[0] : null);
                         }
                     }
                 }
@@ -331,10 +339,7 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
                     {
                         context.AddFailure("Steps", $"Look Up a Record step '{step.RefId}' requires a valid table selection.");
                     }
-                    if (string.IsNullOrEmpty(recordIdValue))
-                    {
-                        context.AddFailure("Steps", $"Look Up a Record step '{step.RefId}' requires a valid lookup value.");
-                    }
+                    // As in Quickbase, a blank Record ID / look up value saves; the step fails when it runs.
                 }
             }
 
@@ -598,5 +603,17 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
             JsonValueKind.Undefined => null,
             _ => null
         };
+    }
+
+    /// <summary>As in Quickbase, an Update Record step may only set the fields the step it acts on outputs.</summary>
+    private static void AddUpdateFieldsNotOutput(ValidationContext<SavePipelineStepsCommand> context, SavePipelineStepDto step,
+        SavePipelineStepDto target, string targetRef, IReadOnlyDictionary<string, SavePipelineStepDto> stepById, SavePipelineStepDto? trigger)
+    {
+        if (step.Subtype != "update-record" || !step.IsValidated) return;
+        var allowed = UpdateRecordTargetFields.Allowed(target, stepById, trigger);
+        if (allowed is null) return;
+        var notOutput = UpdateRecordTargetFields.NotOutput(step.ConfigJson, allowed);
+        if (notOutput.Count > 0)
+            context.AddFailure("Steps", UpdateRecordTargetFields.Message(step.RefId, targetRef, notOutput));
     }
 }

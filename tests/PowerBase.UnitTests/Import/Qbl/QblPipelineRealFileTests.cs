@@ -71,7 +71,7 @@ public class QblPipelineRealFileTests
             .Should().Equal(("All Step", 18, 18), ("PowerFlow All Step", 25, 25), ("PowerFlow All Step Call", 2, 2));
         app.Pipelines.Should().OnlyContain(p => p.SkippedStepCount == 0);
         var all = app.Pipelines.Single(p => p.Name == "PowerFlow All Step");
-        Flatten(all.Steps).Select(s => s.Subtype).Should().Contain(["handle-errors", "upload-file", "send-email-outlook", "call-another-pipeline", "import-with-csv"]);
+        Flatten(all.Steps).Select(s => s.Subtype).Should().Contain(["handle-errors", "upload-file", "send-email-outlook", "call-another-pipeline", "csv-import"]);
         all.Issues.Should().NotContain(i => i.Code == "PIPELINE_REFERENCE_CLEARED" || i.Code == "PIPELINE_SETTING_NOT_IMPORTED");
         // Drafts only where PowerFlows needs a choice the file cannot give: the upload's file field, Copy Records filling one
         // destination field from two columns, and the CSV template. Address parts are imported as parts.
@@ -93,7 +93,7 @@ public class QblPipelineRealFileTests
         var subtypes = app.Pipelines.SelectMany(p => Flatten(p.Steps)).Select(s => s.Subtype).ToHashSet();
         subtypes.Should().Contain([
             "new-event", "new-bulk-event", "search-records", "look-up-record", "create-record", "update-record", "delete-record",
-            "upload-file", "make-request", "prepare-bulk-upsert", "add-bulk-upsert-row", "commit-upsert", "import-with-csv", "copy-records",
+            "upload-file", "make-request", "prepare-bulk-upsert", "add-bulk-upsert-row", "commit-upsert", "csv-import", "copy-records",
             "if-else", "for-each", "handle-errors", "pause", "webhook", "send-email-outlook", "stop", "pipeline-called", "call-another-pipeline"]);
         var requests = app.Pipelines.SelectMany(p => Flatten(p.Steps)).Where(s => s.Subtype == "make-request").ToList();
         requests.Select(s => s.Config["requestMode"]).Should().Contain(["http", "quickbase"]);

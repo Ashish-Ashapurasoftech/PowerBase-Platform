@@ -72,6 +72,61 @@ public sealed class PipelineRequestConnectionsController : ControllerBase
         }
         return Ok(new {connectionId=created.PublicId,connected=credentials.Connected,authorizationUrl,redirectUri=credentials.RedirectUri});
     }
+    /// <summary>The user's saved HTTP accounts (connected in any of their PowerFlows), one per account name + base URL +
+    /// authentication, newest first — the "HTTP account" list of a Make Request step, as in Quickbase. No secret is returned.</summary>
+    [HttpGet] [RequireAuth]
+    public async Task<IActionResult> List(CancellationToken ct)
+    {
+        var accounts = new List<object>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in await _repository.ListConnectionsByCreatorAsync(_identity.UserId, "http-request", ct))
+        {
+            RequestConnectionService.Credentials saved;
+            try { saved = _credentials.Read(row); } catch (Exception) { continue; }
+            if (!saved.Connected) continue;
+            if (!seen.Add($"{row.Name}\u0001{saved.Config.BaseUrl}\u0001{saved.Config.AuthType}")) continue;
+            accounts.Add(new { id = row.PublicId, name = row.Name, baseUrl = saved.Config.BaseUrl, authType = saved.Config.AuthType ?? "No Authentication" });
+        }
+        return Ok(accounts);
+    }
+
+    public sealed record UseRequest(Guid PipelineId);
+
+    /// <summary>Uses a saved HTTP account in this PowerFlow: its connection (credentials included, never sent to the browser) is
+    /// copied to the PowerFlow — a step only runs with a connection of its own PowerFlow — and the step points at the copy.</summary>
+    [HttpPost("{id:guid}/use")] [RequireAuth]
+    public async Task<IActionResult> Use(Guid id, UseRequest input, CancellationToken ct)
+    {
+        await _appAccess.RequirePermissionByPipelinePublicIdAsync(input.PipelineId, PermissionCodes.PowerFlowsUpdate, ct);
+        var pipeline = await _repository.GetByPublicIdAsync(input.PipelineId, ct);
+        if (pipeline == null || pipeline.IsDeleted || pipeline.CreatedBy != _identity.UserId) return StatusCode(403);
+        var source = await _repository.GetConnectionByPublicIdAsync(id, ct);
+        if (source == null || source.IsDeleted || source.Type != "http-request" || source.CreatedBy != _identity.UserId) return NotFound();
+        var saved = _credentials.Read(source);
+        if (!saved.Connected) return BadRequest(new { error = "This account is not connected. Connect it again." });
+
+        (Guid PublicId, long Id) target;
+        if (source.PipelineId == pipeline.Id) target = (source.PublicId, source.Id);
+        else
+        {
+            var existing = (await _repository.GetConnectionsByPipelineIdAsync(pipeline.Id, ct)).FirstOrDefault(item =>
+                item.Type == "http-request" && item.CreatedBy == _identity.UserId && !item.IsDeleted && item.Name == source.Name
+                && _credentials.Read(item).Config.AuthType == saved.Config.AuthType && _credentials.Read(item).Config.BaseUrl == saved.Config.BaseUrl);
+            if (existing != null)
+            {
+                existing.CredentialsJson = source.CredentialsJson;
+                await _repository.UpdateConnectionAsync(existing, ct: ct);
+                target = (existing.PublicId, existing.Id);
+            }
+            else
+                target = await _repository.CreateConnectionAsync(new PipelineConnection
+                {
+                    PipelineId = pipeline.Id, Name = source.Name, Type = "http-request", CredentialsJson = source.CredentialsJson, CreatedBy = _identity.UserId,
+                }, ct: ct);
+        }
+        return Ok(new { connectionId = target.PublicId, name = source.Name, baseUrl = saved.Config.BaseUrl, authType = saved.Config.AuthType ?? "No Authentication" });
+    }
+
     [HttpPost("schema")] [RequireAuth]
     public IActionResult Schema(MakeRequestDefinition config)
     {
