@@ -50,10 +50,10 @@ public static class SearchSlotResolver
         typeCode is "Number" or "Currency" or "Percent" or "Rating" or "NumericRange" or "Duration" or "Formula_Number";
 
     public static bool IsDate(string? typeCode) =>
-        typeCode is "Date" or "DateTime" or "DateRange" or "Formula_Date" or "Formula_Time";
+        typeCode is "Date" or "DateTime" or "DateRange" or "Formula_Date" or "Formula_DateTime" or "Formula_Time";
 
     public static bool IsBoolean(string? typeCode) =>
-        typeCode is "Boolean";
+        typeCode is "Boolean" or "Formula_Bool";
 
     public static bool IsText(string? typeCode) =>
         !IsNumeric(typeCode) && !IsDate(typeCode) && !IsBoolean(typeCode);
@@ -139,7 +139,7 @@ public static class SearchSlotResolver
     private static string ResolveSlotName(AppField field, bool isWideTable)
     {
         if (isWideTable || !IsSearchEligible(field)) return LegacyName(field);
-        return SlotMatchesType(field.SearchSlot, field.TypeCode) ? field.SearchSlot! : LegacyName(field);
+        return SlotMatchesType(field.SearchSlot, SlotTypeCode(field)) ? field.SearchSlot! : LegacyName(field);
     }
 
     /// <summary>Builds a dictionary mapping field Fid (or Id) -> SlotName for the entire table.</summary>

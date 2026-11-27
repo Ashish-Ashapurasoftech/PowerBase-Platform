@@ -6,6 +6,7 @@ public static class MetadataCacheGroups
     public const string Fields = "fields";
     public const string Tables = "tables";
     public const string Apps = "apps";
+    public const string Relationships = "relationships";
 
     /// <summary>Everything that depends on who the user is or what their roles allow: role assignments, role and table permissions,
     /// field access, record rules, report visibility. One group, so a change to any of them clears all of them.</summary>

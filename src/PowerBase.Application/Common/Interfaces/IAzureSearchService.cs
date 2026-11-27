@@ -35,6 +35,14 @@ public interface IAzureSearchService
     Task<(IReadOnlyList<Guid> Ids, long TotalCount)> SearchRecordsPagedAsync(
         long tenantId, long tableId, string? searchText, string? odataFilter, int page, int pageSize,
         IReadOnlyList<string>? orderBy = null, string? indexName = null, CancellationToken ct = default);
+    Task<(IReadOnlyList<SearchDocumentRow> Rows, long TotalCount)?> SearchRecordsWithDocumentsPagedAsync(
+        long tenantId, long tableId, string? searchText, string? odataFilter, int page, int pageSize,
+        IReadOnlyList<string> selectFields, IReadOnlyList<string>? orderBy = null, string? indexName = null, CancellationToken ct = default)
+        => Task.FromResult<(IReadOnlyList<SearchDocumentRow> Rows, long TotalCount)?>(null);
+    Task<IReadOnlyList<SearchDocumentRow>?> SearchDocumentsByFilterAsync(
+        long tenantId, long tableId, string odataFilter, IReadOnlyList<string> selectFields,
+        int maxResults = 2000, string? indexName = null, CancellationToken ct = default)
+        => Task.FromResult<IReadOnlyList<SearchDocumentRow>?>(null);
     Task<(IReadOnlyList<GlobalSearchResult> Items, long? TotalCount)> SearchGlobalAsync(long tenantId, string searchText, long? appId = null, int page = 1, int pageSize = 50, CancellationToken ct = default);
     Task PurgeTableRecordsAsync(long tenantId, long tableId, CancellationToken ct = default);
 
@@ -63,6 +71,9 @@ public record AiSearchIdPage(IReadOnlyList<Guid> Ids, string NextCursor)
 }
 
 public record GlobalSearchResult(Guid PublicId, long AppId, long TableId, IReadOnlyDictionary<string, string> Fields);
+
+/// <summary>One record returned directly from Azure AI Search with its selected slot/column values.</summary>
+public sealed record SearchDocumentRow(Guid PublicId, IReadOnlyDictionary<string, object?> Values);
 
 /// <param name="CompleteText">True when <see cref="SlotValues"/> holds every indexed value of the record (read from the database), so
 /// the free-text field is rebuilt from it, and emptied when no searchable text is left. False for a document that carries only some

@@ -235,7 +235,11 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
     /// <summary>Drops the cached tables of this tenant. Called BEFORE each write below that changes what <see cref="GetByIdAsync"/> returns
     /// (see <see cref="IMetadataCache.Invalidate"/>). The record-count counters are deliberately not among them: they change on every record
     /// added or deleted, and nothing reads RecordCount from a table fetched by id (the table detail and lists read it from their own queries).</summary>
-    private void TablesChanging() => _cache.Invalidate(QueryContext.TenantId, TablesCacheGroup);
+    private void TablesChanging()
+    {
+        _cache.Invalidate(QueryContext.TenantId, TablesCacheGroup);
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Relationships);
+    }
 
     public async Task<AppTable> GetByIdAsync(long id, CancellationToken ct = default)
     {

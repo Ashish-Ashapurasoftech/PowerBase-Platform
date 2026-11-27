@@ -52,6 +52,15 @@ public static class ODataFilterBuilder
         return CanExpressNodes(group, fieldMap, slotMap, isWide);
     }
 
+    private static string? EffectiveAiTypeCode(AppField field)
+    {
+        if (!PowerBase.Domain.Constants.PhysicalNaming.IsComputedTypeCode(field.TypeCode))
+            return field.TypeCode;
+        return field.IsInSearchIndex
+            ? PowerBase.Application.Search.SearchSlotResolver.SlotTypeCode(field)
+            : null;
+    }
+
     private static bool CanExpressNodes(FilterGroup group, Dictionary<long, AppField>? fieldMap, Dictionary<long, string>? slotMap, bool isWide)
     {
         foreach (var node in group.Nodes)
@@ -66,16 +75,18 @@ public static class ODataFilterBuilder
                 {
                     if (!fieldMap.TryGetValue(c.FieldId, out var field)) return false;
                     if (!field.IsSearchable && !field.IsFilterable) return false;
-                    if (!PowerBase.Application.Search.SearchSlotResolver.IsAiFilterableType(field.TypeCode)) return false; // ranges, durations, time of day: SQL
+                    var effectiveType = EffectiveAiTypeCode(field);
+                    if (effectiveType is null) return false; // computed field not yet indexed in AI Search
+                    if (!PowerBase.Application.Search.SearchSlotResolver.IsAiFilterableType(effectiveType)) return false; // ranges, durations, time of day: SQL
 
                     if (!isWide && slotMap != null && slotMap.TryGetValue(c.FieldId, out var slot) && slot.StartsWith("f_"))
                     {
                         return false; // Field not mapped to a shared index slot
                     }
 
-                    var isNumeric = PowerBase.Application.Search.SearchSlotResolver.IsNumeric(field.TypeCode);
-                    var isDate = PowerBase.Application.Search.SearchSlotResolver.IsDate(field.TypeCode);
-                    var isBoolean = PowerBase.Application.Search.SearchSlotResolver.IsBoolean(field.TypeCode);
+                    var isNumeric = PowerBase.Application.Search.SearchSlotResolver.IsNumeric(effectiveType);
+                    var isDate = PowerBase.Application.Search.SearchSlotResolver.IsDate(effectiveType);
+                    var isBoolean = PowerBase.Application.Search.SearchSlotResolver.IsBoolean(effectiveType);
 
                     if (TextOnlyPatternOperators.Contains(c.Operator) && (isNumeric || isDate || isBoolean))
                     {
@@ -140,7 +151,9 @@ public static class ODataFilterBuilder
     {
         if (!fieldMap.TryGetValue(c.FieldId, out var field)) return null;
         if (!field.IsSearchable && !field.IsFilterable) return null; // Cannot filter on fields not in Azure AI Search
-        if (!PowerBase.Application.Search.SearchSlotResolver.IsAiFilterableType(field.TypeCode)) return null;
+        var effectiveType = EffectiveAiTypeCode(field);
+        if (effectiveType is null) return null;
+        if (!PowerBase.Application.Search.SearchSlotResolver.IsAiFilterableType(effectiveType)) return null;
 
         if (!slotMap.TryGetValue(c.FieldId, out var slot))
         {
@@ -153,10 +166,10 @@ public static class ODataFilterBuilder
         }
 
         var fieldName = slot;
-        var isNumeric = PowerBase.Application.Search.SearchSlotResolver.IsNumeric(field.TypeCode);
-        var isDate = PowerBase.Application.Search.SearchSlotResolver.IsDate(field.TypeCode);
-        var isBoolean = PowerBase.Application.Search.SearchSlotResolver.IsBoolean(field.TypeCode);
-        var isMulti = field.TypeCode is "MultiSelect" or "MultiUser" or "CheckboxGroup";
+        var isNumeric = PowerBase.Application.Search.SearchSlotResolver.IsNumeric(effectiveType);
+        var isDate = PowerBase.Application.Search.SearchSlotResolver.IsDate(effectiveType);
+        var isBoolean = PowerBase.Application.Search.SearchSlotResolver.IsBoolean(effectiveType);
+        var isMulti = effectiveType is "MultiSelect" or "MultiUser" or "CheckboxGroup";
 
         if (isDate)
         {

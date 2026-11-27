@@ -48,11 +48,19 @@ public class RelationshipRepository : TenantRepositoryBase, IRelationshipReposit
         WHERE PublicId = @publicId AND IsDeleted = 0
         """;
 
-    public RelationshipRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
-        : base(connectionFactory, queryContext) { }
+    private readonly IMetadataCache? _cache;
+
+    public RelationshipRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache? cache = null)
+        : base(connectionFactory, queryContext)
+    {
+        _cache = cache;
+    }
+
+    private void RelationshipsChanging() => _cache?.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Relationships);
 
     public async Task<(long Id, Guid PublicId)> CreateAsync(Relationship rel, CancellationToken ct = default)
     {
+        RelationshipsChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var row = await connection.QuerySingleAsync(
             new CommandDefinition(InsertSql, new
@@ -72,6 +80,7 @@ public class RelationshipRepository : TenantRepositoryBase, IRelationshipReposit
 
     public async Task UpdateProxyFieldAsync(long id, long? proxyFieldId, CancellationToken ct = default)
     {
+        RelationshipsChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateProxyFieldSql, new { id, proxyFieldId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
@@ -79,6 +88,7 @@ public class RelationshipRepository : TenantRepositoryBase, IRelationshipReposit
 
     public async Task UpdateReferenceFieldAsync(long id, long referenceFieldId, int referenceFid, CancellationToken ct = default)
     {
+        RelationshipsChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateReferenceFieldSql, new { id, referenceFieldId, referenceFid, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
@@ -86,61 +96,74 @@ public class RelationshipRepository : TenantRepositoryBase, IRelationshipReposit
 
     public async Task UpdateDisplayKeyFieldAsync(long id, long? displayKeyFieldId, CancellationToken ct = default)
     {
+        RelationshipsChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateDisplayKeyFieldSql, new { id, displayKeyFieldId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
     }
 
-    public async Task<Relationship?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
+    public Task<Relationship?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default) =>
+        _cache is null
+            ? LoadByPublicIdAsync(publicId, ct)
+            : _cache.GetOrAddAsync<Relationship>(QueryContext.TenantId, MetadataCacheGroups.Relationships, $"pub:{publicId}",
+                () => LoadByPublicIdAsync(publicId, ct)!)!;
+
+    public Task<Relationship?> GetByIdAsync(long id, CancellationToken ct = default) =>
+        _cache is null
+            ? LoadByIdAsync(id, ct)
+            : _cache.GetOrAddAsync<Relationship>(QueryContext.TenantId, MetadataCacheGroups.Relationships, $"id:{id}",
+                () => LoadByIdAsync(id, ct)!)!;
+
+    public async Task<IReadOnlyList<Relationship>> ListByAppAsync(long appId, CancellationToken ct = default) =>
+        _cache is null
+            ? await LoadListAsync(ListByAppSql, new { appId }, ct)
+            : [.. await _cache.GetOrAddAsync<IReadOnlyList<Relationship>>(QueryContext.TenantId, MetadataCacheGroups.Relationships, $"app:{appId}",
+                () => LoadListAsync(ListByAppSql, new { appId }, ct))];
+
+    public async Task<IReadOnlyList<Relationship>> ListByTableAsync(long tableId, CancellationToken ct = default) =>
+        _cache is null
+            ? await LoadListAsync(ListByTableSql, new { tableId }, ct)
+            : [.. await _cache.GetOrAddAsync<IReadOnlyList<Relationship>>(QueryContext.TenantId, MetadataCacheGroups.Relationships, $"tbl:{tableId}",
+                () => LoadListAsync(ListByTableSql, new { tableId }, ct))];
+
+    public async Task<IReadOnlyList<Relationship>> ListByParentTableAsync(long parentTableId, CancellationToken ct = default) =>
+        _cache is null
+            ? await LoadListAsync(ListByParentTableSql, new { tableId = parentTableId }, ct)
+            : [.. await _cache.GetOrAddAsync<IReadOnlyList<Relationship>>(QueryContext.TenantId, MetadataCacheGroups.Relationships, $"parent:{parentTableId}",
+                () => LoadListAsync(ListByParentTableSql, new { tableId = parentTableId }, ct))];
+
+    public async Task<IReadOnlyList<Relationship>> ListByChildTableAsync(long childTableId, CancellationToken ct = default) =>
+        _cache is null
+            ? await LoadListAsync(ListByChildTableSql, new { tableId = childTableId }, ct)
+            : [.. await _cache.GetOrAddAsync<IReadOnlyList<Relationship>>(QueryContext.TenantId, MetadataCacheGroups.Relationships, $"child:{childTableId}",
+                () => LoadListAsync(ListByChildTableSql, new { tableId = childTableId }, ct))];
+
+    public async Task<int> SoftDeleteAsync(Guid publicId, CancellationToken ct = default)
+    {
+        RelationshipsChanging();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteAsync(
+            new CommandDefinition(SoftDeleteSql, new { publicId, deletedBy = QueryContext.UserId }, cancellationToken: ct));
+    }
+
+    private async Task<Relationship?> LoadByPublicIdAsync(Guid publicId, CancellationToken ct)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.QuerySingleOrDefaultAsync<Relationship>(
             new CommandDefinition(GetByPublicIdSql, new { publicId }, cancellationToken: ct));
     }
 
-    public async Task<Relationship?> GetByIdAsync(long id, CancellationToken ct = default)
+    private async Task<Relationship?> LoadByIdAsync(long id, CancellationToken ct)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.QuerySingleOrDefaultAsync<Relationship>(
             new CommandDefinition(GetByIdSql, new { id }, cancellationToken: ct));
     }
 
-    public async Task<IReadOnlyList<Relationship>> ListByAppAsync(long appId, CancellationToken ct = default)
+    private async Task<IReadOnlyList<Relationship>> LoadListAsync(string sql, object param, CancellationToken ct)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var rows = await connection.QueryAsync<Relationship>(
-            new CommandDefinition(ListByAppSql, new { appId }, cancellationToken: ct));
+        var rows = await connection.QueryAsync<Relationship>(new CommandDefinition(sql, param, cancellationToken: ct));
         return rows.AsList();
-    }
-
-    public async Task<IReadOnlyList<Relationship>> ListByTableAsync(long tableId, CancellationToken ct = default)
-    {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var rows = await connection.QueryAsync<Relationship>(
-            new CommandDefinition(ListByTableSql, new { tableId }, cancellationToken: ct));
-        return rows.AsList();
-    }
-
-    public async Task<IReadOnlyList<Relationship>> ListByParentTableAsync(long parentTableId, CancellationToken ct = default)
-    {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var rows = await connection.QueryAsync<Relationship>(
-            new CommandDefinition(ListByParentTableSql, new { tableId = parentTableId }, cancellationToken: ct));
-        return rows.AsList();
-    }
-
-    public async Task<IReadOnlyList<Relationship>> ListByChildTableAsync(long childTableId, CancellationToken ct = default)
-    {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var rows = await connection.QueryAsync<Relationship>(
-            new CommandDefinition(ListByChildTableSql, new { tableId = childTableId }, cancellationToken: ct));
-        return rows.AsList();
-    }
-
-    public async Task<int> SoftDeleteAsync(Guid publicId, CancellationToken ct = default)
-    {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        return await connection.ExecuteAsync(
-            new CommandDefinition(SoftDeleteSql, new { publicId, deletedBy = QueryContext.UserId }, cancellationToken: ct));
     }
 }

@@ -39,5 +39,8 @@ public record RunReportQuery(
     string? SummarySortKey = null,
     bool SummarySortDesc = false,
     /// <summary>The caller already has the match count for this exact question (only the page changed): skip the COUNT query and
-    /// answer TotalCount = -1 (keep yours). Ignored when the report shows totals (they need the count).</summary>
-    bool SkipCount = false);
+    /// answer TotalCount = -1 (keep yours).</summary>
+    bool SkipCount = false,
+    /// <summary>The caller already has the column totals for this exact question (only the page changed): skip TotalsOverAllMatchesAsync
+    /// and answer TotalsSkipped = true (keep yours).</summary>
+    bool SkipTotals = false);

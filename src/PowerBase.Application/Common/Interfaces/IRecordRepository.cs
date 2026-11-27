@@ -193,6 +193,12 @@ public interface IRecordRepository
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListByPublicIdsAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<Guid> publicIds, CancellationToken ct = default);
 
+    /// <summary>Dynamic minimal SQL fetch for ONLY the fields/system columns not already hydrated from Azure AI Search.</summary>
+    Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListColumnsByPublicIdsAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<Guid> publicIds,
+        bool includeRecordId = true, bool includeAuditColumns = true, CancellationToken ct = default)
+        => ListByPublicIdsAsync(table, fields, publicIds, ct);
+
     /// <summary>The live rows matching <paramref name="filterTree"/> in ONE query — no paging and no command timeout (the
     /// request's cancellation token still aborts it), but at most <see cref="Records.InMemoryReadLimit.Rows"/> of them, in
     /// <paramref name="sortFields"/> order. Rows are decrypted. For reports that filter, sort or total computed (Formula)

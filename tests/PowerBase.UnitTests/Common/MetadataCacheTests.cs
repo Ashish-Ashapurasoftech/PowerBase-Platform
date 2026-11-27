@@ -125,4 +125,53 @@ public class MetadataCacheTests
 
         loads.Should().Be(4);
     }
+
+    [Theory]
+    [InlineData("InMemory", CacheProviderKind.InMemory)]
+    [InlineData("Redis", CacheProviderKind.Redis)]
+    [InlineData("AzureCache", CacheProviderKind.AzureCache)]
+    [InlineData("AzureRedis", CacheProviderKind.AzureCache)]
+    public void Options_resolve_configured_cache_provider(string provider, CacheProviderKind expected)
+    {
+        var opts = new MetadataCacheOptions { Provider = provider };
+        opts.ResolveProvider().Should().Be(expected);
+    }
+
+    [Fact]
+    public async Task Distributed_provider_without_connection_string_falls_back_to_in_memory()
+    {
+        using var cache = new MetadataCache(
+            new MemoryCache(new MemoryCacheOptions()),
+            Options.Create(new MetadataCacheOptions { Provider = "AzureCache", WriteQuarantineSeconds = 0, TransactionQuarantineSeconds = 0 }),
+            NullLogger<MetadataCache>.Instance);
+        cache.ActiveProvider.Should().Be(CacheProviderKind.InMemory);
+
+        var loads = 0;
+        Task<string> Load() { loads++; return Task.FromResult("ok"); }
+        (await cache.GetOrAddAsync(1, "relationships", "child:7", Load)).Should().Be("ok");
+        (await cache.GetOrAddAsync(1, "relationships", "child:7", Load)).Should().Be("ok");
+        loads.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Disabling_UseInMemoryCache_skips_local_memory_cache_for_multi_instance_deployments()
+    {
+        using var cache = new MetadataCache(
+            new MemoryCache(new MemoryCacheOptions()),
+            Options.Create(new MetadataCacheOptions
+            {
+                UseInMemoryCache = false,
+                Provider = "AzureCache",
+                WriteQuarantineSeconds = 0,
+                TransactionQuarantineSeconds = 0
+            }),
+            NullLogger<MetadataCache>.Instance);
+
+        var loads = 0;
+        Task<string> Load() { loads++; return Task.FromResult("v"); }
+        await cache.GetOrAddAsync(1, "fields", "t:1", Load);
+        await cache.GetOrAddAsync(1, "fields", "t:1", Load);
+
+        loads.Should().Be(2);
+    }
 }

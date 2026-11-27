@@ -27,6 +27,8 @@ public class ReportRunResponse
     /// <summary>True when a column that opted into a total/average row is missing from Totals because its total couldn't be
     /// worked out exactly over every matching record — left out rather than shown covering only some.</summary>
     public bool TotalsIncomplete { get; init; }
+    /// <summary>True when totals were intentionally skipped (RunReportRequest.SkipTotals) so the client keeps its existing totals.</summary>
+    public bool TotalsSkipped { get; init; }
     /// <summary>Paged Summary reports only (RunReportRequest.PageSummary): the grand-totals row over every
     /// group, not just this page, keyed by column Key. Null value = no total for that column (Distinct
     /// Count, Std Dev, Median, summary formulas, % of total, non-numeric Min/Max). Null when not paged.</summary>

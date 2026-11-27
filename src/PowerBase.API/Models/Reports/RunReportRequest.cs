@@ -48,4 +48,8 @@ public class RunReportRequest
     /// <summary>Only the page changed since the last run with the same filters and sort: the client keeps its count, the server skips the
     /// COUNT query and answers totalCount = -1.</summary>
     public bool SkipCount { get; set; }
+
+    /// <summary>Only the page changed since the last run with the same filters and sort: the client keeps its column totals, the server
+    /// skips the Totals aggregate query and answers totalsSkipped = true.</summary>
+    public bool SkipTotals { get; set; }
 }

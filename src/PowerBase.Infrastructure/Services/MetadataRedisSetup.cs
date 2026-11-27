@@ -55,6 +55,33 @@ public static class MetadataRedisSetup
             });
             return true;
         }
+
+        // Also honor MetadataCache:Provider ("Redis" | "AzureCache") + top-level connection strings.
+        var opts = configuration.GetSection(PowerBase.Application.Common.Configurations.MetadataCacheOptions.SectionName)
+            .Get<PowerBase.Application.Common.Configurations.MetadataCacheOptions>();
+        var provider = opts?.ResolveProvider() ?? PowerBase.Application.Common.Configurations.CacheProviderKind.InMemory;
+        var providerConn = opts?.ResolveDistributedConnectionString();
+        if (provider != PowerBase.Application.Common.Configurations.CacheProviderKind.InMemory && IsSet(providerConn))
+        {
+            var effectiveInstance = IsSet(section["InstanceName"]) ? instanceName : opts!.KeyPrefix;
+            services.AddStackExchangeRedisCache(o =>
+            {
+                o.InstanceName = effectiveInstance;
+                o.ConnectionMultiplexerFactory = async () =>
+                {
+                    var cfg = ConfigurationOptions.Parse(providerConn!);
+                    cfg.AbortOnConnectFail = false;
+                    cfg.ConnectTimeout = Math.Max(200, opts!.DistributedConnectTimeoutMs);
+                    cfg.SyncTimeout = Math.Max(200, opts.DistributedOperationTimeoutMs);
+                    cfg.AsyncTimeout = Math.Max(200, opts.DistributedOperationTimeoutMs);
+                    if (provider == PowerBase.Application.Common.Configurations.CacheProviderKind.AzureCache
+                        && !providerConn!.Contains("ssl=", StringComparison.OrdinalIgnoreCase))
+                        cfg.Ssl = true;
+                    return await ConnectionMultiplexer.ConnectAsync(cfg);
+                };
+            });
+            return true;
+        }
         return false;
     }
 

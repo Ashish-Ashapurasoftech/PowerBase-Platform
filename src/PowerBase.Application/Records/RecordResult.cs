@@ -138,7 +138,7 @@ public class RecordResult
         return new RecordResult
         {
             Id = (Guid)row["PublicId"]!,
-            CreatedOn = (DateTime)row["CreatedOn"]!,
+            CreatedOn = row.TryGetValue("CreatedOn", out var co) && co is DateTime coDate ? coDate : default,
             ModifiedOn = row.TryGetValue("ModifiedOn", out var mo) && mo is DateTime moDate ? moDate : null,
             CreatedBy = createdBy,
             CreatedByName = userNames != null && userNames.TryGetValue(createdBy, out var creatorName) ? creatorName : null,

@@ -1,5 +1,12 @@
 namespace PowerBase.Application.Common.Configurations;
 
+public enum CacheProviderKind
+{
+    InMemory = 0,
+    Redis = 1,
+    AzureCache = 2,
+}
+
 /// <summary>Settings of the metadata cache, from the "MetadataCache" section of the configuration. Every value has a default, so the section is optional.</summary>
 public class MetadataCacheOptions
 {
@@ -7,6 +14,27 @@ public class MetadataCacheOptions
 
     /// <summary>Kill switch: false makes every read go to the database, exactly as before the cache existed.</summary>
     public bool Enabled { get; set; } = true;
+
+    /// <summary>Whether process-local L1 memory caching is used. Set to false in multi-instance deployments that should read strictly from shared Redis / Azure Cache and SQL without per-instance L1 copies.</summary>
+    public bool UseInMemoryCache { get; set; } = true;
+
+    /// <summary>Cache backing store: "InMemory" (default, process-local), "Redis" (L1 memory + Redis L2), or "AzureCache" (L1 memory + Azure Cache for Redis over TLS).</summary>
+    public string Provider { get; set; } = nameof(CacheProviderKind.InMemory);
+
+    /// <summary>Connection string when <see cref="Provider"/> is "Redis".</summary>
+    public string? RedisConnectionString { get; set; }
+
+    /// <summary>Connection string when <see cref="Provider"/> is "AzureCache" (Azure Cache for Redis / Azure Managed Redis).</summary>
+    public string? AzureCacheConnectionString { get; set; }
+
+    /// <summary>Key prefix in Redis / Azure Cache so environments or apps sharing one cache never collide.</summary>
+    public string KeyPrefix { get; set; } = "pb:meta:";
+
+    /// <summary>Connect timeout in ms for Redis / Azure Cache (falls back to L1/SQL on failure).</summary>
+    public int DistributedConnectTimeoutMs { get; set; } = 1000;
+
+    /// <summary>Operation timeout in ms for Redis / Azure Cache reads/writes.</summary>
+    public int DistributedOperationTimeoutMs { get; set; } = 1000;
 
     /// <summary>Backstop only — entries are normally dropped by the write that changes them.</summary>
     public int TtlHours { get; set; } = 24;
@@ -29,7 +57,7 @@ public class MetadataCacheOptions
     public long SizeLimitEntries { get; set; } = 100_000;
 
     /// <summary>Optional L2 (Azure Managed Redis), shared by every instance, for non-security groups only. Off unless
-    /// <c>MetadataCache:Redis:ConnectionString</c> is set.</summary>
+    /// <c>MetadataCache:Redis:ConnectionString</c>/<c>Host</c> or <c>MetadataCache:Provider</c> is set.</summary>
     public RedisOptions Redis { get; set; } = new();
 
     /// <summary>Longest wait for an L2 read before answering from SQL (and skipping L2 for 30 s).</summary>
@@ -50,4 +78,27 @@ public class MetadataCacheOptions
         /// <summary>Prefix inside Redis. Default "powerbase:{environment}:", so environments sharing one Redis never meet.</summary>
         public string? InstanceName { get; set; }
     }
+
+    public CacheProviderKind ResolveProvider() =>
+        Provider?.Trim() switch
+        {
+            var p when string.Equals(p, nameof(CacheProviderKind.Redis), StringComparison.OrdinalIgnoreCase) => CacheProviderKind.Redis,
+            var p when string.Equals(p, nameof(CacheProviderKind.AzureCache), StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(p, "AzureRedis", StringComparison.OrdinalIgnoreCase) => CacheProviderKind.AzureCache,
+            _ when !string.IsNullOrWhiteSpace(Redis.Host) => CacheProviderKind.AzureCache,
+            _ when !string.IsNullOrWhiteSpace(Redis.ConnectionString) => CacheProviderKind.Redis,
+            _ => CacheProviderKind.InMemory,
+        };
+
+    public string? ResolveDistributedConnectionString() =>
+        ResolveProvider() switch
+        {
+            CacheProviderKind.AzureCache => !string.IsNullOrWhiteSpace(AzureCacheConnectionString)
+                ? AzureCacheConnectionString
+                : !string.IsNullOrWhiteSpace(RedisConnectionString) ? RedisConnectionString : Redis.Host ?? Redis.ConnectionString,
+            CacheProviderKind.Redis => !string.IsNullOrWhiteSpace(RedisConnectionString)
+                ? RedisConnectionString
+                : !string.IsNullOrWhiteSpace(AzureCacheConnectionString) ? AzureCacheConnectionString : Redis.ConnectionString,
+            _ => null,
+        };
 }

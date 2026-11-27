@@ -940,10 +940,36 @@ public class AzureSearchService : IAzureSearchService
         long tenantId, long tableId, string? searchText, string? odataFilter, int page, int pageSize,
         IReadOnlyList<string>? orderBy = null, string? indexName = null, CancellationToken ct = default)
     {
+        var (rows, totalCount) = await ExecutePagedSearchAsync(tenantId, tableId, searchText, odataFilter, page, pageSize, selectFields: null, orderBy, indexName, ct);
+        return (rows.Select(r => r.PublicId).ToList(), totalCount);
+    }
+
+    public async Task<(IReadOnlyList<SearchDocumentRow> Rows, long TotalCount)?> SearchRecordsWithDocumentsPagedAsync(
+        long tenantId, long tableId, string? searchText, string? odataFilter, int page, int pageSize,
+        IReadOnlyList<string> selectFields, IReadOnlyList<string>? orderBy = null, string? indexName = null, CancellationToken ct = default)
+    {
+        if (!_isEnabled) return ([], 0);
+        return await ExecutePagedSearchAsync(tenantId, tableId, searchText, odataFilter, page, pageSize, selectFields, orderBy, indexName, ct);
+    }
+
+    public async Task<IReadOnlyList<SearchDocumentRow>?> SearchDocumentsByFilterAsync(
+        long tenantId, long tableId, string odataFilter, IReadOnlyList<string> selectFields,
+        int maxResults = 2000, string? indexName = null, CancellationToken ct = default)
+    {
+        if (!_isEnabled) return [];
+        var (rows, total) = await ExecutePagedSearchAsync(tenantId, tableId, null, odataFilter, 1, maxResults, selectFields, null, indexName, ct);
+        if (total > rows.Count) return null; // caller falls back when matches exceed maxResults
+        return rows;
+    }
+
+    private async Task<(IReadOnlyList<SearchDocumentRow> Rows, long TotalCount)> ExecutePagedSearchAsync(
+        long tenantId, long tableId, string? searchText, string? odataFilter, int page, int pageSize,
+        IReadOnlyList<string>? selectFields, IReadOnlyList<string>? orderBy, string? indexName, CancellationToken ct)
+    {
         if (!_isEnabled) return ([], 0);
 
         var shardNames = GetShardsForTable(tenantId, tableId, indexName);
-        var allIds = new List<Guid>();
+        var allRows = new List<SearchDocumentRow>();
         long totalCount = 0;
 
         var baseFilter = $"tenantId eq '{tenantId}' and tableId eq {tableId}";
@@ -965,6 +991,14 @@ public class AzureSearchService : IAzureSearchService
                 QueryType = !string.IsNullOrWhiteSpace(searchText) ? SearchQueryType.Full : SearchQueryType.Simple
             };
             options.Select.Add("id");
+            if (selectFields != null)
+            {
+                foreach (var sf in selectFields)
+                {
+                    if (!string.IsNullOrWhiteSpace(sf) && !string.Equals(sf, "id", StringComparison.OrdinalIgnoreCase))
+                        options.Select.Add(sf);
+                }
+            }
 
             if (!string.IsNullOrWhiteSpace(searchText))
             {
@@ -990,7 +1024,16 @@ public class AzureSearchService : IAzureSearchService
                 {
                     if (Guid.TryParse(result.Document["id"]?.ToString(), out var id))
                     {
-                        allIds.Add(id);
+                        var vals = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                        if (selectFields != null)
+                        {
+                            foreach (var sf in selectFields)
+                            {
+                                if (result.Document.TryGetValue(sf, out var v))
+                                    vals[sf] = v;
+                            }
+                        }
+                        allRows.Add(new SearchDocumentRow(id, vals));
                     }
                 }
             }
@@ -1004,7 +1047,7 @@ public class AzureSearchService : IAzureSearchService
             }
         }
 
-        return (allIds.Take(pageSize).ToList(), totalCount);
+        return (allRows.Take(pageSize).ToList(), totalCount);
     }
 
     public Task<IReadOnlyList<Guid>> SearchRecordsByFilterAsync(long tenantId, long tableId, string odataFilter, CancellationToken ct = default)

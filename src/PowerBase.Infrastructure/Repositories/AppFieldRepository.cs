@@ -386,6 +386,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     private void FieldsChanging(bool inTransaction = false)
     {
         _cache.Invalidate(QueryContext.TenantId, FieldsCacheGroup, inTransaction);
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Relationships, inTransaction);
         // The role field-access maps are read through a join on meta.AppField.
         _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Access, inTransaction);
     }

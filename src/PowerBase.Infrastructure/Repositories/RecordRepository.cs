@@ -434,19 +434,37 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     }
 
     /// <inheritdoc />
-    public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListByPublicIdsAsync(
+    public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListByPublicIdsAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<Guid> publicIds, CancellationToken ct = default)
+        => ListColumnsByPublicIdsAsync(table, fields, publicIds, includeRecordId: true, includeAuditColumns: true, ct);
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListColumnsByPublicIdsAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<Guid> publicIds,
+        bool includeRecordId = true, bool includeAuditColumns = true, CancellationToken ct = default)
     {
         if (publicIds.Count == 0) return [];
 
         var fieldCols = BuildFieldColumnList(fields);
+        var idCol = includeRecordId ? "Id, " : string.Empty;
+        var auditCols = includeAuditColumns ? ", CreatedOn, CreatedBy, ModifiedOn, ModifiedBy" : string.Empty;
         var parameters = new DynamicParameters();
-        parameters.Add("publicIds", publicIds);
+        string publicIdWhere;
+        if (publicIds.Count > SqlInList.MaxParameters)
+        {
+            parameters.Add("publicIds", JsonSerializer.Serialize(publicIds));
+            publicIdWhere = "PublicId IN (SELECT CAST([value] AS UNIQUEIDENTIFIER) FROM OPENJSON(@publicIds))";
+        }
+        else
+        {
+            parameters.Add("publicIds", publicIds);
+            publicIdWhere = "PublicId IN @publicIds";
+        }
 
         var sql = $"""
-            SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
+            SELECT {idCol}PublicId{auditCols}{fieldCols}
             FROM {PhysicalNaming.FullTableName(table.Id)}
-            WHERE IsDeleted = 0 AND PublicId IN @publicIds
+            WHERE IsDeleted = 0 AND {publicIdWhere}
             """;
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
@@ -612,7 +630,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
 
         var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(table.Id)}{ReportFromAlias(sqlLookupFids)} WHERE IsDeleted = 0{filterWhere}";
-        return await ReadDataAsync(c => c.ExecuteScalarAsync<int>(new CommandDefinition(sql, parameters, cancellationToken: ct)), ct);
+        return await ReadDataAsync(c => c.ExecuteScalarAsync<int>(new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct)), ct);
     }
 
     public async Task<IReadOnlyDictionary<long, Application.Records.ColumnTotal>> AggregateColumnsAsync(
@@ -755,8 +773,14 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     public async Task<IReadOnlyList<long>> GetIdsByPublicIdsAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, CancellationToken ct = default)
     {
         if (publicIds.Count == 0) return [];
-        var sql = $"SELECT Id FROM {PhysicalNaming.FullTableName(table.Id)} WHERE PublicId IN @publicIds AND IsDeleted = 0";
         await using var connection = await ConnectionFactory.CreateAsync(ct);
+        if (publicIds.Count > SqlInList.MaxParameters)
+        {
+            var jsonSql = $"SELECT Id FROM {PhysicalNaming.FullTableName(table.Id)} WHERE PublicId IN (SELECT CAST([value] AS UNIQUEIDENTIFIER) FROM OPENJSON(@publicIds)) AND IsDeleted = 0";
+            var jsonIds = await connection.QueryAsync<long>(new CommandDefinition(jsonSql, new { publicIds = JsonSerializer.Serialize(publicIds) }, cancellationToken: ct));
+            return jsonIds.AsList();
+        }
+        var sql = $"SELECT Id FROM {PhysicalNaming.FullTableName(table.Id)} WHERE PublicId IN @publicIds AND IsDeleted = 0";
         var ids = await connection.QueryAsync<long>(new CommandDefinition(sql, new { publicIds }, cancellationToken: ct));
         return ids.AsList();
     }
@@ -3833,6 +3857,23 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             {
                 var values = ParseValueList(cond.Value);
                 if (values.Count == 0) { i--; return null; }
+                var op = cond.Operator == "in" ? "IN" : "NOT IN";
+                if (isNumericCol && values.Count > SqlInList.MaxParameters)
+                {
+                    var wholeIds = new List<long>(values.Count);
+                    var allLong = true;
+                    foreach (var v in values)
+                    {
+                        if (long.TryParse(v, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var lid))
+                            wholeIds.Add(lid);
+                        else { allLong = false; break; }
+                    }
+                    if (allLong)
+                    {
+                        p.Add(pname, JsonSerializer.Serialize(wholeIds));
+                        return $"{colExpr} {op} (SELECT k FROM OPENJSON(@{pname}) WITH (k BIGINT '$'))";
+                    }
+                }
                 var names = new List<string>(values.Count);
                 var hasNonNumeric = false;
                 var formattedValues = new List<object?>(values.Count);
@@ -3849,7 +3890,6 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                     p.Add(pn, formattedValues[idx]);
                     names.Add($"@{pn}");
                 }
-                var op = cond.Operator == "in" ? "IN" : "NOT IN";
                 var targetExpr = (isNumericCol && hasNonNumeric) ? stringColExpr : colExpr;
                 return $"{targetExpr} {op} ({string.Join(",", names)})";
             }

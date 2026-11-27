@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
@@ -7,22 +8,24 @@ using Microsoft.Extensions.Primitives;
 using PowerBase.Application.Common.Caching;
 using PowerBase.Application.Common.Configurations;
 using PowerBase.Application.Common.Interfaces;
+using StackExchange.Redis;
 
 namespace PowerBase.Infrastructure.Services;
 
 /// <summary>
-/// Process-local metadata cache whose invalidation reaches every instance (ARC-01). Each write bumps the group's shared version in
-/// SQL (<see cref="ICacheVersionStore"/>) besides dropping it here; every instance compares those versions with what it last saw —
-/// once per request (<see cref="CacheVersionScope"/>), at most every <see cref="MetadataCacheOptions.VersionCheckIntervalMs"/> in
-/// background work — and drops a group whose version moved, keeping it out of the cache for the write's quarantine. Security groups
-/// (<see cref="MetadataCacheGroups.IsSecurityRelevant"/>) are never served from the cache when the versions cannot be read.
+/// Metadata cache supporting configurable backing stores via <see cref="MetadataCacheOptions.Provider"/>:
+/// <c>InMemory</c> (process-local <see cref="IMemoryCache"/>), <c>Redis</c> (L1 memory + Redis L2), or
+/// <c>AzureCache</c> (L1 memory + Azure Cache for Redis over TLS). Shared versions in SQL (<see cref="ICacheVersionStore"/>)
+/// reach every API instance (ARC-01). Security groups (<see cref="MetadataCacheGroups.IsSecurityRelevant"/>) are never served
+/// from cache when shared versions cannot be read.
 /// </summary>
-public sealed class MetadataCache : IMetadataCache
+public sealed class MetadataCache : IMetadataCache, IDisposable
 {
     private sealed class GroupState
     {
         public CancellationTokenSource Cts = new();
         public long Version;
+        public long SharedVersion;
         public long QuarantineUntilTicks;
     }
 
@@ -39,13 +42,17 @@ public sealed class MetadataCache : IMetadataCache
     }
 
     private static readonly string[] TenantGroups =
-        [MetadataCacheGroups.Fields, MetadataCacheGroups.Tables, MetadataCacheGroups.Apps, MetadataCacheGroups.Access, MetadataCacheGroups.Ids];
+        [MetadataCacheGroups.Fields, MetadataCacheGroups.Tables, MetadataCacheGroups.Apps, MetadataCacheGroups.Relationships, MetadataCacheGroups.Access, MetadataCacheGroups.Ids];
     private static readonly string[] GlobalGroups = [MetadataCacheGroups.UserPermissions, MetadataCacheGroups.Sessions];
+    private static readonly JsonSerializerOptions RedisJsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     private readonly IMemoryCache _cache;
     private readonly MetadataCacheOptions _options;
     private readonly ILogger<MetadataCache> _logger;
     private readonly ICacheVersionStore? _versions;
+    private readonly CacheProviderKind _provider;
+    private readonly string? _distributedConn;
+    private readonly Lazy<ConnectionMultiplexer?> _redis;
     private readonly ConcurrentDictionary<(long Tenant, string Group), GroupState> _groups = new();
     private readonly ConcurrentDictionary<long, TenantVersions> _tenantVersions = new();
 
@@ -62,7 +69,7 @@ public sealed class MetadataCache : IMetadataCache
     private readonly ConcurrentDictionary<(long Tenant, string Group), long> _l2BlockedUntilTicks = new();
     private static readonly System.Text.Json.JsonSerializerOptions L2Json = new(System.Text.Json.JsonSerializerDefaults.General);
     private static readonly HashSet<string> L2Groups = new(StringComparer.Ordinal)
-        { MetadataCacheGroups.Fields, MetadataCacheGroups.Tables, MetadataCacheGroups.Apps, MetadataCacheGroups.Ids };
+        { MetadataCacheGroups.Fields, MetadataCacheGroups.Tables, MetadataCacheGroups.Apps, MetadataCacheGroups.Relationships, MetadataCacheGroups.Ids };
 
     public MetadataCache(IMemoryCache cache, IOptions<MetadataCacheOptions> options, ILogger<MetadataCache> logger, ICacheVersionStore? versions = null,
         IDistributedCache? l2 = null)
@@ -76,7 +83,13 @@ public sealed class MetadataCache : IMetadataCache
             : cache;
         _logger = logger;
         _versions = _options.SharedVersions ? versions : null;
+        _provider = _options.ResolveProvider();
+        _distributedConn = _options.ResolveDistributedConnectionString();
+        _redis = new Lazy<ConnectionMultiplexer?>(ConnectDistributed, LazyThreadSafetyMode.ExecutionAndPublication);
     }
+
+    public CacheProviderKind ActiveProvider =>
+        _provider != CacheProviderKind.InMemory && !string.IsNullOrWhiteSpace(_distributedConn) ? _provider : CacheProviderKind.InMemory;
 
     public async Task<T> GetOrAddAsync<T>(long tenantId, string group, string key, Func<Task<T>> factory) where T : class
     {
@@ -98,19 +111,21 @@ public sealed class MetadataCache : IMetadataCache
 
         var state = _groups.GetOrAdd((tenantId, group), _ => new GroupState());
         var cacheKey = $"mc:{tenantId}:{group}:{key}";
-        if (_cache.TryGetValue(cacheKey, out T? hit) && hit is not null)
+        if (_options.UseInMemoryCache && _cache.TryGetValue(cacheKey, out T? hit) && hit is not null)
         {
-            _logger.LogDebug("Metadata cache hit {Key}", cacheKey);
+            _logger.LogDebug("Metadata cache L1 hit {Key}", cacheKey);
             CacheMetrics.Lookup(group, CacheMetrics.Source.L1);
             return hit;
         }
 
         long version;
+        long sharedVersion;
         CancellationToken token;
         bool quarantined;
         lock (state)
         {
             version = state.Version;
+            sharedVersion = state.SharedVersion;
             token = state.Cts.Token;
             quarantined = DateTime.UtcNow.Ticks < state.QuarantineUntilTicks;
         }
@@ -123,15 +138,15 @@ public sealed class MetadataCache : IMetadataCache
         }
         else
         {
-            var mine = new Lazy<Task<object?>>(async () => await LoadAsync(tenantId, group, key, factory));
+            var mine = new Lazy<Task<object?>>(async () => await LoadAsync(tenantId, group, sharedVersion, key, factory));
             var load = _inflight.GetOrAdd(cacheKey, mine);
             // The loading request counts where it was answered (L2 or SQL, inside LoadAsync); the others waited for it.
             if (!ReferenceEquals(load, mine)) CacheMetrics.Lookup(group, CacheMetrics.Source.Shared);
             try { value = (T?)await load.Value; }
             finally { _inflight.TryRemove(new KeyValuePair<string, Lazy<Task<object?>>>(cacheKey, load)); }
         }
-        _logger.LogDebug("Metadata cache miss {Key}", cacheKey);
-        if (value is null || quarantined) return value;
+        _logger.LogDebug("Metadata cache miss {Key} (provider={Provider})", cacheKey, ActiveProvider);
+        if (value is null || quarantined || !_options.UseInMemoryCache) return value!;
 
         lock (state)
         {
@@ -149,7 +164,7 @@ public sealed class MetadataCache : IMetadataCache
     }
 
     /// <summary>L1 miss: the shared L2 first (when on and healthy), then SQL — whose answer is also put in L2 for the other instances.</summary>
-    private async Task<object?> LoadAsync<T>(long tenantId, string group, string key, Func<Task<T>> factory) where T : class
+    private async Task<object?> LoadAsync<T>(long tenantId, string group, long sharedVersion, string key, Func<Task<T>> factory) where T : class
     {
         var (l2Key, mayShare) = L2Key(tenantId, group, key);
         if (l2Key is not null)
@@ -169,6 +184,12 @@ public sealed class MetadataCache : IMetadataCache
                 L2Down(ex);
                 l2Key = null;
             }
+        }
+        else if (_l2 is null && ActiveProvider != CacheProviderKind.InMemory && !MetadataCacheGroups.IsSecurityRelevant(group)
+            && await TryGetDistributedAsync<T>(tenantId, group, sharedVersion, key) is { } muxHit)
+        {
+            CacheMetrics.Lookup(group, CacheMetrics.Source.L2);
+            return muxHit;
         }
 
         CacheMetrics.Lookup(group, CacheMetrics.Source.Sql);
@@ -190,6 +211,10 @@ public sealed class MetadataCache : IMetadataCache
                 }
                 catch (Exception ex) { L2Down(ex); }
             });
+        }
+        else if (_l2 is null && value is not null && ActiveProvider != CacheProviderKind.InMemory && !MetadataCacheGroups.IsSecurityRelevant(group))
+        {
+            await TrySetDistributedAsync(tenantId, group, sharedVersion, key, value);
         }
         return value;
     }
@@ -272,6 +297,7 @@ public sealed class MetadataCache : IMetadataCache
         lock (state)
         {
             state.Version++;
+            state.SharedVersion++;
             state.QuarantineUntilTicks = Math.Max(state.QuarantineUntilTicks, (DateTime.UtcNow + quarantine).Ticks);
             old = state.Cts;
             state.Cts = new CancellationTokenSource();
@@ -331,6 +357,11 @@ public sealed class MetadataCache : IMetadataCache
                 moved.AddRange(_groups.Keys.Where(k => k.Tenant == tenantId).Select(k => k.Group));
             tv.EverRead = true;
             tv.Available = true;
+            foreach (var group in groups)
+            {
+                if (_groups.TryGetValue((tenantId, group), out var gs))
+                    lock (gs) gs.SharedVersion = tv.Seen.TryGetValue(group, out var sv) ? sv : 0;
+            }
         }
         foreach (var group in moved.Distinct())
         {
@@ -339,5 +370,70 @@ public sealed class MetadataCache : IMetadataCache
             InvalidateLocal(tenantId, group, inTransaction: true);
         }
         return true;
+    }
+
+    private ConnectionMultiplexer? ConnectDistributed()
+    {
+        if (string.IsNullOrWhiteSpace(_distributedConn)) return null;
+        try
+        {
+            var config = ConfigurationOptions.Parse(_distributedConn);
+            config.AbortOnConnectFail = false;
+            config.ConnectTimeout = Math.Max(200, _options.DistributedConnectTimeoutMs);
+            config.SyncTimeout = Math.Max(200, _options.DistributedOperationTimeoutMs);
+            config.AsyncTimeout = Math.Max(200, _options.DistributedOperationTimeoutMs);
+            if (_provider == CacheProviderKind.AzureCache && !_distributedConn.Contains("ssl=", StringComparison.OrdinalIgnoreCase))
+                config.Ssl = true;
+            return ConnectionMultiplexer.Connect(config);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not connect to {Provider} metadata cache; falling back to L1 InMemory cache", _provider);
+            return null;
+        }
+    }
+
+    private string DistributedKey(long tenantId, string group, long sharedVersion, string key) =>
+        $"{_options.KeyPrefix}{tenantId}:{group}:v{sharedVersion}:{key}";
+
+    private async Task<T?> TryGetDistributedAsync<T>(long tenantId, string group, long sharedVersion, string key) where T : class
+    {
+        try
+        {
+            var mux = _redis.Value;
+            if (mux is null || !mux.IsConnected) return null;
+            var raw = await mux.GetDatabase().StringGetAsync(DistributedKey(tenantId, group, sharedVersion, key));
+            if (raw.IsNullOrEmpty) return null;
+            return JsonSerializer.Deserialize<T>(raw.ToString(), RedisJsonOptions);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Distributed cache read skipped for {Group}/{Key}", group, key);
+            return null;
+        }
+    }
+
+    private async Task TrySetDistributedAsync<T>(long tenantId, string group, long sharedVersion, string key, T value) where T : class
+    {
+        try
+        {
+            var mux = _redis.Value;
+            if (mux is null || !mux.IsConnected) return;
+            var json = JsonSerializer.Serialize(value, RedisJsonOptions);
+            await mux.GetDatabase().StringSetAsync(
+                DistributedKey(tenantId, group, sharedVersion, key),
+                json,
+                TimeSpan.FromHours(Math.Max(1, _options.TtlHours)));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Distributed cache write skipped for {Group}/{Key}", group, key);
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_redis.IsValueCreated)
+            _redis.Value?.Dispose();
     }
 }

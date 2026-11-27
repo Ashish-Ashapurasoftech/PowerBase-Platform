@@ -585,7 +585,8 @@ public class ReportsController : ControllerBase
             request.PageSummary,
             request.SummarySortKey,
             request.SummarySortDesc,
-            request.SkipCount), ct);
+            request.SkipCount,
+            request.SkipTotals), ct);
     }
 
     /// <summary>
@@ -685,6 +686,7 @@ public class ReportsController : ControllerBase
             kv => new ReportColumnTotalDto { Sum = kv.Value.Sum, NonBlankCount = kv.Value.NonBlankCount, RowCount = kv.Value.RowCount }),
         InMemoryRowLimit = result.InMemoryRowLimit,
         TotalsIncomplete = result.TotalsIncomplete,
+        TotalsSkipped = result.TotalsSkipped,
         SummaryTotals = result.SummaryTotals,
         CrosstabSummary = result.CrosstabSummary,
     };

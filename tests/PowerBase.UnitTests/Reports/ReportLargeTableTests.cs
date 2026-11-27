@@ -377,4 +377,200 @@ public class ReportLargeTableTests
         await _recordRepo.Received(1).ListAllMatchingAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(),
             Arg.Any<IReadOnlyList<SortSpec>?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>(), Arg.Is<IReadOnlySet<long>?>(l => l == null));
     }
+
+    [Fact]
+    public async Task Paging_with_SkipCount_and_SkipTotals_skips_both_count_and_totals_queries()
+    {
+        var fields = Fields().Where(f => f.Fid != Doubled).ToList();
+        var report = new Report
+        {
+            Id = 1, PublicId = ReportId, AppTableId = TableId, ReportType = "Table",
+            Definition = JsonSerializer.Serialize(new ReportDefinition { Columns = [Department, Budget] }),
+        };
+        _reportRepo.GetVisibleReportAsync(ReportId, Arg.Any<CancellationToken>()).Returns(report);
+        _tableRepo.GetByIdAsync(TableId, Arg.Any<CancellationToken>()).Returns(_table);
+        _appRepo.GetByIdAsync(AppId, Arg.Any<CancellationToken>()).Returns(_app);
+        _fieldRepo.ListByTableAsync(TableId, Arg.Any<CancellationToken>()).Returns(fields);
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(new TableAccessContext { Unrestricted = true, ViewScope = RecordScopes.AllRecords, VisibleFields = fields, EditableFieldIds = new HashSet<long>() });
+        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 2, 20,
+                Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>(), Arg.Any<IReadOnlySet<long>?>())
+            .Returns(Rows(20));
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector,
+            _relationalProjector, _searchService, _appUserRepo, _queryContext, Substitute.For<ILogger<RunReportQueryHandler>>(), _appRepo);
+
+        var result = await sut.HandleAsync(new RunReportQuery(ReportId, Page: 2, PageSize: 20, SkipCount: true, SkipTotals: true));
+
+        result.Items.Should().HaveCount(20);
+        result.TotalCount.Should().Be(-1);
+        result.TotalsSkipped.Should().BeTrue();
+        await _recordRepo.DidNotReceiveWithAnyArgs().CountAsync(default!, default!, default, default, default, default);
+        await _recordRepo.DidNotReceiveWithAnyArgs().AggregateColumnsAsync(default!, default!, default!, default, default, default, default);
+    }
+
+    [Fact]
+    public async Task Sql_only_totals_derive_totalCount_without_running_duplicate_CountAsync()
+    {
+        var fields = Fields().Where(f => f.Fid != Doubled).ToList();
+        var report = new Report
+        {
+            Id = 1, PublicId = ReportId, AppTableId = TableId, ReportType = "Table",
+            Definition = JsonSerializer.Serialize(new ReportDefinition { Columns = [Department, Budget] }),
+        };
+        _reportRepo.GetVisibleReportAsync(ReportId, Arg.Any<CancellationToken>()).Returns(report);
+        _tableRepo.GetByIdAsync(TableId, Arg.Any<CancellationToken>()).Returns(_table);
+        _appRepo.GetByIdAsync(AppId, Arg.Any<CancellationToken>()).Returns(_app);
+        _fieldRepo.ListByTableAsync(TableId, Arg.Any<CancellationToken>()).Returns(fields);
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(new TableAccessContext { Unrestricted = true, ViewScope = RecordScopes.AllRecords, VisibleFields = fields, EditableFieldIds = new HashSet<long>() });
+        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20,
+                Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>(), Arg.Any<IReadOnlySet<long>?>())
+            .Returns(Rows(20));
+        BudgetTotalInSqlIs(sum: 87_713m, rows: 87_713);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector,
+            _relationalProjector, _searchService, _appUserRepo, _queryContext, Substitute.For<ILogger<RunReportQueryHandler>>(), _appRepo);
+
+        var result = await sut.HandleAsync(new RunReportQuery(ReportId, Page: 1, PageSize: 20));
+
+        result.TotalCount.Should().Be(87_713);
+        result.Totals[Budget.ToString()].Sum.Should().Be(87_713m);
+        await _recordRepo.Received(1).AggregateColumnsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<AppField>>(),
+            Arg.Any<FilterGroup?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>(), Arg.Any<IReadOnlySet<long>?>());
+        await _recordRepo.DidNotReceiveWithAnyArgs().CountAsync(default!, default!, default, default, default, default);
+    }
+
+    [Fact]
+    public async Task Phase5_indexed_summary_report_hydrates_from_ai_search_with_zero_sql_row_reads()
+    {
+        const int TotalHours = 120;
+        var summaryField = new AppField
+        {
+            Id = TotalHours, Fid = TotalHours, Name = "Total Hours", TypeCode = "Summary",
+            Settings = """{"relationshipId":1,"function":"Sum","targetTypeCode":"Number"}""",
+            IsReportable = true, IsFilterable = true, SearchExact = true, SearchSlot = "num_02",
+            MaterializeMode = MaterializeModes.On, MaterializeState = MaterializeStates.Ready,
+            SearchIndexState = SearchIndexStates.Indexed, MaterializeVersion = 1, SearchIndexVersion = 1
+        };
+        var deptField = new AppField
+        {
+            Id = Department, Fid = Department, Name = "Department", TypeCode = "Text",
+            IsReportable = true, IsSearchable = true, IsFilterable = true, SearchSlot = "str_01"
+        };
+        var fields = new List<AppField>
+        {
+            new() { Id = 1, Fid = 1, Name = "Date Created", TypeCode = "DateTime", IsSystem = true, PhysicalColumnName = "CreatedOn", IsFilterable = true, SearchSlot = "date_01" },
+            new() { Id = 2, Fid = 2, Name = "Date Modified", TypeCode = "DateTime", IsSystem = true, PhysicalColumnName = "ModifiedOn", IsFilterable = true, SearchSlot = "date_02" },
+            new() { Id = 3, Fid = 3, Name = "Record ID#", TypeCode = "Number", IsSystem = true, PhysicalColumnName = "Id", IsFilterable = true, SearchExact = true, SearchSlot = "num_01" },
+            new() { Id = 4, Fid = 4, Name = "Record Owner", TypeCode = "User", IsSystem = true, PhysicalColumnName = "CreatedBy", IsFilterable = true, SearchExact = true, SearchSlot = "str_02" },
+            deptField,
+            summaryField
+        };
+
+        var report = new Report
+        {
+            Id = 1, PublicId = ReportId, AppTableId = TableId, ReportType = "Table",
+            Definition = JsonSerializer.Serialize(new ReportDefinition
+            {
+                Columns = [Department, TotalHours],
+                SortFields = [new SortSpec { FieldId = TotalHours, Desc = true }]
+            }),
+        };
+
+        _reportRepo.GetVisibleReportAsync(ReportId, Arg.Any<CancellationToken>()).Returns(report);
+        _tableRepo.GetByIdAsync(TableId, Arg.Any<CancellationToken>()).Returns(_table);
+        _appRepo.GetByIdAsync(AppId, Arg.Any<CancellationToken>()).Returns(_app);
+        _fieldRepo.ListByTableAsync(TableId, Arg.Any<CancellationToken>()).Returns(fields);
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(new TableAccessContext { Unrestricted = true, ViewScope = RecordScopes.AllRecords, VisibleFields = fields, EditableFieldIds = new HashSet<long>() });
+        _searchService.IsGridSearchEnabled.Returns(true);
+        _searchService.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
+        _recordRepo.ListRecordsChangedSinceAsync(Arg.Any<AppTable>(), Arg.Any<DateTime>(), Arg.Any<long>(), Arg.Any<long>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(new List<(long Id, DateTime ChangedOn)>());
+
+        var pid1 = Guid.NewGuid();
+        var pid2 = Guid.NewGuid();
+        _searchService.SearchRecordsWithDocumentsPagedAsync(
+                Arg.Any<long>(), TableId, Arg.Any<string?>(), Arg.Any<string?>(), 1, 20,
+                Arg.Any<IReadOnlyList<string>>(), Arg.Is<IReadOnlyList<string>?>(o => o != null && o.Contains("num_02 desc")),
+                Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns((
+                (IReadOnlyList<SearchDocumentRow>)
+                [
+                    new SearchDocumentRow(pid1, new Dictionary<string, object?> { ["num_01"] = 101d, ["str_01"] = "Eng", ["num_02"] = 15d, ["date_01"] = DateTimeOffset.UtcNow, ["date_02"] = DateTimeOffset.UtcNow, ["str_02"] = "1" }),
+                    new SearchDocumentRow(pid2, new Dictionary<string, object?> { ["num_01"] = 102d, ["str_01"] = "Ops", ["num_02"] = 8d, ["date_01"] = DateTimeOffset.UtcNow, ["date_02"] = DateTimeOffset.UtcNow, ["str_02"] = "1" })
+                ],
+                TotalCount: 2L));
+
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector,
+            _relationalProjector, _searchService, _appUserRepo, _queryContext, Substitute.For<ILogger<RunReportQueryHandler>>(), _appRepo);
+
+        var result = await sut.HandleAsync(new RunReportQuery(ReportId, Page: 1, PageSize: 20, SkipTotals: true));
+
+        result.Items.Should().HaveCount(2);
+        result.TotalCount.Should().Be(2);
+        await _recordRepo.DidNotReceiveWithAnyArgs().ListByPublicIdsAsync(default!, default!, default!, default);
+        await _recordRepo.DidNotReceiveWithAnyArgs().ListColumnsByPublicIdsAsync(default!, default!, default!, default, default, default);
+        await _relationalProjector.DidNotReceiveWithAnyArgs().ProjectAsync(default!, default!, default!, default);
+    }
+
+    [Fact]
+    public async Task AiSearch_document_hydration_fetches_only_missing_columns_when_one_field_is_not_indexed()
+    {
+        const int Notes = 121;
+        var notesField = new AppField { Id = Notes, Fid = Notes, Name = "Notes", TypeCode = "RichText", IsReportable = true, IsSearchable = false, IsFilterable = false };
+        var deptField = new AppField { Id = Department, Fid = Department, Name = "Department", TypeCode = "Text", IsReportable = true, IsSearchable = true, IsFilterable = true, SearchSlot = "str_01" };
+        var fields = new List<AppField>
+        {
+            new() { Id = 1, Fid = 1, Name = "Date Created", TypeCode = "DateTime", IsSystem = true, PhysicalColumnName = "CreatedOn", IsFilterable = true, SearchSlot = "date_01" },
+            new() { Id = 2, Fid = 2, Name = "Date Modified", TypeCode = "DateTime", IsSystem = true, PhysicalColumnName = "ModifiedOn", IsFilterable = true, SearchSlot = "date_02" },
+            new() { Id = 3, Fid = 3, Name = "Record ID#", TypeCode = "Number", IsSystem = true, PhysicalColumnName = "Id", IsFilterable = true, SearchExact = true, SearchSlot = "num_01" },
+            new() { Id = 4, Fid = 4, Name = "Record Owner", TypeCode = "User", IsSystem = true, PhysicalColumnName = "CreatedBy", IsFilterable = true, SearchExact = true, SearchSlot = "str_02" },
+            deptField,
+            notesField
+        };
+
+        var report = new Report
+        {
+            Id = 1, PublicId = ReportId, AppTableId = TableId, ReportType = "Table",
+            Definition = JsonSerializer.Serialize(new ReportDefinition { Columns = [Department, Notes] }),
+        };
+
+        _reportRepo.GetVisibleReportAsync(ReportId, Arg.Any<CancellationToken>()).Returns(report);
+        _tableRepo.GetByIdAsync(TableId, Arg.Any<CancellationToken>()).Returns(_table);
+        _appRepo.GetByIdAsync(AppId, Arg.Any<CancellationToken>()).Returns(_app);
+        _fieldRepo.ListByTableAsync(TableId, Arg.Any<CancellationToken>()).Returns(fields);
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(new TableAccessContext { Unrestricted = true, ViewScope = RecordScopes.AllRecords, VisibleFields = fields, EditableFieldIds = new HashSet<long>() });
+        _searchService.IsGridSearchEnabled.Returns(true);
+        _searchService.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
+        _recordRepo.ListRecordsChangedSinceAsync(Arg.Any<AppTable>(), Arg.Any<DateTime>(), Arg.Any<long>(), Arg.Any<long>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(new List<(long Id, DateTime ChangedOn)>());
+
+        var pid1 = Guid.NewGuid();
+        _searchService.SearchRecordsWithDocumentsPagedAsync(
+                Arg.Any<long>(), TableId, Arg.Any<string?>(), Arg.Any<string?>(), 1, 20,
+                Arg.Any<IReadOnlyList<string>>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns((
+                (IReadOnlyList<SearchDocumentRow>)[new SearchDocumentRow(pid1, new Dictionary<string, object?> { ["num_01"] = 101d, ["str_01"] = "Eng", ["date_01"] = DateTimeOffset.UtcNow, ["date_02"] = DateTimeOffset.UtcNow, ["str_02"] = "1" })],
+                TotalCount: 1L));
+        _recordRepo.ListColumnsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<Guid>>(),
+                Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            .Returns([new Dictionary<string, object?> { ["PublicId"] = pid1, [PhysicalNaming.ColumnName(Notes)] = "SQL note" }]);
+
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector,
+            _relationalProjector, _searchService, _appUserRepo, _queryContext, Substitute.For<ILogger<RunReportQueryHandler>>(), _appRepo);
+
+        var result = await sut.HandleAsync(new RunReportQuery(ReportId, Page: 1, PageSize: 20, SkipTotals: true));
+
+        result.Items.Should().HaveCount(1);
+        result.Items[0].Fields[Notes.ToString()].Should().Be("SQL note");
+        await _recordRepo.Received(1).ListColumnsByPublicIdsAsync(
+            _table,
+            Arg.Is<IReadOnlyList<AppField>>(missing => missing.Count == 1 && missing[0].Fid == Notes),
+            Arg.Is<IReadOnlyList<Guid>>(ids => ids.Count == 1 && ids[0] == pid1),
+            includeRecordId: false,
+            includeAuditColumns: false,
+            Arg.Any<CancellationToken>());
+        await _recordRepo.DidNotReceiveWithAnyArgs().ListByPublicIdsAsync(default!, default!, default!, default);
+    }
 }

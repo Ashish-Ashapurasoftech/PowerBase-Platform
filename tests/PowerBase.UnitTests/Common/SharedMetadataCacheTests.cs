@@ -153,7 +153,7 @@ public class SharedMetadataCacheTests
         var versions = new SharedVersions();
         Instance(versions).FlushTenant(Tenant);
         versions.Rows.Keys.Where(k => k.Item1 == Tenant).Select(k => k.Item2).Should().BeEquivalentTo(
-            [MetadataCacheGroups.Fields, MetadataCacheGroups.Tables, MetadataCacheGroups.Apps, MetadataCacheGroups.Access, MetadataCacheGroups.Ids]);
+            [MetadataCacheGroups.Fields, MetadataCacheGroups.Tables, MetadataCacheGroups.Apps, MetadataCacheGroups.Relationships, MetadataCacheGroups.Access, MetadataCacheGroups.Ids]);
     }
 
     [Fact]

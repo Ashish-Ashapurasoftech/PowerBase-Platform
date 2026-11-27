@@ -1,10 +1,14 @@
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
 using PowerBase.Application.Common.Formatting;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
+using PowerBase.Application.Records;
 using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Queries.RunReport;
+using PowerBase.Application.Reports.Queries.RunReport.OData;
+using PowerBase.Application.Search;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.FieldSettings;
@@ -31,13 +35,13 @@ public sealed class RelationalProjector : IRelationalProjector
 
     /// <summary>Picked users' long ids by public id, looked up once per projector for every
     /// summary's matching criteria (see ResolveCriteriaValuesAsync).</summary>
-    private readonly Dictionary<Guid, long> _userIdsByPublicId = new();
+    private readonly ConcurrentDictionary<Guid, long> _userIdsByPublicId = new();
 
     /// <summary>Each app's display formatting, loaded once per projector (scoped per request) the
     /// first time a Combined Text summary needs it — keyed by AppId, since one scope (e.g. a
     /// pipeline copy) can project tables from more than one app.</summary>
-    private readonly Dictionary<long, Domain.ValueObjects.AppFormattingSettings> _appFormatting = new();
-    private readonly Dictionary<long, App> _apps = new();
+    private readonly ConcurrentDictionary<long, Domain.ValueObjects.AppFormattingSettings> _appFormatting = new();
+    private readonly ConcurrentDictionary<long, App> _apps = new();
 
     private readonly IFormulaProjector _formulaProjector;
 
@@ -52,13 +56,18 @@ public sealed class RelationalProjector : IRelationalProjector
 
     private readonly PowerBase.Application.Compute.IMaterializedFieldState? _materialized;
     private readonly ILogger<RelationalProjector>? _logger;
+    private readonly IAzureSearchService? _searchService;
+    private readonly ISearchOutbox? _searchOutbox;
 
     public RelationalProjector(
         IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo,
         IRelationshipRepository relRepo, IAppRepository appRepo, IUserRepository userRepo,
         IFormulaProjector formulaProjector, IQueryContext queryContext,
-        PowerBase.Application.Compute.IMaterializedFieldState? materialized = null, ILogger<RelationalProjector>? logger = null)
+        PowerBase.Application.Compute.IMaterializedFieldState? materialized = null, ILogger<RelationalProjector>? logger = null,
+        IAzureSearchService? searchService = null, ISearchOutbox? searchOutbox = null)
     {
+        _searchService = searchService;
+        _searchOutbox = searchOutbox;
         _logger = logger;
         _materialized = materialized;
         _queryContext = queryContext;
@@ -187,13 +196,23 @@ public sealed class RelationalProjector : IRelationalProjector
             .Distinct()
             .ToList();
 
-        foreach (var parentTableId in parentTableIds)
+        async Task<(
+            List<(AppField Field, LookupSettings? Settings)> TableLookups,
+            List<(AppField Field, ReferenceSettings? Settings)> TableRefs,
+            Dictionary<int, AppField> ParentFieldsByFid,
+            Dictionary<int, AppField?> DisplayKeyByRefFid,
+            Dictionary<(int RowIndex, int RefFid), long?> ResolvedParentId,
+            IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>> ParentRows,
+            IReadOnlyDictionary<long, IReadOnlyDictionary<long, object?>> ParentComputed)> LoadParentAsync(long parentTableId)
         {
             var tableLookups = lookups.Where(l => l.Settings!.SourceTableId!.Value == parentTableId).ToList();
             var tableRefs = refs.Where(r => r.Settings!.ParentTableId!.Value == parentTableId).ToList();
-            
-            var parentTable = await _tableRepo.GetByIdAsync(parentTableId, ct);
-            var parentFields = await _fieldRepo.ListByTableAsync(parentTableId, ct);
+
+            var parentTableTask = _tableRepo.GetByIdAsync(parentTableId, ct);
+            var parentFieldsTask = _fieldRepo.ListByTableAsync(parentTableId, ct);
+            await Task.WhenAll(parentTableTask, parentFieldsTask);
+            var parentTable = parentTableTask.Result;
+            var parentFields = parentFieldsTask.Result;
             var parentFieldsByFid = parentFields.Where(f => f.Fid.HasValue).ToDictionary(f => f.Fid!.Value);
 
             // Resolve each reference field's display key once (null ⇒ Record ID#, stored row Id shows as-is).
@@ -224,16 +243,50 @@ public sealed class RelationalProjector : IRelationalProjector
                     if (pid is long id) parentIds.Add(id);
                 }
             }
-            var parentRows = await _recordRepo.GetRowsByIdsAsync(parentTable,
-                ParentFieldsRead(parentFields, parentFieldsByFid, tableLookups.Select(l => l.Settings!.SourceFid!.Value), displayKeyByRefFid.Values),
-                parentIds, ct);
+            if (parentIds.Count == 0)
+            {
+                return (tableLookups, tableRefs, parentFieldsByFid, displayKeyByRefFid, resolvedParentId,
+                    new Dictionary<long, IReadOnlyDictionary<string, object?>>(),
+                    new Dictionary<long, IReadOnlyDictionary<long, object?>>());
+            }
 
-            // A lookup of a Formula / Lookup / Summary has no column on the parent row, so the parent
-            // rows are projected first (relational, then formulas — like a normal record read) and
-            // those computed values are what the lookup pulls down. Nested lookups recurse here, capped
-            // at LookupChain.MaxLength so a cycle of relationships can't loop forever.
-            var parentComputed = await ProjectComputedSourcesAsync(parentTable, parentFields, parentFieldsByFid, tableLookups.Select(l => l.Settings!.SourceFid!.Value), parentRows, ct);
+            var sourceFids = tableLookups.Select(l => l.Settings!.SourceFid!.Value).ToList();
+            var aiAndSql = await TryLoadParentViaAiSearchAsync(
+                parentTable, parentFields, parentFieldsByFid, sourceFids, displayKeyByRefFid.Values, parentIds, ct);
 
+            IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>> parentRows;
+            IReadOnlyDictionary<long, IReadOnlyDictionary<long, object?>> parentComputed;
+            if (aiAndSql is { } hydrated)
+            {
+                parentRows = hydrated.ParentRows;
+                parentComputed = hydrated.PreHydratedComputed.Values.Any(m => m.Count > 0)
+                    ? await MergeParentComputedSourcesAsync(parentTable, parentFields, parentFieldsByFid, sourceFids, parentRows, hydrated.PreHydratedComputed, ct)
+                    : await ProjectComputedSourcesAsync(parentTable, parentFields, parentFieldsByFid, sourceFids, parentRows, ct);
+            }
+            else
+            {
+                parentRows = await _recordRepo.GetRowsByIdsAsync(parentTable,
+                    ParentFieldsRead(parentFields, parentFieldsByFid, sourceFids, displayKeyByRefFid.Values),
+                    parentIds, ct);
+
+                // A lookup of a Formula / Lookup / Summary has no column on the parent row, so the parent
+                // rows are projected first (relational, then formulas — like a normal record read) and
+                // those computed values are what the lookup pulls down. Nested lookups recurse here, capped
+                // at LookupChain.MaxLength so a cycle of relationships can't loop forever.
+                parentComputed = await ProjectComputedSourcesAsync(parentTable, parentFields, parentFieldsByFid, sourceFids, parentRows, ct);
+            }
+            return (tableLookups, tableRefs, parentFieldsByFid, displayKeyByRefFid, resolvedParentId, parentRows, parentComputed);
+        }
+
+        var parentResults = parentTableIds.Count switch
+        {
+            0 => [],
+            1 => [await LoadParentAsync(parentTableIds[0])],
+            _ => await Task.WhenAll(parentTableIds.Select(LoadParentAsync)),
+        };
+
+        foreach (var (tableLookups, tableRefs, parentFieldsByFid, displayKeyByRefFid, resolvedParentId, parentRows, parentComputed) in parentResults)
+        {
             // Now map the values.
             for (var i = 0; i < rows.Count; i++)
             {
@@ -267,7 +320,7 @@ public sealed class RelationalProjector : IRelationalProjector
                     }
                     maps[i][field.Fid!.Value] = value;
                 }
-                
+
                 // 2. References — surface the display-key value (Id → readable) for each reference
                 //    field. When the display key is Record ID# (null) the stored row Id already shows,
                 //    so there is nothing to project.
@@ -311,6 +364,122 @@ public sealed class RelationalProjector : IRelationalProjector
         foreach (var key in displayKeys)
             if (key is not null) read.Add(key);
         return parentFields.Where(read.Contains).ToList();
+    }
+
+    private async Task<(
+        IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>> ParentRows,
+        IReadOnlyDictionary<long, Dictionary<long, object?>> PreHydratedComputed)?> TryLoadParentViaAiSearchAsync(
+        AppTable parentTable, IReadOnlyList<AppField> parentFields, IReadOnlyDictionary<int, AppField> parentFieldsByFid,
+        IReadOnlyList<int> sourceFids, IEnumerable<AppField?> displayKeys, HashSet<long> parentIds, CancellationToken ct)
+    {
+        if (_searchService is not { IsGridSearchEnabled: true } || _searchOutbox is null
+            || parentIds.Count == 0 || parentIds.Count > 50
+            || !parentFieldsByFid.TryGetValue(3, out var idField))
+            return null;
+
+        var isWide = SearchSlotResolver.IsWideTable(parentFields);
+        var slotMap = SearchSlotResolver.BuildSlotMap(parentFields);
+        if (!AiSearchRecordHydrator.CanHydrate(idField, slotMap, isWide, out var idSlot, out _, out _))
+            return null;
+
+        // If any looked-up computed source on parent is NOT hydrated from AI Search, ParentFieldsRead expands to all parent fields;
+        // otherwise keep only the directly needed fields so AI Search hydrates them without touching SQL.
+        var directFields = new HashSet<AppField>(ReferenceEqualityComparer.Instance);
+        var needsFullParentForUnindexedFormula = false;
+        foreach (var fid in sourceFids)
+        {
+            if (!parentFieldsByFid.TryGetValue(fid, out var src)) continue;
+            if (PhysicalNaming.IsComputedTypeCode(src.TypeCode)
+                && !AiSearchRecordHydrator.CanHydrate(src, slotMap, isWide, out _, out _, out _))
+            {
+                needsFullParentForUnindexedFormula = true;
+                break;
+            }
+            directFields.Add(src);
+        }
+        IReadOnlyList<AppField> fieldsToRead;
+        if (needsFullParentForUnindexedFormula)
+        {
+            fieldsToRead = parentFields;
+        }
+        else
+        {
+            foreach (var dk in displayKeys)
+                if (dk is not null) directFields.Add(dk);
+            fieldsToRead = parentFields.Where(directFields.Contains).ToList();
+        }
+
+        var plan = AiSearchRecordHydrator.Plan(fieldsToRead, parentFields, needRecordIdForRemainingProjections: true, needAuditColumns: false);
+        if (plan.AiFields.Count == 0) return null;
+
+        try
+        {
+            var pending = await _searchOutbox.ListPendingRecordsAsync(parentTable.Id, 1, ct);
+            if (pending is null || pending.Count > 0 || !await _searchService.IsHealthyAsync(ct)) return null;
+
+            var idClauses = string.Join(" or ", parentIds.Select(id => $"{idSlot} eq {id}"));
+            var targetIndex = isWide ? SearchSlotResolver.GetTableIndexName(parentTable.Id) : null;
+            var aiDocs = await _searchService.SearchDocumentsByFilterAsync(
+                _queryContext.TenantId, parentTable.Id, $"({idClauses})", plan.SelectSlots, parentIds.Count, targetIndex, ct);
+            if (aiDocs is null) return null;
+
+            IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>? sqlById = null;
+            if (plan.MissingSqlFields.Count > 0)
+            {
+                sqlById = await _recordRepo.GetRowsByIdsAsync(parentTable, plan.MissingSqlFields, parentIds, ct);
+            }
+
+            var parentRows = new Dictionary<long, IReadOnlyDictionary<string, object?>>(aiDocs.Count);
+            var preHydrated = new Dictionary<long, Dictionary<long, object?>>(aiDocs.Count);
+            var (hydratedRows, computedSeeds) = AiSearchRecordHydrator.BuildRows(plan, aiDocs, sqlRows: null);
+            for (var i = 0; i < hydratedRows.Count; i++)
+            {
+                if (!TryGetLong(hydratedRows[i], "Id", out var rowId)) continue;
+                if (sqlById is not null && sqlById.TryGetValue(rowId, out var sqlRow))
+                {
+                    var merged = new Dictionary<string, object?>(hydratedRows[i], StringComparer.OrdinalIgnoreCase);
+                    foreach (var kv in sqlRow) merged[kv.Key] = kv.Value;
+                    parentRows[rowId] = merged;
+                }
+                else
+                {
+                    parentRows[rowId] = hydratedRows[i];
+                }
+                preHydrated[rowId] = computedSeeds[i];
+            }
+            return (parentRows, preHydrated);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "[RelationalProjector] AI Search parent hydration fallback to SQL for table {TableId}", parentTable.Id);
+            return null;
+        }
+    }
+
+    private async Task<IReadOnlyDictionary<long, IReadOnlyDictionary<long, object?>>> MergeParentComputedSourcesAsync(
+        AppTable parentTable, IReadOnlyList<AppField> parentFields, IReadOnlyDictionary<int, AppField> parentFieldsByFid,
+        IReadOnlyList<int> sourceFids, IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>> parentRows,
+        IReadOnlyDictionary<long, Dictionary<long, object?>> preHydratedComputed, CancellationToken ct)
+    {
+        var remainingSourceFids = sourceFids
+            .Where(fid => parentFieldsByFid.TryGetValue(fid, out var f) && PhysicalNaming.IsComputedTypeCode(f.TypeCode)
+                && !preHydratedComputed.Values.Any(m => m.ContainsKey(fid)))
+            .ToList();
+        var projected = remainingSourceFids.Count > 0
+            ? await ProjectComputedSourcesAsync(parentTable, parentFields, parentFieldsByFid, remainingSourceFids, parentRows, ct)
+            : new Dictionary<long, IReadOnlyDictionary<long, object?>>();
+
+        var result = new Dictionary<long, IReadOnlyDictionary<long, object?>>(parentRows.Count);
+        foreach (var id in parentRows.Keys)
+        {
+            var map = new Dictionary<long, object?>();
+            if (projected.TryGetValue(id, out var p))
+                foreach (var kv in p) map[kv.Key] = kv.Value;
+            if (preHydratedComputed.TryGetValue(id, out var pre))
+                foreach (var kv in pre) map[kv.Key] = kv.Value;
+            result[id] = map;
+        }
+        return result;
     }
 
     /// <summary>Computed values (by parent row Id → field Fid) of the parent rows a lookup reads a
@@ -520,6 +689,9 @@ public sealed class RelationalProjector : IRelationalProjector
             var agg = inMemory
                 ? await AggregateInMemoryAsync(app, table, tableFields, childTable, criteriaFields, criteriaLookupSources, function, refFid, s, sortFid, parentKeyValues, filter, computedParentValues,
                     otherReads.GetValueOrDefault((childId, refFid)), ct)
+                : await TryAggregateChildSummaryViaAiSearchAsync(childTable, criteriaFields, childFieldsByFid, refFid, function, s, parentKeyValues, filter, ct)
+                    is { } aiAgg
+                ? aiAgg
                 : formulaTarget is not null
                 ? await AggregateFormulaAsync(app, childTable, childFields, childFieldsByFid, lookupSources, formulaTarget,
                     SummaryLookupSources.ComputedValueKind(formulaTarget, lookupSources) ?? SummaryComputedTargets.ResultKind(formulaTarget),
@@ -583,10 +755,238 @@ public sealed class RelationalProjector : IRelationalProjector
         IReadOnlyDictionary<long, AppField> lookupSources, AppField target, string? resultKind, string function, int refFid,
         SummarySettings s, IReadOnlyCollection<object> parentKeyValues, FilterGroup? filter, ParentFieldScope parentScope, CancellationToken ct)
     {
-        var rows = await _recordRepo.ListRowsByReferenceAsync(childTable, childFields, refFid, parentKeyValues, filter, childFieldsByFid, parentScope, ct);
+        var rows = await TryListFilteredChildrenViaAiSearchAsync(childTable, childFields, childFieldsByFid, refFid, parentKeyValues, filter, ct)
+            ?? await _recordRepo.ListRowsByReferenceAsync(childTable, childFields, refFid, parentKeyValues, filter, childFieldsByFid, parentScope, ct);
         var refCol = PhysicalNaming.ColumnName(refFid);
         return await AggregateFormulaRowsAsync(app, childTable, childFields, childFieldsByFid, lookupSources, target, resultKind, function, s, rows,
             row => row.TryGetValue(refCol, out var p) ? p : null, ct);
+    }
+
+    /// <summary>When a summary's Reference, optional filter, and optional target field are all stored in Azure AI Search
+    /// (with zero pending outbox writes), queries AI Search directly for just those slots and aggregates per parent in memory,
+    /// avoiding SQL queries on the child table.</summary>
+    private async Task<IReadOnlyDictionary<object, object?>?> TryAggregateChildSummaryViaAiSearchAsync(
+        AppTable childTable, IReadOnlyList<AppField> childFields, IReadOnlyDictionary<long, AppField> childFieldsByFid,
+        int refFid, string function, SummarySettings s, IReadOnlyCollection<object> parentKeyValues, FilterGroup? filter, CancellationToken ct)
+    {
+        if (_searchService is not { IsGridSearchEnabled: true } || _searchOutbox is null
+            || parentKeyValues.Count == 0 || parentKeyValues.Count > 50
+            || !string.IsNullOrWhiteSpace(s.TargetSubField)
+            || HasParentFieldCondition(filter)
+            || function is not (SummaryFunctions.Count or SummaryFunctions.DistinctCount or SummaryFunctions.Exists
+                or SummaryFunctions.Sum or SummaryFunctions.Avg or SummaryFunctions.Min or SummaryFunctions.Max)
+            || !childFieldsByFid.TryGetValue(refFid, out var refField)
+            || !SearchSlotResolver.IsSearchEligible(refField))
+            return null;
+
+        var isWide = SearchSlotResolver.IsWideTable(childFields);
+        var refSlot = SearchSlotResolver.ResolveSlotName(refField, childFields);
+        if (!isWide && refSlot.StartsWith("f_", StringComparison.Ordinal)) return null;
+
+        AppField? targetField = null;
+        string? targetSlot = null;
+        string? targetEffectiveType = null;
+        string? resultKind = null;
+        if (s.TargetFid is int targetFid)
+        {
+            if (!childFieldsByFid.TryGetValue(targetFid, out targetField)) return null;
+            var slotMap = SearchSlotResolver.BuildSlotMap(childFields);
+            if (!AiSearchRecordHydrator.CanHydrate(targetField, slotMap, isWide, out targetSlot, out targetEffectiveType, out _))
+                return null;
+
+            resultKind = SummaryComputedTargets.ResultKind(targetField) ?? SummaryComputedTargets.KindOfValueType(targetEffectiveType);
+            if (function is SummaryFunctions.Sum or SummaryFunctions.Avg && resultKind is not "Number") return null;
+            if (function is SummaryFunctions.Min or SummaryFunctions.Max && resultKind is not ("Number" or "Date" or "DateTime")) return null;
+        }
+        else if (function is SummaryFunctions.DistinctCount or SummaryFunctions.Sum or SummaryFunctions.Avg or SummaryFunctions.Min or SummaryFunctions.Max)
+        {
+            return null;
+        }
+
+        string? filterOdata = null;
+        if (filter is not null)
+        {
+            if (!ODataFilterBuilder.CanExpress(filter, childFields)) return null;
+            filterOdata = ODataFilterBuilder.Build(filter, childFields);
+            if (string.IsNullOrWhiteSpace(filterOdata)) return null;
+        }
+
+        try
+        {
+            var pending = await _searchOutbox.ListPendingRecordsAsync(childTable.Id, 1, ct);
+            if (pending is null || pending.Count > 0 || !await _searchService.IsHealthyAsync(ct)) return null;
+
+            var parentFilter = BuildAiParentFilter(refField, refSlot, parentKeyValues);
+            if (parentFilter is null) return null;
+
+            var combinedOdata = filterOdata is null
+                ? parentFilter
+                : $"{parentFilter} and ({filterOdata})";
+            var selectSlots = targetSlot is null ? new[] { refSlot } : new[] { refSlot, targetSlot };
+            var targetIndex = isWide ? SearchSlotResolver.GetTableIndexName(childTable.Id) : null;
+
+            var aiDocs = await _searchService.SearchDocumentsByFilterAsync(
+                _queryContext.TenantId, childTable.Id, combinedOdata, selectSlots, 2000, targetIndex, ct);
+            if (aiDocs is null) return null;
+
+            var grouped = new Dictionary<string, List<object?>>(StringComparer.Ordinal);
+            foreach (var doc in aiDocs)
+            {
+                if (!doc.Values.TryGetValue(refSlot, out var rawParent) || NormalizeParentKey(rawParent) is not { } pKey)
+                    continue;
+                if (!grouped.TryGetValue(pKey, out var list))
+                {
+                    list = [];
+                    grouped[pKey] = list;
+                }
+                if (targetField is not null && targetSlot is not null)
+                {
+                    doc.Values.TryGetValue(targetSlot, out var rawVal);
+                    list.Add(AiSearchRecordHydrator.ConvertSlotValue(targetField, targetEffectiveType!, rawVal));
+                }
+                else
+                {
+                    list.Add(1);
+                }
+            }
+
+            var result = new Dictionary<object, object?>(grouped.Count);
+            foreach (var (pKey, values) in grouped)
+            {
+                if (function == SummaryFunctions.Count)
+                {
+                    result[pKey] = targetField is null
+                        ? values.Count
+                        : values.Count(v => v is not null && !(v is string str && string.IsNullOrWhiteSpace(str)));
+                }
+                else if (function == SummaryFunctions.Exists)
+                {
+                    result[pKey] = targetField is null
+                        ? values.Count > 0
+                        : values.Any(v => v is not null && !(v is string str && string.IsNullOrWhiteSpace(str)));
+                }
+                else
+                {
+                    var v = SummaryComputedTargets.Aggregate(function, resultKind ?? "Text", values, null, null);
+                    if (v is not null || function == SummaryFunctions.DistinctCount)
+                        result[pKey] = v;
+                }
+            }
+            return result;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "[RelationalProjector] AI Search child summary fallback to SQL for table {TableId}", childTable.Id);
+            return null;
+        }
+    }
+
+    private static string? BuildAiParentFilter(AppField refField, string refSlot, IReadOnlyCollection<object> parentKeyValues)
+    {
+        var refIsNumeric = SearchSlotResolver.IsNumeric(SearchSlotResolver.SlotTypeCode(refField));
+        var parentClauses = new List<string>(parentKeyValues.Count);
+        foreach (var pk in parentKeyValues)
+        {
+            if (NormalizeParentKey(pk) is not { } k) return null;
+            if (refIsNumeric)
+            {
+                if (!long.TryParse(k, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var idVal))
+                    return null;
+                parentClauses.Add($"{refSlot} eq {idVal}");
+            }
+            else
+            {
+                parentClauses.Add($"{refSlot} eq '{k.Replace("'", "''", StringComparison.Ordinal)}'");
+            }
+        }
+        return parentClauses.Count == 0 ? null : $"({string.Join(" or ", parentClauses)})";
+    }
+
+    /// <summary>When a summary has a child filter whose fields and Reference column are all in Azure AI Search (and the child table's
+    /// index has no pending outbox writes), queries AI Search first and hydrates/fetches only missing child columns by PublicId.</summary>
+    private async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>?> TryListFilteredChildrenViaAiSearchAsync(
+        AppTable childTable, IReadOnlyList<AppField> childFields, IReadOnlyDictionary<long, AppField> childFieldsByFid,
+        int refFid, IReadOnlyCollection<object> parentKeyValues, FilterGroup? filter, CancellationToken ct)
+    {
+        if (_searchService is not { IsGridSearchEnabled: true } || _searchOutbox is null
+            || filter is null || parentKeyValues.Count == 0 || parentKeyValues.Count > 50
+            || HasParentFieldCondition(filter)
+            || !childFieldsByFid.TryGetValue(refFid, out var refField)
+            || !SearchSlotResolver.IsSearchEligible(refField))
+            return null;
+
+        var isWide = SearchSlotResolver.IsWideTable(childFields);
+        var refSlot = SearchSlotResolver.ResolveSlotName(refField, childFields);
+        if (!isWide && refSlot.StartsWith("f_", StringComparison.Ordinal)) return null;
+        if (!ODataFilterBuilder.CanExpress(filter, childFields)) return null;
+
+        var filterOdata = ODataFilterBuilder.Build(filter, childFields);
+        if (string.IsNullOrWhiteSpace(filterOdata)) return null;
+
+        try
+        {
+            var pending = await _searchOutbox.ListPendingRecordsAsync(childTable.Id, 1, ct);
+            if (pending is null || pending.Count > 0 || !await _searchService.IsHealthyAsync(ct)) return null;
+
+            var parentFilter = BuildAiParentFilter(refField, refSlot, parentKeyValues);
+            if (parentFilter is null) return null;
+
+            var combinedOdata = $"{parentFilter} and ({filterOdata})";
+            var targetIndex = isWide ? SearchSlotResolver.GetTableIndexName(childTable.Id) : null;
+
+            // Fast path: hydrate child fields directly from AI Search documents and query SQL only for missing columns.
+            var plan = AiSearchRecordHydrator.Plan(childFields, childFields, needRecordIdForRemainingProjections: true, needAuditColumns: false);
+            if (plan.AiFields.Count > 0)
+            {
+                var aiDocs = await _searchService.SearchDocumentsByFilterAsync(
+                    _queryContext.TenantId, childTable.Id, combinedOdata, plan.SelectSlots, 2000, targetIndex, ct);
+                if (aiDocs is not null)
+                {
+                    if (aiDocs.Count == 0) return [];
+                    var docIds = aiDocs.Select(d => d.PublicId).ToList();
+                    var partialSql = plan.NeedsSqlFetch
+                        ? await _recordRepo.ListColumnsByPublicIdsAsync(childTable, plan.MissingSqlFields, docIds,
+                            includeRecordId: plan.NeedSqlRecordId, includeAuditColumns: false, ct)
+                        : null;
+                    var (hydratedRows, _) = AiSearchRecordHydrator.BuildRows(plan, aiDocs, partialSql);
+                    return hydratedRows;
+                }
+            }
+
+            var (aiIds, aiTotal) = await _searchService.SearchRecordsByFilterPagedAsync(
+                _queryContext.TenantId, childTable.Id, combinedOdata, 1, 2000, targetIndex, ct);
+            if (aiTotal == 0) return [];
+
+            IReadOnlyList<Guid> matchedIds;
+            if (aiTotal <= aiIds.Count)
+            {
+                matchedIds = aiIds;
+            }
+            else if (aiTotal <= InMemoryReadLimit.Rows)
+            {
+                var streamed = new List<Guid>((int)aiTotal);
+                await foreach (var p in _searchService.SearchRecordIdsByFilterPagedAsync(_queryContext.TenantId, childTable.Id, combinedOdata, null, targetIndex, ct))
+                {
+                    streamed.AddRange(p.Ids);
+                    if (streamed.Count >= InMemoryReadLimit.Rows) break;
+                }
+                if (streamed.Count < aiTotal) return null;
+                matchedIds = streamed;
+            }
+            else
+            {
+                return null;
+            }
+
+            return plan.AiFields.Count > 0 && plan.MissingSqlFields.Count < childFields.Count
+                ? await _recordRepo.ListColumnsByPublicIdsAsync(childTable, childFields, matchedIds, ct: ct)
+                : await _recordRepo.ListByPublicIdsAsync(childTable, childFields, matchedIds, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "[RelationalProjector] AI Search child subquery fallback to SQL for table {TableId}", childTable.Id);
+            return null;
+        }
     }
 
     /// <summary>The part of a formula summary after the matching children are in hand: evaluate the formula on

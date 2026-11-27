@@ -55,6 +55,8 @@ public class PagedReportRunResult
     /// be worked out exactly over every matching record (too many to read into memory, or matched by a quick search /
     /// calculated filter SQL can't repeat). Left out rather than shown covering only some records.</summary>
     public bool TotalsIncomplete { get; init; }
+    /// <summary>True when totals were skipped because the caller already has them (RunReportQuery.SkipTotals).</summary>
+    public bool TotalsSkipped { get; init; }
     /// <summary>Paged Summary reports only (<see cref="RunReportQuery.PageSummary"/>): grand totals over every group,
     /// keyed by column Key — see ReportRunResponse.SummaryTotals. Null when the summary isn't paged.</summary>
     public IReadOnlyDictionary<string, decimal?>? SummaryTotals { get; init; }
@@ -155,6 +157,9 @@ public class RunReportQueryHandler
     private IReadOnlyDictionary<long, AppField> _sqlFormulaFields = new Dictionary<long, AppField>();
     /// <summary>This run may skip the COUNT query (the caller has the count; only the page changed).</summary>
     private bool _skipCount;
+    /// <summary>This run may skip column totals (the caller has them; only the page changed).</summary>
+    private bool _skipTotals;
+    private readonly IMetadataCache? _cache;
 
     /// <summary>The fields as SQL is to read them: Ready stored fields as their c_{fid} stand-ins, translated formulas as their
     /// SQL-expression stand-ins. The projectors always get the original fields.</summary>
@@ -190,8 +195,10 @@ public class RunReportQueryHandler
         ISearchFieldJobs? searchFieldJobs = null,
         IServerTiming? serverTiming = null,
         Compute.IMaterializedFieldState? materialized = null,
-        IRelationshipRepository? relRepo = null)
+        IRelationshipRepository? relRepo = null,
+        IMetadataCache? cache = null)
     {
+        _cache = cache;
         _materialized = materialized;
         _relRepo = relRepo;
         _timing = serverTiming ?? NoServerTiming.Instance;
@@ -343,6 +350,7 @@ public class RunReportQueryHandler
         }
 
         _skipCount = query.SkipCount;
+        _skipTotals = query.SkipTotals;
         return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields,
             effectiveRuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, isMaskedPreview, isAppEncrypted, ct);
     }
@@ -494,7 +502,11 @@ public class RunReportQueryHandler
         // row kept — not by the Record ID# its column stores. The key is read through stand-in lookups the SQL layer compiles.
         if (_relRepo is not null && ReferenceKeys.AnyReference(allFields, SummaryEncryptionGuard.ConditionFieldIds(userFilterTree)))
         {
-            var referenceKeys = await Timed("referencekeys", ReferenceKeys.LoadAsync(table.Id, allFields, _relRepo, _tableRepo, _fieldRepo, ct));
+            var referenceKeys = await Timed("referencekeys", _cache is not null
+                ? _cache.GetOrAddAsync<IReadOnlyDictionary<long, AppField>>(
+                    _queryContext.TenantId, MetadataCacheGroups.Relationships, $"refkeys:{table.Id}",
+                    () => ReferenceKeys.LoadAsync(table.Id, allFields, _relRepo, _tableRepo, _fieldRepo, ct))
+                : ReferenceKeys.LoadAsync(table.Id, allFields, _relRepo, _tableRepo, _fieldRepo, ct));
             if (ReferenceDisplayFilter.Rewrite(userFilterTree, allFields, referenceKeys) is { } display)
             {
                 userFilterTree = display.Tree;
@@ -519,7 +531,7 @@ public class RunReportQueryHandler
             .Select(f => (long)f.Fid!.Value)
             .ToHashSet();
 
-        // Computed fields only (no encrypted ones): they are not stored, so the AI Search index cannot filter on them.
+        // All computed fields; those indexed in AI Search (via SearchIndexedFieldsAsync or IsInSearchIndex) are subtracted below via notInSearchFids.
         var computedFids = allFields
             .Where(f => f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings))
             .Select(f => (long)f.Fid!.Value)
@@ -556,9 +568,9 @@ public class RunReportQueryHandler
         // in the index, through the same stand-in of its value type the indexer wrote. The search-side builders get these lists; SQL and
         // the projectors keep their own. Records the index is behind on are still re-checked in SQL (IndexLag), and a field job
         // rewriting the field stops it (FieldsBeingRewritten), exactly as for a plain field.
-        var inSearch = _materialized is null
-            ? (IReadOnlyDictionary<long, bool>)new Dictionary<long, bool>()
-            : await Timed("insearch", _materialized.SearchIndexedFieldsAsync(ct));
+        var inSearch = _materialized is not null
+            ? await Timed("insearch", _materialized.SearchIndexedFieldsAsync(ct))
+            : allFields.Where(f => f.IsInSearchIndex).ToDictionary(f => f.Id, f => f.SearchExact);
         var searchFilterFields = PowerBase.Application.Search.SearchIndexedFields.For(allFields, inSearch);
         var searchSortFields = PowerBase.Application.Search.SearchIndexedFields.For(allFields, inSearch, forSort: true);
         // The computed fields the index has no value for: a condition on one keeps the whole question in SQL / memory.
@@ -613,6 +625,7 @@ public class RunReportQueryHandler
         var visibleKeys = (access.Unrestricted ? allFields : access.VisibleFields).Select(f => f.Fid.HasValue ? (long)f.Fid.Value : f.Id).ToHashSet();
         var roleHidesSearchableText = allFields.Any(f => f.IsSearchable && !visibleKeys.Contains(f.Fid.HasValue ? (long)f.Fid.Value : f.Id));
 
+        var hasAiTrigger = effectiveFilterTree != null || !string.IsNullOrWhiteSpace(quickSearch) || hasFormulaSorts || hasFormulaFilters || isAppEncrypted;
         var shouldTryFastAiPaging = _searchService.IsGridSearchEnabled
             && hasSearchableFields
             && canExpressEffectiveFilter
@@ -623,8 +636,7 @@ public class RunReportQueryHandler
             && !FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, notInSearchFids)
             // The role filter is re-checked on the page in memory, from the rows SQL read: no computed field there (as before).
             && !FormulaFilterSorter.TreeContainsFormulaField(access.ViewFilter, computedFids)
-            && (totalCols.Count == 0 || totalsExpressibleInSql)
-            && (effectiveFilterTree != null || !string.IsNullOrWhiteSpace(quickSearch) || hasFormulaSorts || hasFormulaFilters || isAppEncrypted);
+            && (totalCols.Count == 0 || totalsExpressibleInSql);
 
         // Issue 2: Newly created rows indexing latency check.
         // Which records the index may not show yet: every change whose outbox row the indexer has not confirmed (written in the same
@@ -707,62 +719,186 @@ public class RunReportQueryHandler
                     ? PowerBase.Application.Search.SearchSlotResolver.GetTableIndexName(table.Id)
                     : null;
 
-                var (pagedIds, totalMatches) = await _searchService.SearchRecordsPagedAsync(
-                    _queryContext.TenantId, table.Id, quickSearch, odata, page, pageSize, searchOrderBy, targetIndex, ct);
-
-                if (totalMatches == 0 || pagedIds.Count == 0)
-                {
-                    return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns, TotalCount = 0 };
-                }
-
-                // Fetch ONLY the requested page rows from SQL (e.g. 25 rows), and only the columns the report uses
                 var fastUsed = FieldsUsed(allFields, selectedFields, sortFields, userFilterTree, access.ViewFilter);
-                var pagedRows = await _recordRepo.ListByPublicIdsAsync(table, FieldsToRead(allFields, fastUsed), pagedIds, ct);
+                var fieldsToRead = FieldsToRead(allFields, fastUsed);
+                var fieldsToProject = FieldsToProject(allFields, fastUsed);
+                var fieldsForFormulas = FieldsForFormulas(allFields, fastUsed);
+                var allFastTotalsInSql = totalCols.Count > 0 && !_skipTotals
+                    && SqlFields(totalCols).All(c => c.Fid.HasValue && !PhysicalNaming.IsComputedTypeCode(c.TypeCode) && !c.IsEncrypted);
+                Task<(Dictionary<string, ColumnTotal> Totals, bool Incomplete)>? StartParallelTotals(long matches) =>
+                    allFastTotalsInSql
+                        ? Timed("totals", TotalsOverAllMatchesAsync(table, allFields, selectedFields, totalCols, effectiveFilterTree, null,
+                            fitsInMemory: matches <= InMemoryReadLimit.Rows, sqlLookupFids, ct))
+                        : null;
 
-                // If role ViewFilter or RestrictToCreatedBy applies, verify candidate page (defense in depth)
-                if (access.RestrictToCreatedBy.HasValue)
+                // Hydrate as many fields as possible directly from Azure AI Search; only fetch missing fields dynamically from SQL.
+                // Do not force unused system audit columns (CreatedOn/ModifiedOn/CreatedBy) into SQL when the report doesn't use them.
+                var aiFieldsToRead = fastUsed == null
+                    ? fieldsToRead
+                    : fieldsToRead.Where(f => !f.IsSystem || (f.Fid.HasValue && fastUsed.Contains(f.Fid.Value))).ToList();
+                var remainingProjectFieldsPreview = fieldsToProject
+                    .Where(f => !(inSearch.TryGetValue(f.Id, out var ex) && ex && f.SearchExact))
+                    .ToList();
+                var needRecordId = remainingProjectFieldsPreview.Any(f => f.TypeCode is "Summary" or "Lookup" or "Reference" || PhysicalNaming.IsComputedTypeCode(f.TypeCode));
+                var needAuditColumns = access.RestrictToCreatedBy.HasValue || aiFieldsToRead.Any(f => f.Fid is 1 or 2 or 4);
+                var hydrationPlan = PowerBase.Application.Search.AiSearchRecordHydrator.Plan(
+                    aiFieldsToRead, allFields, needRecordIdForRemainingProjections: needRecordId, needAuditColumns: needAuditColumns, inSearchComputed: inSearch);
+
+                var aiDocResult = hydrationPlan.SelectSlots.Count > 0
+                    ? await _searchService.SearchRecordsWithDocumentsPagedAsync(
+                        _queryContext.TenantId, table.Id, quickSearch, odata, page, pageSize,
+                        hydrationPlan.SelectSlots, searchOrderBy, targetIndex, ct)
+                    : null;
+
+                if (aiDocResult is null && !hasAiTrigger)
                 {
-                    pagedRows = pagedRows.Where(r => r.TryGetValue("CreatedBy", out var cb) && cb != null && Convert.ToInt64(cb, CultureInfo.InvariantCulture) == access.RestrictToCreatedBy.Value).ToList();
+                    // Plain unfiltered/unsorted report where doc hydration was unavailable: let standard SQL path run cleanly without id-only double-hop.
                 }
-                if (access.ViewFilter != null)
+                else
                 {
-                    var valuesLookup = pagedRows.Select(r => (Row: r, Map: ExtractFieldValuesByFid(r, allFields))).ToList();
-                    pagedRows = valuesLookup.Where(v => PipelineFilterEvaluator.EvaluateFilterGroup(access.ViewFilter, v.Map, allFields)).Select(v => v.Row).ToList();
+                    long totalMatches;
+                    Task<(Dictionary<string, ColumnTotal> Totals, bool Incomplete)>? parallelTotalsTask;
+                    List<IReadOnlyDictionary<string, object?>> pagedRows;
+                    List<Dictionary<long, object?>>? preHydratedSeeds = null;
+
+                    if (aiDocResult is { } docRes)
+                    {
+                        if (docRes.TotalCount == 0 || docRes.Rows.Count == 0)
+                            return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns, TotalCount = 0 };
+
+                        totalMatches = docRes.TotalCount;
+                        parallelTotalsTask = StartParallelTotals(totalMatches);
+                        IReadOnlyList<IReadOnlyDictionary<string, object?>>? partialSqlRows = null;
+                        if (hydrationPlan.NeedsSqlFetch)
+                        {
+                            var docIds = docRes.Rows.Select(r => r.PublicId).ToList();
+                            partialSqlRows = await _recordRepo.ListColumnsByPublicIdsAsync(
+                                table, hydrationPlan.MissingSqlFields, docIds,
+                                hydrationPlan.NeedSqlRecordId, hydrationPlan.NeedSqlAuditColumns, ct);
+                        }
+                        (pagedRows, preHydratedSeeds) = PowerBase.Application.Search.AiSearchRecordHydrator.BuildRows(
+                            hydrationPlan, docRes.Rows, partialSqlRows);
+                    }
+                    else
+                    {
+                        var (pagedIds, totalFromIds) = await _searchService.SearchRecordsPagedAsync(
+                            _queryContext.TenantId, table.Id, quickSearch, odata, page, pageSize, searchOrderBy, targetIndex, ct);
+                        totalMatches = totalFromIds;
+                        if (totalMatches == 0 || pagedIds.Count == 0)
+                            return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns, TotalCount = 0 };
+
+                        parallelTotalsTask = StartParallelTotals(totalMatches);
+                        pagedRows = (await _recordRepo.ListByPublicIdsAsync(table, fieldsToRead, pagedIds, ct)).ToList();
+                    }
+
+                    // If role ViewFilter or RestrictToCreatedBy applies, verify candidate page (defense in depth)
+                    var keepIndices = Enumerable.Range(0, pagedRows.Count).ToList();
+                    if (access.RestrictToCreatedBy.HasValue)
+                    {
+                        keepIndices = keepIndices.Where(idx => pagedRows[idx].TryGetValue("CreatedBy", out var cb) && cb != null && Convert.ToInt64(cb, CultureInfo.InvariantCulture) == access.RestrictToCreatedBy.Value).ToList();
+                    }
+                    if (access.ViewFilter != null)
+                    {
+                        keepIndices = keepIndices.Where(idx => PipelineFilterEvaluator.EvaluateFilterGroup(access.ViewFilter, ExtractFieldValuesByFid(pagedRows[idx], allFields), allFields)).ToList();
+                    }
+                    if (keepIndices.Count != pagedRows.Count)
+                    {
+                        pagedRows = keepIndices.Select(idx => pagedRows[idx]).ToList();
+                        if (preHydratedSeeds != null) preHydratedSeeds = keepIndices.Select(idx => preHydratedSeeds[idx]).ToList();
+                    }
+
+                    if (pagedRows.Count == 0 && totalMatches > 0 && access.ViewFilter != null)
+                    {
+                        throw new InvalidOperationException("Fast AI Search returned candidates that failed post-retrieval role authorization; falling back to SQL.");
+                    }
+
+                    var preHydratedFids = preHydratedSeeds != null ? hydrationPlan.PreHydratedComputedFids : new HashSet<long>();
+                    var remainingProjectFields = preHydratedFids.Count > 0
+                        ? fieldsToProject.Where(f => !(f.Fid.HasValue && preHydratedFids.Contains(f.Fid.Value))).ToList()
+                        : fieldsToProject;
+                    var remainingFormulaFields = preHydratedFids.Count > 0
+                        ? fieldsForFormulas.Where(f => !(f.Fid.HasValue && preHydratedFids.Contains(f.Fid.Value))).ToList()
+                        : fieldsForFormulas;
+
+                    var relationalRaw = remainingProjectFields.Any(f => f.TypeCode is "Reference" or "Lookup" or "Summary" || FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings))
+                        ? await _relationalProjector.ProjectAsync(table, remainingProjectFields, pagedRows, ct)
+                        : pagedRows.Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList();
+                    var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, pagedRows, relationalRaw);
+                    if (preHydratedSeeds != null && preHydratedFids.Count > 0)
+                    {
+                        // Merge AI-hydrated Lookup/Summary/Formula values into relational map so any dependent unindexed formula can read them.
+                        var mergedRelational = new List<IReadOnlyDictionary<long, object?>>(pagedRows.Count);
+                        for (var i = 0; i < pagedRows.Count; i++)
+                        {
+                            var map = new Dictionary<long, object?>(relational[i]);
+                            foreach (var kv in preHydratedSeeds[i]) map[kv.Key] = kv.Value;
+                            mergedRelational.Add(map);
+                        }
+                        relational = mergedRelational;
+                    }
+
+                    var computedBase = remainingFormulaFields.Count > 0
+                        ? _formulaProjector.Project(remainingFormulaFields, pagedRows, relational, table)
+                        : pagedRows.Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList();
+                    IReadOnlyList<IReadOnlyDictionary<long, object?>> computed;
+                    if (preHydratedSeeds != null && preHydratedFids.Count > 0)
+                    {
+                        var mergedComputed = new List<IReadOnlyDictionary<long, object?>>(pagedRows.Count);
+                        for (var i = 0; i < pagedRows.Count; i++)
+                        {
+                            var map = new Dictionary<long, object?>(computedBase[i]);
+                            foreach (var kv in preHydratedSeeds[i]) map[kv.Key] = kv.Value;
+                            mergedComputed.Add(map);
+                        }
+                        computed = mergedComputed;
+                    }
+                    else
+                    {
+                        computed = computedBase;
+                    }
+                    var userNames = await ResolveUserNamesAsync(pagedRows, allFields, _userRepo, ct, computed);
+                    var itemsFast = pagedRows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
+                    var totalFast = _skipCount ? -1 : (int)Math.Min(totalMatches, int.MaxValue);
+                    if (!_skipCount && page == 1 && pagedRows.Count < pageSize && totalFast > pagedRows.Count)
+                    {
+                        totalFast = pagedRows.Count;
+                    }
+
+                    Dictionary<string, ColumnTotal> totalsFast;
+                    bool totalsFastIncomplete;
+                    if (_skipTotals && totalCols.Count > 0)
+                    {
+                        totalsFast = new Dictionary<string, ColumnTotal>();
+                        totalsFastIncomplete = false;
+                    }
+                    else if (parallelTotalsTask != null)
+                    {
+                        (totalsFast, totalsFastIncomplete) = await parallelTotalsTask;
+                    }
+                    else if (totalCols.Count > 0)
+                    {
+                        (totalsFast, totalsFastIncomplete) = await TotalsOverAllMatchesAsync(table, allFields, selectedFields, totalCols, effectiveFilterTree, null,
+                            fitsInMemory: totalMatches <= InMemoryReadLimit.Rows, sqlLookupFids, ct);
+                    }
+                    else
+                    {
+                        totalsFast = new Dictionary<string, ColumnTotal>();
+                        totalsFastIncomplete = false;
+                    }
+
+                    return new PagedReportRunResult
+                    {
+                        Items = itemsFast,
+                        Columns = columns,
+                        TotalCount = totalFast,
+                        Page = page,
+                        PageSize = pageSize,
+                        IsDataMasked = isMaskedPreview,
+                        Totals = totalsFast,
+                        TotalsIncomplete = totalsFastIncomplete,
+                        TotalsSkipped = _skipTotals && totalCols.Count > 0,
+                    };
                 }
-
-                if (pagedRows.Count == 0 && totalMatches > 0 && access.ViewFilter != null)
-                {
-                    throw new InvalidOperationException("Fast AI Search returned candidates that failed post-retrieval role authorization; falling back to SQL.");
-                }
-
-                var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, pagedRows,
-                    await _relationalProjector.ProjectAsync(table, FieldsToProject(allFields, fastUsed), pagedRows, ct));
-                var computed = _formulaProjector.Project(FieldsForFormulas(allFields, fastUsed), pagedRows, relational, table);
-                var userNames = await ResolveUserNamesAsync(pagedRows, allFields, _userRepo, ct, computed);
-                var itemsFast = pagedRows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
-                var totalFast = (int)Math.Min(totalMatches, int.MaxValue);
-                if (page == 1 && pagedRows.Count < pageSize && totalFast > pagedRows.Count)
-                {
-                    totalFast = pagedRows.Count;
-                }
-
-                // Over every match, not this page: the filter is plain SQL here (see totalsExpressibleInSql).
-                var (totalsFast, totalsFastIncomplete) = totalCols.Count > 0
-                    ? await TotalsOverAllMatchesAsync(table, allFields, selectedFields, totalCols, effectiveFilterTree, null,
-                        fitsInMemory: totalMatches <= InMemoryReadLimit.Rows, sqlLookupFids, ct)
-                    : (new Dictionary<string, ColumnTotal>(), false);
-
-                return new PagedReportRunResult
-                {
-                    Items = itemsFast,
-                    Columns = columns,
-                    TotalCount = totalFast,
-                    Page = page,
-                    PageSize = pageSize,
-                    IsDataMasked = isMaskedPreview,
-                    Totals = totalsFast,
-                    TotalsIncomplete = totalsFastIncomplete,
-                };
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -911,12 +1047,30 @@ public class RunReportQueryHandler
                     var (aiMatches, aiTotal) = await _searchService.SearchRecordsByFilterPagedAsync(
                         _queryContext.TenantId, table.Id, odata, 1, handOver, targetIndex, ct);
 
-                    if (aiTotal > aiMatches.Count)
+                    if (aiTotal > aiMatches.Count && aiTotal <= InMemoryReadLimit.Rows)
                     {
-                        // More matches than one ID list can carry: pre-filtering on the first ones would cut the report (and its count and
-                        // totals) short without saying so. The filter runs in SQL instead, over every record.
+                        // Stream remaining AI Search IDs via AiIdRangePager and hand them to SQL via single-parameter OPENJSON.
+                        var streamedIds = new List<Guid>((int)aiTotal);
+                        await foreach (var aiPage in _searchService.SearchRecordIdsByFilterPagedAsync(_queryContext.TenantId, table.Id, odata, null, targetIndex, ct))
+                        {
+                            streamedIds.AddRange(aiPage.Ids);
+                            if (streamedIds.Count >= InMemoryReadLimit.Rows) break;
+                        }
+                        if (streamedIds.Count > 0 && streamedIds.Count >= aiTotal)
+                        {
+                            userFilterTree = await BuildAiIdFilterAsync(table, streamedIds, null, ct,
+                                lag.PendingIds.Count > 0 ? (lag.PendingIds, userFilterTree) : null);
+                        }
+                        else
+                        {
+                            _logger.LogInformation("[ODataFilter] {Total} matches in table {TableId} exceed the {Max} the index hands over; filtering in SQL.",
+                                aiTotal, table.Id, InMemoryReadLimit.Rows);
+                        }
+                    }
+                    else if (aiTotal > aiMatches.Count)
+                    {
                         _logger.LogInformation("[ODataFilter] {Total} matches in table {TableId} exceed the {Max} the index hands over; filtering in SQL.",
-                            aiTotal, table.Id, handOver);
+                            aiTotal, table.Id, InMemoryReadLimit.Rows);
                     }
                     else if (aiMatches.Count == 0 && lag.PendingIds.Count == 0)
                     {
@@ -960,6 +1114,7 @@ public class RunReportQueryHandler
         int total;
         var totals = new Dictionary<string, ColumnTotal>();
         var totalsIncomplete = false;
+        var totalsSkipped = false;
         int? inMemoryRowLimit = null;
 
         if (hasFormulaFilters || hasFormulaSorts)
@@ -1110,36 +1265,79 @@ public class RunReportQueryHandler
         else
         {
             // Normal path — SQL handles pagination, sorting, and filtering entirely.
-            // The page of rows and the match count are independent queries (each opens its own connection), so they run together;
-            // the totals need the count (whether every match fits in memory) and run beside the row query.
             var rowsTask = Timed("rows", _recordRepo.ListAsync(table, readFields, page, pageSize, filterTree, sortFields,
                 restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids));
-            // Only the page changed (and no totals need the count): the caller keeps its count, -1 says "not counted this time".
-            var countTask = _skipCount && totalCols.Count == 0
-                ? Task.FromResult(-1)
-                : Timed("count", _recordRepo.CountAsync(table, sqlFields, filterTree,
-                    restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids));
-            total = await countTask;
-            Task<(Dictionary<string, ColumnTotal> Totals, bool Incomplete)>? totalsTask = totalCols.Count > 0
-                ? Timed("totals", TotalsOverAllMatchesAsync(table, allFields, selectedFields, totalCols, filterTree,
-                    access.RestrictToCreatedBy, fitsInMemory: total <= InMemoryReadLimit.Rows, sqlLookupFids, ct))
-                : null;
-            var rows = await rowsTask;
-            // Totals can read every matching record through the same projector the page uses below, which keeps state per call:
-            // they are finished before the page is projected, not run beside it.
-            if (totalsTask != null)
-                (totals, totalsIncomplete) = await totalsTask;
 
+            var skipTotalsHere = _skipTotals && totalCols.Count > 0;
+            var allTotalsInSql = totalCols.Count > 0 && !skipTotalsHere
+                && SqlFields(totalCols).All(c => c.Fid.HasValue && !PhysicalNaming.IsComputedTypeCode(c.TypeCode) && !c.IsEncrypted);
+
+            IReadOnlyList<IReadOnlyDictionary<string, object?>> rows;
             IReadOnlyList<IReadOnlyDictionary<long, object?>> computed;
             IReadOnlyDictionary<long, string> userNames;
-            using (_timing.Measure("project"))
+
+            if (skipTotalsHere && _skipCount)
             {
-                var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, rows,
-                    await _relationalProjector.ProjectAsync(table, projectedFields, rows, ct));
-                computed = _formulaProjector.Project(FieldsForFormulas(allFields, usedFields), rows, relational, table);
+                total = -1;
+                totalsSkipped = true;
+                rows = await rowsTask;
+                using (_timing.Measure("project"))
+                {
+                    var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, rows,
+                        await _relationalProjector.ProjectAsync(table, projectedFields, rows, ct));
+                    computed = _formulaProjector.Project(FieldsForFormulas(allFields, usedFields), rows, relational, table);
+                }
+                using (_timing.Measure("names"))
+                    userNames = await ResolveUserNamesAsync(rows, allFields, _userRepo, ct, computed);
             }
-            using (_timing.Measure("names"))
-                userNames = await ResolveUserNamesAsync(rows, allFields, _userRepo, ct, computed);
+            else if (allTotalsInSql)
+            {
+                // AggregateColumnsAsync already returns COUNT_BIG(*) AS totalRows in the same scan — no duplicate CountAsync scan needed.
+                // Start totals concurrently with rows + project (allTotalsInSql never touches _relationalProjector).
+                var totalsTask = Timed("totals", TotalsOverAllMatchesAsync(table, allFields, selectedFields, totalCols, filterTree,
+                    access.RestrictToCreatedBy, fitsInMemory: true, sqlLookupFids, ct));
+                rows = await rowsTask;
+                using (_timing.Measure("project"))
+                {
+                    var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, rows,
+                        await _relationalProjector.ProjectAsync(table, projectedFields, rows, ct));
+                    computed = _formulaProjector.Project(FieldsForFormulas(allFields, usedFields), rows, relational, table);
+                }
+                using (_timing.Measure("names"))
+                    userNames = await ResolveUserNamesAsync(rows, allFields, _userRepo, ct, computed);
+                (totals, totalsIncomplete) = await totalsTask;
+                total = _skipCount
+                    ? -1
+                    : totals.Count > 0
+                        ? (int)Math.Min(totals.Values.First().RowCount, int.MaxValue)
+                        : await Timed("count", _recordRepo.CountAsync(table, sqlFields, filterTree,
+                            restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids));
+            }
+            else
+            {
+                var countTask = _skipCount && (totalCols.Count == 0 || skipTotalsHere)
+                    ? Task.FromResult(-1)
+                    : Timed("count", _recordRepo.CountAsync(table, sqlFields, filterTree,
+                        restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids));
+                total = await countTask;
+                Task<(Dictionary<string, ColumnTotal> Totals, bool Incomplete)>? totalsTask = totalCols.Count > 0 && !skipTotalsHere
+                    ? Timed("totals", TotalsOverAllMatchesAsync(table, allFields, selectedFields, totalCols, filterTree,
+                        access.RestrictToCreatedBy, fitsInMemory: total <= InMemoryReadLimit.Rows, sqlLookupFids, ct))
+                    : null;
+                if (skipTotalsHere) totalsSkipped = true;
+                rows = await rowsTask;
+                if (totalsTask != null)
+                    (totals, totalsIncomplete) = await totalsTask;
+
+                using (_timing.Measure("project"))
+                {
+                    var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, rows,
+                        await _relationalProjector.ProjectAsync(table, projectedFields, rows, ct));
+                    computed = _formulaProjector.Project(FieldsForFormulas(allFields, usedFields), rows, relational, table);
+                }
+                using (_timing.Measure("names"))
+                    userNames = await ResolveUserNamesAsync(rows, allFields, _userRepo, ct, computed);
+            }
             items = rows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
         }
 
@@ -1165,6 +1363,7 @@ public class RunReportQueryHandler
             Totals = totals,
             InMemoryRowLimit = inMemoryRowLimit,
             TotalsIncomplete = totalsIncomplete,
+            TotalsSkipped = totalsSkipped,
         };
     }
 
@@ -1529,7 +1728,8 @@ public class RunReportQueryHandler
         {
             var f = allFields.FirstOrDefault(x => (x.Fid.HasValue && x.Fid.Value == s.FieldId) || x.Id == s.FieldId);
             if (f == null) return null; // unknown field -> cannot order in search
-            if (PhysicalNaming.IsComputedTypeCode(f.TypeCode)) return null; // dynamic formula not in search slots
+            if (PhysicalNaming.IsComputedTypeCode(f.TypeCode) && (!f.IsInSearchIndex || !f.SearchExact)) return null; // dynamic or unindexed formula not in search slots
+            if (!f.IsSearchable && !f.IsFilterable) return null;
 
             var slot = PowerBase.Application.Search.SearchSlotResolver.ResolveSlotName(f, allFields);
             if (!isWide && slot.StartsWith("f_")) return null; // Not present in shared typed index
@@ -1780,7 +1980,7 @@ public class RunReportQueryHandler
     /// field stores an id, so the typed text could never be compared to it directly.</param>
     public static async Task<FilterGroup?> ResolveUserFieldValuesAsync(
         FilterGroup? group, IReadOnlyDictionary<long, AppField> fieldLookup, long currentUserId,
-        Dictionary<Guid, long> guidCache, IUserRepository userRepo, CancellationToken ct,
+        IDictionary<Guid, long> guidCache, IUserRepository userRepo, CancellationToken ct,
         IAppUserRepository? appUserRepo = null, long appId = 0,
         string? currentUserEmail = null, string? currentUserName = null)
     {
@@ -1936,7 +2136,7 @@ public class RunReportQueryHandler
 
     /// <summary>A user's public id → the numeric id a user column stores; -1 when the user can't be found
     /// (deleted/unknown) — callers then leave the value as-is, which simply matches nothing.</summary>
-    private static async Task<long> LookupUserIdAsync(Guid publicId, Dictionary<Guid, long> guidCache, IUserRepository userRepo, CancellationToken ct)
+    private static async Task<long> LookupUserIdAsync(Guid publicId, IDictionary<Guid, long> guidCache, IUserRepository userRepo, CancellationToken ct)
     {
         if (guidCache.TryGetValue(publicId, out var cached)) return cached;
         long id;
@@ -1956,7 +2156,7 @@ public class RunReportQueryHandler
     /// set, a list of users "includes" (or "does not include") any of them. No match at all becomes a condition
     /// that matches nothing (or, for the negative operators, everything).</summary>
     private static async Task<FilterCondition> ResolveUserTextConditionAsync(
-        FilterCondition cond, string userType, Dictionary<Guid, long> guidCache,
+        FilterCondition cond, string userType, IDictionary<Guid, long> guidCache,
         IUserRepository userRepo, IAppUserRepository appUserRepo, long appId, CancellationToken ct)
     {
         var wildcard = cond.Operator.Contains("ildcard", StringComparison.OrdinalIgnoreCase);
