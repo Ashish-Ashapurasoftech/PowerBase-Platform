@@ -51,7 +51,6 @@ public class ConnectedTableWriteFilterTests
         var context = new ActionExecutingContext(new ActionContext(http, routeData, descriptor), [], arguments, controller: new object());
 
         var called = false;
-        ConnectedTableCache.Invalidate(_tenantId);
         await new ConnectedTableWriteFilter().OnActionExecutionAsync(context, () =>
         {
             called = true;

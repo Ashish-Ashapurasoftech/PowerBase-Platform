@@ -69,15 +69,22 @@ public class GetAppPermissionsQueryHandler
     public async Task<AppPermissionsResult> HandleAsync(GetAppPermissionsQuery query, CancellationToken ct = default)
     {
         var appId = await _appRepo.GetIdByPublicIdAsync(query.AppPublicId, ct);
-        var permissions = await _appUserRepo.GetUserAppPermissionsAsync(appId, _queryContext.UserId, ct);
-        var roleName = await _appUserRepo.GetUserRoleNameAsync(appId, _queryContext.UserId, ct);
-        var currentUserPublicIds = await _userRepo.GetPublicIdsByIdsAsync([_queryContext.UserId], ct);
-        var currentUserPublicId = currentUserPublicIds.GetValueOrDefault(_queryContext.UserId);
-        var tenant = await _tenantRepo.GetByIdAsync(_queryContext.TenantId, ct);
 
-        // Fetch all role IDs for this user in this app — includes both direct assignments
-        // (multi-role supported) and group-based role assignments via UNION.
-        var roleIds = await _appUserRepo.GetUserAppRoleIdsAsync(appId, _queryContext.UserId, ct);
+        // Independent reads, each its own connection (or cache entry): run together instead of one round trip after another.
+        // Within the request the cache reads the shared versions once and every one of these waits for that read.
+        var permissionsTask = _appUserRepo.GetUserAppPermissionsAsync(appId, _queryContext.UserId, ct);
+        var roleNameTask = _appUserRepo.GetUserRoleNameAsync(appId, _queryContext.UserId, ct);
+        var publicIdsTask = _userRepo.GetPublicIdsByIdsAsync([_queryContext.UserId], ct);
+        var tenantTask = _tenantRepo.GetByIdAsync(_queryContext.TenantId, ct);
+        // All role IDs for this user in this app — direct assignments (multi-role supported) and group-based ones via UNION.
+        var roleIdsTask = _appUserRepo.GetUserAppRoleIdsAsync(appId, _queryContext.UserId, ct);
+        await Task.WhenAll(permissionsTask, roleNameTask, publicIdsTask, tenantTask, roleIdsTask);
+
+        var permissions = await permissionsTask;
+        var roleName = await roleNameTask;
+        var currentUserPublicId = (await publicIdsTask).GetValueOrDefault(_queryContext.UserId);
+        var tenant = await tenantTask;
+        var roleIds = await roleIdsTask;
 
         // If the user has no roles at all (not directly assigned and not in any group
         // that has access to this app), return flat permissions only (no granular perms).
@@ -89,11 +96,20 @@ public class GetAppPermissionsQueryHandler
         var roleFilters = new Dictionary<long, IReadOnlyList<RecordFilterRow>>();
         var roleModifyRuleTables = new Dictionary<long, HashSet<Guid>>();
 
-        foreach (var rId in roleIds)
+        // Every role's three lists at once (cached per role in the Access group).
+        var perRole = roleIds.Distinct().Select(rId => (
+            RoleId: rId,
+            Tables: _permRepo.GetTablePermissionsAsync(rId, ct),
+            Fields: _permRepo.GetAllFieldPermissionsAsync(rId, ct),
+            Filters: _permRepo.GetRecordFiltersAsync(rId, ct))).ToList();
+        await Task.WhenAll(perRole.SelectMany(r => new Task[] { r.Tables, r.Fields, r.Filters }));
+
+        foreach (var role in perRole)
         {
-            roleTablePerms[rId] = await _permRepo.GetTablePermissionsAsync(rId, ct);
-            roleFieldPerms[rId] = await _permRepo.GetAllFieldPermissionsAsync(rId, ct);
-            var filterRows = await _permRepo.GetRecordFiltersAsync(rId, ct);
+            var rId = role.RoleId;
+            roleTablePerms[rId] = await role.Tables;
+            roleFieldPerms[rId] = await role.Fields;
+            var filterRows = await role.Filters;
             roleFilters[rId] = filterRows.Where(r => r.Kind == RoleRecordFilterJson.ViewKind).ToList();
             roleModifyRuleTables[rId] = filterRows
                 .Where(r => r.Kind == RoleRecordFilterJson.ModifyKind

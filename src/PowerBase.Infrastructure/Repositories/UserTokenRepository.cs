@@ -11,17 +11,25 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
 {
     private readonly ITenantConnectionFactory _tenantConnectionFactory;
     private readonly ITenantConnectionResolver _tenantConnectionResolver;
+    private readonly IMetadataCache _cache;
 
     public UserTokenRepository(
-        IControlConnectionFactory connectionFactory, 
+        IControlConnectionFactory connectionFactory,
         ITenantConnectionFactory tenantConnectionFactory,
         ITenantConnectionResolver tenantConnectionResolver,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IMetadataCache cache)
         : base(connectionFactory, queryContext)
     {
         _tenantConnectionFactory = tenantConnectionFactory;
         _tenantConnectionResolver = tenantConnectionResolver;
+        _cache = cache;
     }
+
+    /// <summary>Drops every cached token (by hash) and allowed-app list. Called BEFORE each token write below, except the last-used
+    /// stamp, so a revoked, disabled or rotated token stops working on every instance at the next request.</summary>
+    private void TokensChanging(bool inTransaction = false) =>
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserTokens, inTransaction);
 
     private const string InsertTokenSql = @"
         INSERT INTO core.UserToken (PublicId, TenantId, UserId, TokenName, Description, TokenHash, TokenPrefix, IsActive, AccessAllApps, CreatedAt, IsDeleted)
@@ -64,6 +72,7 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
 
     public async Task<UserToken> CreateAsync(UserToken userToken, IEnumerable<Guid>? allowedAppPublicIds, CancellationToken ct)
     {
+        TokensChanging(inTransaction: true);
         await using var connection = ConnectionFactory.Create();
         connection.Open();
         using var transaction = connection.BeginTransaction();
@@ -189,11 +198,16 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
 
     public async Task<IReadOnlySet<long>> GetAllowedAppIdsAsync(long userTokenId, CancellationToken ct = default)
     {
-        await using var connection = ConnectionFactory.Create();
-        var ids = await connection.QueryAsync<long>(
-            new CommandDefinition(GetAllowedAppIdsSql, new { userTokenId }, cancellationToken: ct)
-        );
-        return ids.ToHashSet();
+        // Asked on every request made with an app-restricted API token (JwtMiddleware).
+        var cached = await _cache.GetOrAddAsync<IReadOnlySet<long>>(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserTokens, $"apps:{userTokenId}", async () =>
+        {
+            await using var connection = ConnectionFactory.Create();
+            var ids = await connection.QueryAsync<long>(
+                new CommandDefinition(GetAllowedAppIdsSql, new { userTokenId }, cancellationToken: ct)
+            );
+            return ids.ToHashSet();
+        });
+        return cached.ToHashSet();
     }
 
     public async Task<(IEnumerable<UserToken> Items, int TotalCount)> GetMyTokensPagedAsync(
@@ -440,6 +454,7 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
 
     public async Task<bool> UpdateStatusAsync(IEnumerable<Guid> publicIds, long tenantId, bool isActive, CancellationToken ct)
     {
+        TokensChanging();
         await using var connection = ConnectionFactory.Create();
         var sql = tenantId > 0 ? UpdateStatusSql : UpdateStatusAdminSql;
         var rowsAffected = await connection.ExecuteAsync(
@@ -460,6 +475,7 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
 
     public async Task<bool> RevokeAsync(Guid publicId, long tenantId, CancellationToken ct)
     {
+        TokensChanging();
         await using var connection = ConnectionFactory.Create();
         var sql = tenantId > 0 ? RevokeSql : RevokeAdminSql;
         var rowsAffected = await connection.ExecuteAsync(
@@ -470,6 +486,7 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
 
     public async Task<bool> RotateSecretAsync(long id, string newTokenHash, string newTokenPrefix, CancellationToken ct)
     {
+        TokensChanging(); // the old hash must stop working everywhere
         await using var connection = ConnectionFactory.Create();
         var rowsAffected = await connection.ExecuteAsync(
             new CommandDefinition(RotateSecretSql, new { id, newTokenHash, newTokenPrefix }, cancellationToken: ct)
@@ -489,11 +506,24 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
 
     public async Task<UserToken?> GetByHashAsync(string hash, CancellationToken ct)
     {
-        await using var connection = ConnectionFactory.Create();
-        return await connection.QuerySingleOrDefaultAsync<UserToken>(
-            new CommandDefinition(GetByHashSql, new { hash }, cancellationToken: ct)
-        );
+        // Every pb_ut_ request (JwtMiddleware). Only active, undeleted tokens are found, and a miss (unknown token) is never cached.
+        // LastUsedAt in a cached copy is not kept current: UpdateLastUsedAtAsync deliberately does not drop the cache.
+        var cached = await _cache.GetOrAddAsync<UserToken?>(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserTokens, $"hash:{hash}", async () =>
+        {
+            await using var connection = ConnectionFactory.Create();
+            return await connection.QuerySingleOrDefaultAsync<UserToken>(
+                new CommandDefinition(GetByHashSql, new { hash }, cancellationToken: ct)
+            );
+        });
+        return cached is null ? null : CopyOf(cached);
     }
+
+    private static UserToken CopyOf(UserToken t) => new()
+    {
+        Id = t.Id, PublicId = t.PublicId, TenantId = t.TenantId, UserId = t.UserId, TokenName = t.TokenName, Description = t.Description,
+        TokenHash = t.TokenHash, TokenPrefix = t.TokenPrefix, IsActive = t.IsActive, AccessAllApps = t.AccessAllApps,
+        CreatedAt = t.CreatedAt, LastUsedAt = t.LastUsedAt, IsDeleted = t.IsDeleted, RowVersion = t.RowVersion,
+    };
 
     public async Task UpdateLastUsedAtAsync(long id, CancellationToken ct)
     {
@@ -515,6 +545,7 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
 
     public async Task<bool> UpdateDetailsAsync(long id, string tokenName, string? description, bool accessAllApps, IEnumerable<Guid>? allowedAppPublicIds, CancellationToken ct)
     {
+        TokensChanging(inTransaction: true); // AccessAllApps and the allowed apps change in one transaction
         await using var connection = ConnectionFactory.Create();
         connection.Open();
         using var transaction = connection.BeginTransaction();

@@ -65,6 +65,7 @@ public class AdminRepository : ControlRepositoryBase, IAdminRepository
 
     public async Task UpdateTenantStatusAsync(long tenantId, string status, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.Tenants); // TenantRepository.GetByIdAsync is cached
         const string sql = "UPDATE meta.Tenant SET Status = @status, ModifiedOn = SYSUTCDATETIME() WHERE Id = @tenantId";
         await using var conn = await OpenNewConnectionAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(sql, new { tenantId, status }, cancellationToken: ct));
@@ -72,6 +73,7 @@ public class AdminRepository : ControlRepositoryBase, IAdminRepository
 
     public async Task UpdateTenantCodePagesEnabledAsync(long tenantId, bool enabled, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.Tenants);
         const string sql = "UPDATE meta.Tenant SET CodePagesEnabled = @enabled, ModifiedOn = SYSUTCDATETIME() WHERE Id = @tenantId";
         await using var conn = await OpenNewConnectionAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(sql, new { tenantId, enabled }, cancellationToken: ct));
@@ -122,6 +124,7 @@ public class AdminRepository : ControlRepositoryBase, IAdminRepository
     public async Task UpdateUserActiveStateAsync(Guid userPublicId, bool isActive, CancellationToken ct = default)
     {
         _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.Users); // a deactivated user's API tokens stop at once
         const string sql = """
             UPDATE core.[User] SET IsActive = @isActive, ModifiedOn = SYSUTCDATETIME()
             WHERE PublicId = @userPublicId AND IsDeleted = 0
@@ -133,6 +136,7 @@ public class AdminRepository : ControlRepositoryBase, IAdminRepository
     public async Task UpdateUserSystemRoleAsync(Guid userPublicId, int? systemRoleId, CancellationToken ct = default)
     {
         _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions);
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.Users); // system role (SuperAdmin) is in the sign-in identity
         const string sql = """
             UPDATE core.[User] SET SystemRoleId = @systemRoleId, ModifiedOn = SYSUTCDATETIME()
             WHERE PublicId = @userPublicId AND IsDeleted = 0

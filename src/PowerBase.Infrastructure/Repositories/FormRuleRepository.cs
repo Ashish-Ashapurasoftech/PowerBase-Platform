@@ -8,8 +8,21 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
 {
-    public FormRuleRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
-        : base(connectionFactory, queryContext) { }
+    private readonly IMetadataCache _cache;
+
+    public FormRuleRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache cache)
+        : base(connectionFactory, queryContext)
+    {
+        _cache = cache;
+    }
+
+    /// <summary>Drops the cached rule lists (Forms group, shared with FormRepository: a form delete hides its rules) and rule ids.
+    /// Called BEFORE every write below; most run in a transaction.</summary>
+    private void FormsChanging()
+    {
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Forms, inTransaction: true);
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Ids, inTransaction: true);
+    }
 
     private const string RuleSelectColumns = """
         Id, PublicId, FormId, Name, Description, Tags, IsActive,
@@ -189,13 +202,32 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
 
     public async Task<long> GetAppIdByPublicIdAsync(Guid rulePublicId, CancellationToken ct = default)
     {
-        await using var conn = await ConnectionFactory.CreateAsync(ct);
-        var appId = await conn.QuerySingleOrDefaultAsync<long?>(
-            new CommandDefinition(GetAppIdByPublicIdSql, new { publicId = rulePublicId }, cancellationToken: ct));
-        return appId ?? throw new NotFoundException("FormRule", rulePublicId);
+        var cached = await _cache.GetOrAddAsync(QueryContext.TenantId, MetadataCacheGroups.Ids, $"formrule:{rulePublicId}", async () =>
+        {
+            await using var conn = await ConnectionFactory.CreateAsync(ct);
+            var appId = await conn.QuerySingleOrDefaultAsync<long?>(
+                new CommandDefinition(GetAppIdByPublicIdSql, new { publicId = rulePublicId }, cancellationToken: ct));
+            return new CachedId(appId ?? throw new NotFoundException("FormRule", rulePublicId));
+        });
+        return cached.Value;
     }
 
     public async Task<IReadOnlyList<FormRule>> ListByFormAsync(long formId, CancellationToken ct = default)
+    {
+        var cached = await _cache.GetOrAddAsync<IReadOnlyList<FormRule>>(QueryContext.TenantId, MetadataCacheGroups.Forms, $"rules:form:{formId}",
+            () => LoadByFormAsync(formId, ct));
+        return CacheCopy.Deep(cached);
+    }
+
+    public async Task<IReadOnlyList<FormRule>> ListActiveByTableIdAsync(long appTableId, CancellationToken ct = default)
+    {
+        // Every record save / form open runs the table's active rules.
+        var cached = await _cache.GetOrAddAsync<IReadOnlyList<FormRule>>(QueryContext.TenantId, MetadataCacheGroups.Forms, $"rules:table:{appTableId}",
+            () => LoadActiveByTableIdAsync(appTableId, ct));
+        return CacheCopy.Deep(cached);
+    }
+
+    private async Task<IReadOnlyList<FormRule>> LoadByFormAsync(long formId, CancellationToken ct)
     {
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         using var multi = await conn.QueryMultipleAsync(
@@ -213,7 +245,7 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
         return rules;
     }
 
-    public async Task<IReadOnlyList<FormRule>> ListActiveByTableIdAsync(long appTableId, CancellationToken ct = default)
+    private async Task<IReadOnlyList<FormRule>> LoadActiveByTableIdAsync(long appTableId, CancellationToken ct)
     {
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         using var multi = await conn.QueryMultipleAsync(
@@ -235,6 +267,7 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
 
     public async Task<(long Id, Guid PublicId)> CreateAsync(FormRule rule, CancellationToken ct = default)
     {
+        FormsChanging();
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         var maxOrder = await conn.QuerySingleOrDefaultAsync<int?>(
             new CommandDefinition("SELECT ISNULL(MAX(DisplayOrder),0) FROM meta.FormRule WHERE FormId=@formId AND IsDeleted=0",
@@ -263,6 +296,7 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
         string? expressionText, IReadOnlyList<FormRuleCondition> conditions,
         IReadOnlyList<FormRuleAction> actions, byte[] rowVersion, CancellationToken ct = default)
     {
+        FormsChanging();
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         await conn.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
@@ -296,6 +330,7 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
 
     public async Task<int> DeleteAsync(Guid publicId, CancellationToken ct = default)
     {
+        FormsChanging();
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         return await conn.ExecuteAsync(
             new CommandDefinition(SoftDeleteSql, new { publicId, deletedBy = QueryContext.UserId }, cancellationToken: ct));
@@ -303,6 +338,7 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
 
     public async Task ReorderAsync(long formId, IReadOnlyList<Guid> orderedPublicIds, CancellationToken ct = default)
     {
+        FormsChanging();
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         await conn.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
@@ -313,6 +349,7 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
 
     public async Task<int> SetActiveAsync(Guid publicId, bool isActive, CancellationToken ct = default)
     {
+        FormsChanging();
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         return await conn.ExecuteAsync(
             new CommandDefinition(SetActiveSql, new { publicId, isActive, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
@@ -320,6 +357,7 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
 
     public async Task<(long Id, Guid PublicId)> DuplicateAsync(Guid sourcePublicId, string newName, long userId, CancellationToken ct = default)
     {
+        FormsChanging();
         var source = await GetByPublicIdAsync(sourcePublicId, ct);
 
         var newRule = new FormRule

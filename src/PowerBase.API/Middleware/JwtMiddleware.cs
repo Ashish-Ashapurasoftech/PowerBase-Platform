@@ -44,7 +44,8 @@ public class JwtMiddleware
                 var userToken = await userTokenRepository.GetByHashAsync(hash, context.RequestAborted);
                 if (userToken != null && userToken.IsActive && !userToken.IsDeleted)
                 {
-                    var user = await userRepository.GetByIdAsync(userToken.UserId, context.RequestAborted);
+                    // Cached (no password hash): a deactivated or deleted user drops out at once (AdminRepository writes Users first).
+                    var user = await userRepository.GetSignInIdentityAsync(userToken.UserId, context.RequestAborted);
                     if (user != null && user.IsActive && !user.IsDeleted)
                     {
                         var ctx = (QueryContext)queryContext;

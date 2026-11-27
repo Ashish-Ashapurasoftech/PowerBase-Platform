@@ -45,6 +45,8 @@ public class GetTableQueryHandler
     public async Task<GetTableResult> HandleAsync(GetTableQuery query, CancellationToken ct = default)
     {
         var table = await _tableRepo.GetByPublicIdAsync(query.PublicId, ct);
+        // The table comes from the metadata cache, whose RecordCount the record counters do not refresh: the detail shows the live one.
+        table.RecordCount = await _tableRepo.GetRecordCountAsync(table.Id, ct);
         var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
         var fieldsByTable = new Dictionary<long, IReadOnlyList<AppField>> { [table.Id] = fields };
         var summarySourceSettings = await ResolveSummarySourceSettingsAsync(fields, fieldsByTable, ct);

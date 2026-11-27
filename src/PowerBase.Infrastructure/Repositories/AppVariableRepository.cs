@@ -69,15 +69,33 @@ public class AppVariableRepository : TenantRepositoryBase, IAppVariableRepositor
           AND IsDeleted = 0
         """;
 
-    public AppVariableRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
-        : base(connectionFactory, queryContext) { }
+    private readonly IMetadataCache _cache;
+
+    public AppVariableRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache cache)
+        : base(connectionFactory, queryContext)
+    {
+        _cache = cache;
+    }
+
+    /// <summary>Drops the cached variable lists of this tenant. Called BEFORE each write below.</summary>
+    private void VariablesChanging() => _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Variables);
 
     public async Task<IReadOnlyList<AppVariable>> ListAsync(long appId, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var results = await connection.QueryAsync<AppVariable>(
-            new CommandDefinition(ListSql, new { appId }, cancellationToken: ct));
-        return results.AsList();
+        // Read by formulas and pipelines on many requests. Each caller gets its own copies.
+        var cached = await _cache.GetOrAddAsync<IReadOnlyList<AppVariable>>(QueryContext.TenantId, MetadataCacheGroups.Variables, $"app:{appId}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            var results = await connection.QueryAsync<AppVariable>(
+                new CommandDefinition(ListSql, new { appId }, cancellationToken: ct));
+            return results.AsList();
+        });
+        return cached.Select(v => new AppVariable
+        {
+            Id = v.Id, PublicId = v.PublicId, AppId = v.AppId, TenantId = v.TenantId, Name = v.Name, Value = v.Value,
+            Description = v.Description, IsDeleted = v.IsDeleted, CreatedOn = v.CreatedOn, CreatedBy = v.CreatedBy,
+            ModifiedOn = v.ModifiedOn, ModifiedBy = v.ModifiedBy, DeletedOn = v.DeletedOn, DeletedBy = v.DeletedBy, RowVersion = v.RowVersion,
+        }).ToList();
     }
 
     public async Task<AppVariable?> GetByPublicIdAsync(long appId, Guid publicId, CancellationToken ct = default)
@@ -103,6 +121,7 @@ public class AppVariableRepository : TenantRepositoryBase, IAppVariableRepositor
 
     public async Task<Guid> CreateAsync(AppVariable variable, CancellationToken ct = default)
     {
+        VariablesChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.QuerySingleAsync<Guid>(
             new CommandDefinition(InsertSql, new
@@ -117,6 +136,7 @@ public class AppVariableRepository : TenantRepositoryBase, IAppVariableRepositor
 
     public async Task UpdateAsync(long appId, Guid publicId, string name, string value, string? description, CancellationToken ct = default)
     {
+        VariablesChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var affected = await connection.ExecuteAsync(
             new CommandDefinition(UpdateSql, new { appId, publicId, name, value, description, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
@@ -126,6 +146,7 @@ public class AppVariableRepository : TenantRepositoryBase, IAppVariableRepositor
 
     public async Task DeleteAsync(long appId, Guid publicId, CancellationToken ct = default)
     {
+        VariablesChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var affected = await connection.ExecuteAsync(
             new CommandDefinition(SoftDeleteSql, new { appId, publicId, deletedBy = QueryContext.UserId }, cancellationToken: ct));

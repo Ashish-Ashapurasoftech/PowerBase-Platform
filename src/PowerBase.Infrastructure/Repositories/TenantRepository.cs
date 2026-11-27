@@ -493,14 +493,22 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
 
     public async Task<Tenant> GetByIdAsync(long id, CancellationToken ct = default)
     {
-        await using var connection = ConnectionFactory.Create();
-        var tenant = await connection.QuerySingleOrDefaultAsync<Tenant>(
-            new CommandDefinition(GetByIdSql, new { id }, cancellationToken: ct));
-
-        if (tenant == null)
-            throw new NotFoundException(nameof(Tenant), id);
-
-        return tenant;
+        // Asked on every app entry (Code Pages switch). Status and the switch are written only by AdminRepository, which drops the
+        // Tenants group first. A missing tenant throws and is never cached; each caller gets its own copy.
+        var cached = await _cache.GetOrAddAsync(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.Tenants, $"id:{id}", async () =>
+        {
+            await using var connection = ConnectionFactory.Create();
+            var tenant = await connection.QuerySingleOrDefaultAsync<Tenant>(
+                new CommandDefinition(GetByIdSql, new { id }, cancellationToken: ct));
+            return tenant ?? throw new NotFoundException(nameof(Tenant), id);
+        });
+        return new Tenant
+        {
+            Id = cached.Id, PublicId = cached.PublicId, Name = cached.Name, Slug = cached.Slug, PlanCode = cached.PlanCode,
+            Status = cached.Status, SupportsSecureEnclaves = cached.SupportsSecureEnclaves, CodePagesEnabled = cached.CodePagesEnabled,
+            IsDeleted = cached.IsDeleted, CreatedOn = cached.CreatedOn, CreatedBy = cached.CreatedBy, ModifiedOn = cached.ModifiedOn,
+            ModifiedBy = cached.ModifiedBy, DeletedOn = cached.DeletedOn, DeletedBy = cached.DeletedBy, RowVersion = cached.RowVersion,
+        };
     }
 
     public async Task<Tenant> GetTenantForUserAsync(Guid tenantPublicId, long userId, CancellationToken ct = default)
@@ -513,6 +521,7 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
 
     public async Task UpdateProvisioningAsync(long tenantId, string provisioningState, string? databaseName, int schemaVersion = 0, string? serverRef = null, string? connectionSecretRef = null, CancellationToken ct = default)
     {
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.Tenants);
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(new CommandDefinition(UpdateProvisioningSql, new
         {
@@ -527,9 +536,15 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
 
     public async Task<string?> GetUserRoleNameInTenantAsync(long userId, long tenantId, CancellationToken ct = default)
     {
-        await using var connection = ConnectionFactory.Create();
-        return await connection.QuerySingleOrDefaultAsync<string>(
-            new CommandDefinition(GetUserRoleNameInTenantSql, new { userId, tenantId }, cancellationToken: ct));
+        // Asked on every API-token request (JwtMiddleware). TenantUser / TenantRole writes (this repository, AdminRepository) drop
+        // UserPermissions first, the same group as the user's permission codes.
+        var cached = await _cache.GetOrAddAsync(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.UserPermissions, $"tenantrole:{userId}:{tenantId}", async () =>
+        {
+            await using var connection = ConnectionFactory.Create();
+            return new CachedValue<string?>(await connection.QuerySingleOrDefaultAsync<string>(
+                new CommandDefinition(GetUserRoleNameInTenantSql, new { userId, tenantId }, cancellationToken: ct)));
+        });
+        return cached.Value;
     }
 
 }

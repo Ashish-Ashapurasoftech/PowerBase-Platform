@@ -45,15 +45,22 @@ public class CapabilityRepository : ControlRepositoryBase, ICapabilityRepository
         """;
 
     private readonly ITenantConnectionFactory _tenantConnectionFactory;
+    private readonly IMetadataCache _cache;
 
     public CapabilityRepository(
         IControlConnectionFactory connectionFactory,
         ITenantConnectionFactory tenantConnectionFactory,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IMetadataCache cache)
         : base(connectionFactory, queryContext)
     {
         _tenantConnectionFactory = tenantConnectionFactory;
+        _cache = cache;
     }
+
+    /// <summary>The role permission codes written below are what AppUserRepository.GetUserAppPermissionsAsync caches (Access group):
+    /// drop them BEFORE the write, or a removed capability keeps working until the cache TTL.</summary>
+    private void AccessChanging() => _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Access);
 
     public async Task<IReadOnlyList<CapabilityDto>> GetAllActiveAsync(CancellationToken ct = default)
     {
@@ -172,6 +179,7 @@ public class CapabilityRepository : ControlRepositoryBase, ICapabilityRepository
         var currentPermSet = currentPermRows.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var allCapabilityPerms = allCaps.SelectMany(c => c.Permissions).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        AccessChanging();
 
         // Preserve non-capability permissions (e.g. data/record permissions)
         var newPerms = currentPermSet.Where(p => !allCapabilityPerms.Contains(p)).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -209,6 +217,7 @@ public class CapabilityRepository : ControlRepositoryBase, ICapabilityRepository
         var currentPermRows = await tenantConn.QueryAsync<string>(
             new CommandDefinition(GetRolePermissionsSql, new { rolePublicId }, cancellationToken: ct));
         var currentPermSet = currentPermRows.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        AccessChanging();
 
         if (enabled)
         {

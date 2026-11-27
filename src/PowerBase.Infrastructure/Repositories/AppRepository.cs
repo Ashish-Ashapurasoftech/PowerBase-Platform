@@ -227,10 +227,11 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
 
     public async Task<App> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var app = await connection.QuerySingleOrDefaultAsync<App>(
-            new CommandDefinition(GetByPublicIdSql, new { publicId }, cancellationToken: ct));
-        return app ?? throw new NotFoundException("App", publicId);
+        // Public id → id (Ids group, a delete drops it), then the cached app by id (Apps group): the same columns and filters as
+        // GetByPublicIdSql. Unknown or deleted apps throw from either step and are never cached.
+        var id = await GetIdByPublicIdAsync(publicId, ct);
+        try { return await GetByIdAsync(id, ct); }
+        catch (NotFoundException) { throw new NotFoundException("App", publicId); }
     }
 
     public async Task<App> GetByIdAsync(long id, CancellationToken ct = default)
@@ -505,6 +506,8 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
               WHERE Id = @TableId AND AppId = @appId
               """;
 
+        AppsChanging();
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Tables); // QB table ids are on the cached tables
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(new CommandDefinition(appSql, new { appId, qbAppId, qbAppLogicalId }, cancellationToken: ct));
         foreach (var t in tables)

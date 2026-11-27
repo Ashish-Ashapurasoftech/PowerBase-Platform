@@ -142,6 +142,7 @@ public class AppRoleRepository : TenantRepositoryBase, IAppRoleRepository
 
     public async Task UpdateNameAsync(long roleId, string name, CancellationToken ct = default)
     {
+        AccessChanging(); // role names are cached (GetUserRoleNameAsync / GetUserAppRoleNamesAsync)
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateNameSql, new { roleId, name }, cancellationToken: ct));
@@ -170,6 +171,7 @@ public class AppRoleRepository : TenantRepositoryBase, IAppRoleRepository
 
     public async Task SetHomePageAsync(long roleId, long? pageId, CancellationToken ct = default)
     {
+        AccessChanging(); // a role's home page is always visible to its users: the cached nav pages (PageRepository) depend on it
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE meta.AppRole SET HomePageId = @pageId WHERE Id = @roleId AND IsDeleted = 0",

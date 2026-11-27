@@ -132,7 +132,6 @@ public sealed class ConnectedSyncProcessor(
         if (destination is null)
         {
             await connectedTables.SoftDeleteAsync(table.Id, ConnectedTableStatuses.Removed, ct);
-            ConnectedTableCache.Invalidate(consumerTenantId);
             if (await control.GetLinkAsync(consumerTenantId, table.PublicId, ct) is { } link)
                 await control.SetLinkStatusAsync(link.Id, ConnectedLinkStatuses.Removed, ct);
             await runs.CompleteAsync(run, ConnectedRunStatuses.Failed, "The destination table was deleted.", ct);

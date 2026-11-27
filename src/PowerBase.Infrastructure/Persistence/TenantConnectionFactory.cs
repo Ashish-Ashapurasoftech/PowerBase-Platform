@@ -34,6 +34,7 @@ public class TenantConnectionFactory : ITenantConnectionFactory
     {
         if (_queryContext.TenantId == 0)
             throw new InvalidOperationException("No tenant in scope. TenantId is 0.");
+        PowerBase.Application.Common.Caching.CacheRequestStats.TenantConnection();
 
         if (_resolvedConnStr is null || _currentTenantId != _queryContext.TenantId)
         {
@@ -78,6 +79,8 @@ public class TenantConnectionFactory : ITenantConnectionFactory
         if (readOnly is null) return await CreateAsync(ct);
 
         var lag = await _lagMonitor.GetLagSecondsAsync(_queryContext.TenantId, readOnly, ct);
-        return ReadReplicaRouting.IsTooFarBehind(lag, intent, options) ? await CreateAsync(ct) : new SqlConnection(readOnly);
+        if (ReadReplicaRouting.IsTooFarBehind(lag, intent, options)) return await CreateAsync(ct);
+        PowerBase.Application.Common.Caching.CacheRequestStats.TenantConnection();
+        return new SqlConnection(readOnly);
     }
 }

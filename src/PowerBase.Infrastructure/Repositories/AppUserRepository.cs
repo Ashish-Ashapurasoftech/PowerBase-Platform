@@ -509,7 +509,7 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
 
     public async Task CreateAsync(AppUser appUser, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
-        AccessChanging();
+        AccessChanging(transaction is not null);
         var parameters = new
         {
             publicId   = appUser.PublicId == Guid.Empty ? (Guid?)null : appUser.PublicId,
@@ -570,9 +570,14 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
 
     public async Task<string?> GetUserRoleNameAsync(long appId, long userId, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        return await connection.ExecuteScalarAsync<string?>(
-            new CommandDefinition(GetUserRoleNameSql, new { appId, userId }, cancellationToken: ct));
+        // Asked on every app entry (GET /apps/{id}/permissions). "No role" is cached too: a role assignment writes Access first.
+        var cached = await _cache.GetOrAddAsync(QueryContext.TenantId, MetadataCacheGroups.Access, $"rolename:{appId}:{userId}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            return new CachedValue<string?>(await connection.ExecuteScalarAsync<string?>(
+                new CommandDefinition(GetUserRoleNameSql, new { appId, userId }, cancellationToken: ct)));
+        });
+        return cached.Value;
     }
 
     public async Task<Guid?> GetUserRolePublicIdAsync(long appId, long userId, CancellationToken ct = default)
@@ -624,10 +629,15 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
 
     public async Task<IReadOnlyList<string>> GetUserAppRoleNamesAsync(long appId, long userId, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var result = await connection.QueryAsync<string>(
-            new CommandDefinition(GetUserAppRoleNamesSql, new { appId, userId }, cancellationToken: ct));
-        return result.ToList();
+        // GET /apps/{id}/my-roles. Role renames and assignments write Access first (AppRoleRepository, this repository, GroupRepository).
+        var cached = await _cache.GetOrAddAsync<IReadOnlyList<string>>(QueryContext.TenantId, MetadataCacheGroups.Access, $"rolenames:{appId}:{userId}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            var result = await connection.QueryAsync<string>(
+                new CommandDefinition(GetUserAppRoleNamesSql, new { appId, userId }, cancellationToken: ct));
+            return result.ToList();
+        });
+        return cached.ToList();
     }
 
     public async Task<PowerBase.Application.Groups.Queries.GetUserEffectivePermissions.UserEffectivePermissionsDto> GetUserEffectivePermissionsAsync(Guid userPublicId, CancellationToken ct = default)

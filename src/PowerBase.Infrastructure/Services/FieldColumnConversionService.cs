@@ -248,6 +248,7 @@ public sealed class FieldColumnConversionService : IFieldColumnConversionService
     {
         _metadataCache.Invalidate(_queryContext.TenantId, MetadataCacheGroups.Fields, inTransaction: true); // the field lists are cached (AppFieldRepository)
         _metadataCache.Invalidate(_queryContext.TenantId, MetadataCacheGroups.Access, inTransaction: true); // field-access maps join the field table
+        _metadataCache.Invalidate(_queryContext.TenantId, MetadataCacheGroups.Forms, inTransaction: true); // so do the cached form layouts
         var affected = await connection.ExecuteAsync(new CommandDefinition(UpdateFieldMetadataSql, new
         {
             id = field.Id,

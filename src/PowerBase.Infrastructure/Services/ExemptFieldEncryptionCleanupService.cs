@@ -402,6 +402,7 @@ public class ExemptFieldEncryptionCleanupService : IExemptFieldEncryptionCleanup
                 // 3g. Clear IsEncrypted in metadata
                 _metadataCache.Invalidate(_queryContext.TenantId, MetadataCacheGroups.Fields, inTransaction: true); // the field lists are cached (AppFieldRepository)
         _metadataCache.Invalidate(_queryContext.TenantId, MetadataCacheGroups.Access, inTransaction: true); // field-access maps join the field table
+        _metadataCache.Invalidate(_queryContext.TenantId, MetadataCacheGroups.Forms, inTransaction: true); // so do the cached form layouts
                 await conn.ExecuteAsync("""
                     UPDATE meta.AppField
                     SET IsEncrypted = 0, ModifiedOn = SYSUTCDATETIME()

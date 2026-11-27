@@ -6,7 +6,11 @@ namespace PowerBase.Application.Common.Interfaces;
 public interface IAppTableRepository
 {
     Task<AppTable> GetByIdAsync(long id, CancellationToken ct = default);
+    /// <summary>From the metadata cache (like <see cref="GetByIdAsync"/>): RecordCount may lag behind; use
+    /// <see cref="GetRecordCountAsync"/> where the count is shown.</summary>
     Task<AppTable> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default);
+    /// <summary>The table's current record counter, read from the database (never cached).</summary>
+    Task<int> GetRecordCountAsync(long id, CancellationToken ct = default);
     Task<long> GetAppIdByPublicIdAsync(Guid tablePublicId, CancellationToken ct = default);
     Task<IReadOnlyList<AppTable>> ListByAppAsync(long appId, CancellationToken ct = default);
     /// <summary>Slim, paged, searchable, sortable listing for the tables list UI — excludes Fields.

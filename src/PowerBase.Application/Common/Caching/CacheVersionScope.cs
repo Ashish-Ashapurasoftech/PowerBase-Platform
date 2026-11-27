@@ -22,10 +22,35 @@ public sealed class CacheVersionScope : IDisposable
         return scope;
     }
 
+    private readonly Dictionary<long, Task<bool>> _syncs = [];
+
     /// <summary>True the first time a tenant is asked for in this scope (the caller then reads its versions).</summary>
     public bool FirstUse(long tenantId)
     {
         lock (_checkedTenants) return _checkedTenants.Add(tenantId);
+    }
+
+    /// <summary>
+    /// Reads a tenant's versions once in this scope: the first caller starts <paramref name="sync"/>, every caller (concurrent ones
+    /// included) awaits the same read. A read that failed (threw) is not kept, so the next use tries again.
+    /// </summary>
+    public async Task<bool> SyncOnceAsync(long tenantId, Func<Task<bool>> sync)
+    {
+        Task<bool> task;
+        lock (_syncs)
+        {
+            if (!_syncs.TryGetValue(tenantId, out task!))
+            {
+                task = sync();
+                _syncs[tenantId] = task;
+            }
+        }
+        try { return await task; }
+        catch
+        {
+            lock (_syncs) if (_syncs.TryGetValue(tenantId, out var current) && current == task) _syncs.Remove(tenantId);
+            throw;
+        }
     }
 
     public void Dispose() => CurrentScope.Value = _parent;

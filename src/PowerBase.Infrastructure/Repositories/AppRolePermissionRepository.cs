@@ -52,10 +52,16 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
 
     public async Task<IReadOnlyList<TablePermissionRow>> GetTablePermissionsAsync(long appRoleId, CancellationToken ct = default)
     {
-        await using var conn = await ConnectionFactory.CreateAsync(ct);
-        var rows = await conn.QueryAsync<TablePermissionRow>(
-            new CommandDefinition(GetTablePermissionsSql, new { appRoleId }, cancellationToken: ct));
-        return rows.AsList();
+        // Per role, on every app entry (GET /apps/{id}/permissions). Joins AppTable (name, deleted): table writes drop Access too
+        // (AppTableRepository.TablesChanging). Rows are immutable records; each caller gets its own list.
+        var cached = await _cache.GetOrAddAsync<IReadOnlyList<TablePermissionRow>>(QueryContext.TenantId, MetadataCacheGroups.Access, $"tableperms:{appRoleId}", async () =>
+        {
+            await using var conn = await ConnectionFactory.CreateAsync(ct);
+            var rows = await conn.QueryAsync<TablePermissionRow>(
+                new CommandDefinition(GetTablePermissionsSql, new { appRoleId }, cancellationToken: ct));
+            return rows.AsList();
+        });
+        return cached.ToList();
     }
 
     public async Task SetTablePermissionsAsync(long appRoleId, IReadOnlyList<AppRoleTablePermission> rows, IDbTransaction? transaction = null, CancellationToken ct = default)
@@ -177,10 +183,15 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
 
     public async Task<IReadOnlyList<FieldPermissionScopedRow>> GetAllFieldPermissionsAsync(long appRoleId, CancellationToken ct = default)
     {
-        await using var conn = await ConnectionFactory.CreateAsync(ct);
-        var rows = await conn.QueryAsync<FieldPermissionScopedRow>(
-            new CommandDefinition(GetAllFieldPermissionsSql, new { appRoleId }, cancellationToken: ct));
-        return rows.AsList();
+        // Joins AppField / AppTable: field writes drop Access (AppFieldRepository.FieldsChanging), table writes too.
+        var cached = await _cache.GetOrAddAsync<IReadOnlyList<FieldPermissionScopedRow>>(QueryContext.TenantId, MetadataCacheGroups.Access, $"fieldperms:{appRoleId}", async () =>
+        {
+            await using var conn = await ConnectionFactory.CreateAsync(ct);
+            var rows = await conn.QueryAsync<FieldPermissionScopedRow>(
+                new CommandDefinition(GetAllFieldPermissionsSql, new { appRoleId }, cancellationToken: ct));
+            return rows.AsList();
+        });
+        return cached.ToList();
     }
 
     private const string CountRolesWithNoneAccessForFieldSql = """
@@ -220,10 +231,14 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
 
     public async Task<IReadOnlyList<RecordFilterRow>> GetRecordFiltersAsync(long appRoleId, CancellationToken ct = default)
     {
-        await using var conn = await ConnectionFactory.CreateAsync(ct);
-        var rows = await conn.QueryAsync<RecordFilterRow>(
-            new CommandDefinition(GetRecordFiltersSql, new { appRoleId }, cancellationToken: ct));
-        return rows.AsList();
+        var cached = await _cache.GetOrAddAsync<IReadOnlyList<RecordFilterRow>>(QueryContext.TenantId, MetadataCacheGroups.Access, $"recordfilters:{appRoleId}", async () =>
+        {
+            await using var conn = await ConnectionFactory.CreateAsync(ct);
+            var rows = await conn.QueryAsync<RecordFilterRow>(
+                new CommandDefinition(GetRecordFiltersSql, new { appRoleId }, cancellationToken: ct));
+            return rows.AsList();
+        });
+        return cached.ToList();
     }
 
     public async Task SetRecordFiltersAsync(long appRoleId, IReadOnlyList<AppRoleRecordFilter> rows, IDbTransaction? transaction = null, CancellationToken ct = default)

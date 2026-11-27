@@ -718,6 +718,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
     public async Task SetGridEditConfigAsync(Guid reportPublicId, IReadOnlyList<Guid> formIds,
         IReadOnlyList<Guid> appliedRuleIds, IReadOnlyList<Guid> excludedRuleIds, CancellationToken ct = default)
     {
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Forms, inTransaction: true); // the cached grid-edit rule lists
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.OpenAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
@@ -745,6 +746,15 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
     }
 
     public async Task<IReadOnlyList<GridEditRuntimeRule>> GetGridEditRuntimeAsync(Guid reportPublicId, CancellationToken ct = default)
+    {
+        // Opened with every grid edit. Built from the report's grid-edit config (SetGridEditConfigAsync drops Forms) and the selected
+        // forms' rules and elements (form, rule and field writes drop Forms). Callers get a deep copy.
+        var cached = await _cache.GetOrAddAsync<IReadOnlyList<GridEditRuntimeRule>>(QueryContext.TenantId, MetadataCacheGroups.Forms,
+            $"gridedit:runtime:{reportPublicId}", () => LoadGridEditRuntimeAsync(reportPublicId, ct));
+        return CacheCopy.Deep(cached);
+    }
+
+    private async Task<IReadOnlyList<GridEditRuntimeRule>> LoadGridEditRuntimeAsync(Guid reportPublicId, CancellationToken ct)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         using var multi = await connection.QueryMultipleAsync(
@@ -815,6 +825,14 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
         """;
 
     public async Task<IReadOnlyList<PowerBase.Domain.Entities.FormRule>> GetAppliedGridEditRulesAsync(Guid reportPublicId, CancellationToken ct = default)
+    {
+        // Every grid-edit save (FormRuleServerValidator). Same dependencies as GetGridEditRuntimeAsync.
+        var cached = await _cache.GetOrAddAsync<IReadOnlyList<PowerBase.Domain.Entities.FormRule>>(QueryContext.TenantId, MetadataCacheGroups.Forms,
+            $"gridedit:applied:{reportPublicId}", () => LoadAppliedGridEditRulesAsync(reportPublicId, ct));
+        return CacheCopy.Deep(cached);
+    }
+
+    private async Task<IReadOnlyList<PowerBase.Domain.Entities.FormRule>> LoadAppliedGridEditRulesAsync(Guid reportPublicId, CancellationToken ct)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         using var multi = await connection.QueryMultipleAsync(

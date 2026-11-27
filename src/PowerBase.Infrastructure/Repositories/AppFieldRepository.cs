@@ -389,6 +389,8 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Relationships, inTransaction);
         // The role field-access maps are read through a join on meta.AppField.
         _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Access, inTransaction);
+        // So are the cached form layouts (FormRepository.GetLayoutAsync) and the grid-edit rule lists.
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Forms, inTransaction);
     }
 
     public async Task<AppField> GetByIdInTableAsync(long fieldId, long tableId, CancellationToken ct = default)
@@ -409,10 +411,16 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     public async Task<IReadOnlyList<AppField>> ListByAppAsync(long appId, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var results = await connection.QueryAsync<AppField>(
-            new CommandDefinition(ListByAppSql, new { appId }, cancellationToken: ct));
-        return results.AsList();
+        // Same group as ListByTableAsync: every field write drops it first (FieldsChanging), and so do the services that rewrite
+        // field rows directly (column conversion, encryption cleanup). Each caller gets its own copies.
+        var cached = await _cache.GetOrAddAsync<IReadOnlyList<AppField>>(QueryContext.TenantId, FieldsCacheGroup, $"app:{appId}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            var results = await connection.QueryAsync<AppField>(
+                new CommandDefinition(ListByAppSql, new { appId }, cancellationToken: ct));
+            return results.AsList();
+        });
+        return cached.Select(f => f.Clone()).ToList();
     }
 
     private async Task<IReadOnlyList<AppField>> LoadFieldsByTableAsync(long tableId, CancellationToken ct)
@@ -831,9 +839,14 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     public async Task<AppField?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        return await connection.QuerySingleOrDefaultAsync<AppField>(
-            new CommandDefinition(GetByPublicIdSql, new { publicId }, cancellationToken: ct));
+        // A field that does not exist is not cached (null is never stored).
+        var cached = await _cache.GetOrAddAsync<AppField?>(QueryContext.TenantId, FieldsCacheGroup, $"pub:{publicId}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            return await connection.QuerySingleOrDefaultAsync<AppField>(
+                new CommandDefinition(GetByPublicIdSql, new { publicId }, cancellationToken: ct));
+        });
+        return cached?.Clone();
     }
 
     public async Task<int> UpdateAsync(Guid publicId, long tableId, string? label, string? description,

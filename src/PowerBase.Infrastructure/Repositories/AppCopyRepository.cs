@@ -150,9 +150,10 @@ public class AppCopyRepository : TenantRepositoryBase, IAppCopyRepository
 
     public AppCopyRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IEncryptionService encryptionService,
         IAppCopyProgressStore progressStore, IFileStorageService fileStorage,
-        IComputeOutbox? computeOutbox = null, IComputeQueuePublisher? computePublisher = null)
+        IComputeOutbox? computeOutbox = null, IComputeQueuePublisher? computePublisher = null, IMetadataCache? metadataCache = null)
         : base(connectionFactory, queryContext)
     {
+        _metadataCache = metadataCache;
         _computeOutbox = computeOutbox;
         _computePublisher = computePublisher;
         _encryptionService = encryptionService;
@@ -162,6 +163,7 @@ public class AppCopyRepository : TenantRepositoryBase, IAppCopyRepository
 
     private readonly IComputeOutbox? _computeOutbox;
     private readonly IComputeQueuePublisher? _computePublisher;
+    private readonly IMetadataCache? _metadataCache;
 
     /// <summary>
     /// Copied rows arrive without stored (c_) values: queue one "recompute this table" row per copied table that has rows. Runs after
@@ -246,6 +248,8 @@ public class AppCopyRepository : TenantRepositoryBase, IAppCopyRepository
             if (fileColumns.Count > 0)
                 started.Warnings.AddRange(await CopyFilesAsync(connection, started, fileColumns));
 
+            // usp_FinishAppCopy makes the new app Active: drop a Draft copy of it that a read during the copy may have cached.
+            _metadataCache?.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Apps);
             await connection.ExecuteAsync(new CommandDefinition(
                 FinishAppCopyProcedure, new { RunId = started.RunId, WarningsJson = JsonSerializer.Serialize(started.Warnings) },
                 commandTimeout: COMMAND_TIMEOUT_SECONDS, commandType: CommandType.StoredProcedure));
@@ -570,6 +574,9 @@ public class AppCopyRepository : TenantRepositoryBase, IAppCopyRepository
     {
         try
         {
+            // The discarded app and its tables go away: drop whatever a read during the copy cached of them.
+            _metadataCache?.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Apps);
+            _metadataCache?.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Ids);
             await using var connection = await OpenConnectionAsync(CancellationToken.None);
             await connection.ExecuteAsync(new CommandDefinition(
                 DiscardAppCopyProcedure,

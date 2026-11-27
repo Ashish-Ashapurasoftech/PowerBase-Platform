@@ -35,6 +35,16 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         WHERE PublicId = @publicId AND IsDeleted = 0
         """;
 
+    private const string GetIdByPublicIdSql = """
+        SELECT Id FROM meta.AppTable
+        WHERE PublicId = @publicId AND IsDeleted = 0
+        """;
+
+    private const string GetRecordCountSql = """
+        SELECT RecordCount FROM meta.AppTable
+        WHERE Id = @id AND IsDeleted = 0
+        """;
+
     private const string ListByAppSql = """
         SELECT t.Id, t.PublicId, t.AppId, t.Name, t.Alias, t.SingularLabel, t.PluralLabel, t.Description,
                t.PhysicalTableName, t.DisplayFieldId, t.KeyFieldId, t.DefaultRecordPickerField1Id, t.DefaultRecordPickerField2Id, t.DefaultRecordPickerField3Id, t.RecordCount, t.IsShowInBar, t.IsSystem, t.DisplayOrder,
@@ -239,6 +249,10 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
     {
         _cache.Invalidate(QueryContext.TenantId, TablesCacheGroup);
         _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Relationships);
+        // The cached role permission lists join AppTable (name, deleted): see AppRolePermissionRepository.GetTablePermissionsAsync.
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Access);
+        // Cached form lists find their table through meta.AppTable (deleted tables drop out).
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Forms);
     }
 
     public async Task<AppTable> GetByIdAsync(long id, CancellationToken ct = default)
@@ -256,10 +270,24 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     public async Task<AppTable> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
     {
+        // Public id → id (Ids group; a delete drops it), then the cached table by id: same columns and filters as GetByPublicIdSql.
+        // Like GetByIdAsync, RecordCount may lag (the counters do not drop the cache): read GetRecordCountAsync where it is shown.
+        var cachedId = await _cache.GetOrAddAsync(QueryContext.TenantId, MetadataCacheGroups.Ids, $"tableid:{publicId}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            var id = await connection.ExecuteScalarAsync<long?>(
+                new CommandDefinition(GetIdByPublicIdSql, new { publicId }, cancellationToken: ct));
+            return new CachedId(id ?? throw new NotFoundException("Table", publicId));
+        });
+        try { return await GetByIdAsync(cachedId.Value, ct); }
+        catch (NotFoundException) { throw new NotFoundException("Table", publicId); }
+    }
+
+    public async Task<int> GetRecordCountAsync(long id, CancellationToken ct = default)
+    {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var table = await connection.QuerySingleOrDefaultAsync<AppTable>(
-            new CommandDefinition(GetByPublicIdSql, new { publicId }, cancellationToken: ct));
-        return table ?? throw new NotFoundException("Table", publicId);
+        return await connection.ExecuteScalarAsync<int>(
+            new CommandDefinition(GetRecordCountSql, new { id }, cancellationToken: ct));
     }
 
     public async Task<long> GetAppIdByPublicIdAsync(Guid tablePublicId, CancellationToken ct = default)
@@ -331,18 +359,35 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     public async Task<IReadOnlyList<AppTableNavItemDto>> ListNavByAppAsync(long appId, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var rows = await connection.QueryAsync<AppTableNavItemDto>(
-            new CommandDefinition(ListNavByAppSql, new { appId }, cancellationToken: ct));
-        return rows.ToList();
+        // The app's table bar, asked on every app entry. Every table write here drops the Tables group first (TablesChanging).
+        var cached = await _cache.GetOrAddAsync<IReadOnlyList<AppTableNavItemDto>>(QueryContext.TenantId, TablesCacheGroup, $"nav:{appId}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            var rows = await connection.QueryAsync<AppTableNavItemDto>(
+                new CommandDefinition(ListNavByAppSql, new { appId }, cancellationToken: ct));
+            return rows.ToList();
+        });
+        return cached.Select(CopyOf).ToList();
     }
+
+    // The cached lists are shared: each caller gets its own copies of the (mutable) items.
+    private static AppTableNavItemDto CopyOf(AppTableNavItemDto t) => new()
+    {
+        PublicId = t.PublicId, Name = t.Name, SingularLabel = t.SingularLabel, PluralLabel = t.PluralLabel, Icon = t.Icon, IsShowInBar = t.IsShowInBar,
+    };
+
+    private static AppTableAliasDto CopyOf(AppTableAliasDto t) => new() { PublicId = t.PublicId, Alias = t.Alias };
 
     public async Task<IReadOnlyList<AppTableAliasDto>> ListAliasesByAppAsync(long appId, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var rows = await connection.QueryAsync<AppTableAliasDto>(
-            new CommandDefinition(ListAliasesByAppSql, new { appId }, cancellationToken: ct));
-        return rows.ToList();
+        var cached = await _cache.GetOrAddAsync<IReadOnlyList<AppTableAliasDto>>(QueryContext.TenantId, TablesCacheGroup, $"aliases:{appId}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            var rows = await connection.QueryAsync<AppTableAliasDto>(
+                new CommandDefinition(ListAliasesByAppSql, new { appId }, cancellationToken: ct));
+            return rows.ToList();
+        });
+        return cached.Select(CopyOf).ToList();
     }
 
     public async Task<int> CountByAppAsync(long appId, string? search, bool? isShowInBar = null, CancellationToken ct = default)

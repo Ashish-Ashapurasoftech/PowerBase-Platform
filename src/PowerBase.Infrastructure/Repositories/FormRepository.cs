@@ -9,8 +9,21 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class FormRepository : TenantRepositoryBase, IFormRepository
 {
-    public FormRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
-        : base(connectionFactory, queryContext) { }
+    private readonly IMetadataCache _cache;
+
+    public FormRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache cache)
+        : base(connectionFactory, queryContext)
+    {
+        _cache = cache;
+    }
+
+    /// <summary>Drops the cached forms, layouts and form ids of this tenant. Called BEFORE every write below (most run in a transaction,
+    /// so the group stays uncached for the transaction quarantine). Field writes drop Forms too (layouts join AppField).</summary>
+    private void FormsChanging()
+    {
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Forms, inTransaction: true);
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Ids, inTransaction: true);
+    }
 
     public async Task<RecordPickerElementDto?> GetRecordPickerElementAsync(Guid elementPublicId, CancellationToken ct = default)
     {
@@ -428,30 +441,46 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
 
     public async Task<Form> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
     {
-        await using var conn = await ConnectionFactory.CreateAsync(ct);
-        var form = await conn.QuerySingleOrDefaultAsync<Form>(
-            new CommandDefinition(GetByPublicIdSql, new { publicId }, cancellationToken: ct));
-        return form ?? throw new NotFoundException("Form", publicId);
+        // Carries RowVersion (UpdateSettingsAsync checks it): every write to meta.Form goes through FormsChanging first, so a cached
+        // copy never holds an old one. A missing form throws and is never cached.
+        var cached = await _cache.GetOrAddAsync(QueryContext.TenantId, MetadataCacheGroups.Forms, $"form:{publicId}", async () =>
+        {
+            await using var conn = await ConnectionFactory.CreateAsync(ct);
+            var form = await conn.QuerySingleOrDefaultAsync<Form>(
+                new CommandDefinition(GetByPublicIdSql, new { publicId }, cancellationToken: ct));
+            return form ?? throw new NotFoundException("Form", publicId);
+        });
+        return CacheCopy.Deep(cached);
     }
 
     public async Task<long> GetAppIdByPublicIdAsync(Guid formPublicId, CancellationToken ct = default)
     {
-        await using var conn = await ConnectionFactory.CreateAsync(ct);
-        var appId = await conn.QuerySingleOrDefaultAsync<long?>(
-            new CommandDefinition(GetAppIdByPublicIdSql, new { publicId = formPublicId }, cancellationToken: ct));
-        return appId ?? throw new NotFoundException("Form", formPublicId);
+        // Resolved by the membership check of every form endpoint. A form never moves to another app; deletes drop Ids.
+        var cached = await _cache.GetOrAddAsync(QueryContext.TenantId, MetadataCacheGroups.Ids, $"form:{formPublicId}", async () =>
+        {
+            await using var conn = await ConnectionFactory.CreateAsync(ct);
+            var appId = await conn.QuerySingleOrDefaultAsync<long?>(
+                new CommandDefinition(GetAppIdByPublicIdSql, new { publicId = formPublicId }, cancellationToken: ct));
+            return new CachedId(appId ?? throw new NotFoundException("Form", formPublicId));
+        });
+        return cached.Value;
     }
 
     public async Task<IReadOnlyList<Form>> ListByTableAsync(Guid tablePublicId, CancellationToken ct = default)
     {
-        await using var conn = await ConnectionFactory.CreateAsync(ct);
-        var forms = await conn.QueryAsync<Form>(
-            new CommandDefinition(ListByTableSql, new { tablePublicId }, cancellationToken: ct));
-        return forms.ToList();
+        var cached = await _cache.GetOrAddAsync<IReadOnlyList<Form>>(QueryContext.TenantId, MetadataCacheGroups.Forms, $"table:{tablePublicId}", async () =>
+        {
+            await using var conn = await ConnectionFactory.CreateAsync(ct);
+            var forms = await conn.QueryAsync<Form>(
+                new CommandDefinition(ListByTableSql, new { tablePublicId }, cancellationToken: ct));
+            return forms.ToList();
+        });
+        return CacheCopy.Deep(cached);
     }
 
     public async Task<(long Id, Guid PublicId)> CreateAsync(Form form, CancellationToken ct = default)
     {
+        FormsChanging();
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         var row = await conn.QuerySingleAsync(
             new CommandDefinition(InsertSql, new
@@ -487,6 +516,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         bool showBuiltInFields, string saveOptions, byte[] rowVersion, bool? isQuickPeekForm = null,
         bool? isQuickPeekDefault = null, CancellationToken ct = default)
     {
+        FormsChanging();
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         await conn.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
@@ -532,6 +562,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
 
     public async Task<int> DeleteAsync(Guid publicId, CancellationToken ct = default)
     {
+        FormsChanging();
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         var deleted = await conn.ExecuteAsync(
             new CommandDefinition(SoftDeleteSql, new { publicId, deletedBy = QueryContext.UserId }, cancellationToken: ct));
@@ -541,13 +572,25 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
 
     public async Task<IReadOnlyList<FormPage>> GetPagesAsync(long formId, CancellationToken ct = default)
     {
-        await using var conn = await ConnectionFactory.CreateAsync(ct);
-        var pages = await conn.QueryAsync<FormPage>(
-            new CommandDefinition(GetPagesSql, new { formId }, cancellationToken: ct));
-        return pages.ToList();
+        var cached = await _cache.GetOrAddAsync<IReadOnlyList<FormPage>>(QueryContext.TenantId, MetadataCacheGroups.Forms, $"pages:{formId}", async () =>
+        {
+            await using var conn = await ConnectionFactory.CreateAsync(ct);
+            var pages = await conn.QueryAsync<FormPage>(
+                new CommandDefinition(GetPagesSql, new { formId }, cancellationToken: ct));
+            return pages.ToList();
+        });
+        return CacheCopy.Deep(cached);
     }
 
     public async Task<IReadOnlyList<FormSection>> GetLayoutAsync(long formId, CancellationToken ct = default)
+    {
+        // Every form render. Sections → blocks → elements (elements join AppField: field writes drop Forms). Callers get a deep copy.
+        var cached = await _cache.GetOrAddAsync<IReadOnlyList<FormSection>>(QueryContext.TenantId, MetadataCacheGroups.Forms, $"layout:{formId}",
+            () => LoadLayoutAsync(formId, ct));
+        return CacheCopy.Deep(cached);
+    }
+
+    private async Task<IReadOnlyList<FormSection>> LoadLayoutAsync(long formId, CancellationToken ct)
     {
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         using var multi = await conn.QueryMultipleAsync(
@@ -599,6 +642,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         IReadOnlyDictionary<FormElement, Guid>? elementPageLinks = null,
         CancellationToken ct = default)
     {
+        FormsChanging();
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         await conn.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
@@ -806,6 +850,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
 
     public async Task AppendFieldToLastSectionAsync(long formId, int fieldFid, CancellationToken ct = default)
     {
+        FormsChanging();
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         await conn.ExecuteAsync(
             new CommandDefinition(AppendFieldSql, new { formId, fieldId = fieldFid }, cancellationToken: ct));
@@ -823,6 +868,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
 
     public async Task DeleteReportElementsAsync(Guid reportPublicId, CancellationToken ct = default)
     {
+        FormsChanging();
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(DeleteReportElementsSql,
             new { pattern = $"%{reportPublicId}%" }, cancellationToken: ct));
@@ -830,6 +876,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
 
     public async Task AppendSectionAsync(long formId, FormSection section, CancellationToken ct = default)
     {
+        FormsChanging();
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         await conn.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
@@ -935,6 +982,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
 
     public async Task<(long Id, Guid PublicId)> DuplicateAsync(Guid sourcePublicId, string newName, long userId, CancellationToken ct = default)
     {
+        FormsChanging();
         var source = await GetByPublicIdAsync(sourcePublicId, ct);
         var sourceLayout = await GetLayoutAsync(source.Id, ct);
         var sourcePages = await GetPagesAsync(source.Id, ct);
@@ -999,6 +1047,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
 
     public async Task SetDefaultAsync(Guid tablePublicId, Guid formPublicId, CancellationToken ct = default)
     {
+        FormsChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.OpenAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
@@ -1013,6 +1062,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
 
     public async Task SetQuickPeekFormAsync(Guid formPublicId, bool enabled, CancellationToken ct = default)
     {
+        FormsChanging();
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         await conn.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
@@ -1047,6 +1097,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
 
     public async Task SetQuickPeekDefaultAsync(Guid formPublicId, CancellationToken ct = default)
     {
+        FormsChanging();
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         await conn.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
@@ -1079,6 +1130,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
 
     public async Task UpdateRoleFormOverridesAsync(Guid tablePublicId, IEnumerable<(Guid? RolePublicId, Guid? EditFormPublicId, Guid? AddFormPublicId)> overrides, CancellationToken ct = default)
     {
+        FormsChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.OpenAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);

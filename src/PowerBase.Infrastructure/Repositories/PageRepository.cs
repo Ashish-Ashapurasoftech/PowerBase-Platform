@@ -158,8 +158,24 @@ public class PageRepository : TenantRepositoryBase, IPageRepository
         WHERE p.PublicId = @pagePublicId AND pv.VersionNo = @versionNo
         """;
 
-    public PageRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
-        : base(connectionFactory, queryContext) { }
+    private readonly IMetadataCache _cache;
+
+    public PageRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache cache)
+        : base(connectionFactory, queryContext)
+    {
+        _cache = cache;
+    }
+
+    /// <summary>
+    /// The cached nav list depends on the user (visibility: owner, role pages, role home pages), so it lives in the Access group, like
+    /// the visible reports: role assignments, role home pages and the writes below all drop it. Page ids are in Ids (deletes drop them).
+    /// Called BEFORE every page write.
+    /// </summary>
+    private void PagesChanging()
+    {
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Access, inTransaction: true);
+        _cache.Invalidate(QueryContext.TenantId, MetadataCacheGroups.Ids, inTransaction: true);
+    }
 
     public async Task<Page> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
     {
@@ -186,10 +202,15 @@ public class PageRepository : TenantRepositoryBase, IPageRepository
 
     public async Task<long> GetAppIdByPublicIdAsync(Guid pagePublicId, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var appId = await connection.ExecuteScalarAsync<long?>(
-            new CommandDefinition(GetAppIdByPublicIdSql, new { publicId = pagePublicId }, cancellationToken: ct));
-        return appId ?? throw new NotFoundException("Page", pagePublicId);
+        // Resolved by the membership check of every page endpoint. A page never moves to another app.
+        var cached = await _cache.GetOrAddAsync(QueryContext.TenantId, MetadataCacheGroups.Ids, $"page:{pagePublicId}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            var appId = await connection.ExecuteScalarAsync<long?>(
+                new CommandDefinition(GetAppIdByPublicIdSql, new { publicId = pagePublicId }, cancellationToken: ct));
+            return new CachedId(appId ?? throw new NotFoundException("Page", pagePublicId));
+        });
+        return cached.Value;
     }
 
     public async Task<IReadOnlyList<Page>> ListVisibleByAppAsync(long appId, string? search, CancellationToken ct = default)
@@ -210,14 +231,21 @@ public class PageRepository : TenantRepositoryBase, IPageRepository
 
     public async Task<IReadOnlyList<Page>> ListNavPagesAsync(long appId, CancellationToken ct = default)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var results = await connection.QueryAsync<Page>(
-            new CommandDefinition(ListNavPagesSql, new { appId, userId = QueryContext.UserId }, cancellationToken: ct));
-        return results.AsList();
+        // Every app entry (the page bar). Per user, because of the visibility rules (see PagesChanging).
+        var userId = QueryContext.UserId;
+        var cached = await _cache.GetOrAddAsync<IReadOnlyList<Page>>(QueryContext.TenantId, MetadataCacheGroups.Access, $"navpages:{appId}:u{userId}", async () =>
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            var results = await connection.QueryAsync<Page>(
+                new CommandDefinition(ListNavPagesSql, new { appId, userId }, cancellationToken: ct));
+            return results.AsList();
+        });
+        return CacheCopy.Deep(cached);
     }
 
     public async Task<(long Id, Guid PublicId, int PageNumber)> CreateAsync(Page page, CancellationToken ct = default)
     {
+        PagesChanging();
         await using var connection = await OpenConnectionAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
         try
@@ -249,6 +277,7 @@ public class PageRepository : TenantRepositoryBase, IPageRepository
 
     public async Task UpdateAsync(Page page, CancellationToken ct = default)
     {
+        PagesChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var affected = await connection.ExecuteAsync(
             new CommandDefinition(UpdateSql, new
@@ -273,6 +302,7 @@ public class PageRepository : TenantRepositoryBase, IPageRepository
 
     public async Task SoftDeleteManyAsync(IReadOnlyList<Guid> publicIds, CancellationToken ct = default)
     {
+        PagesChanging();
         if (publicIds.Count == 0) return;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
@@ -281,6 +311,7 @@ public class PageRepository : TenantRepositoryBase, IPageRepository
 
     public async Task<(long Id, Guid PublicId, int PageNumber)> DuplicateAsync(Guid sourcePublicId, string newName, CancellationToken ct = default)
     {
+        PagesChanging();
         var source = await GetByPublicIdAsync(sourcePublicId, ct);
         var copy = new Page
         {
@@ -307,6 +338,7 @@ public class PageRepository : TenantRepositoryBase, IPageRepository
 
     public async Task SetPublishedAsync(Guid publicId, bool isPublished, int? publishedVersionNo, CancellationToken ct = default)
     {
+        PagesChanging();
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var affected = await connection.ExecuteAsync(
             new CommandDefinition(SetPublishedSql,
@@ -316,6 +348,7 @@ public class PageRepository : TenantRepositoryBase, IPageRepository
 
     public async Task SetDefaultHomeAsync(long appId, Guid? publicId, CancellationToken ct = default)
     {
+        PagesChanging();
         await using var connection = await OpenConnectionAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
         try
@@ -384,6 +417,7 @@ public class PageRepository : TenantRepositoryBase, IPageRepository
 
     public async Task ReplacePageRolesAsync(long pageId, IEnumerable<long> roleIds, CancellationToken ct = default)
     {
+        PagesChanging();
         await using var connection = await OpenConnectionAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
         try

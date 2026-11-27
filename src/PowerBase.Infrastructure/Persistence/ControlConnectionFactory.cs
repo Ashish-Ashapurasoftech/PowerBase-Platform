@@ -14,5 +14,9 @@ public class ControlConnectionFactory : IControlConnectionFactory
     }
 
     public string ConnectionString => _connectionString;
-    public SqlConnection Create() => new(_connectionString);
+    public SqlConnection Create()
+    {
+        PowerBase.Application.Common.Caching.CacheRequestStats.ControlConnection();
+        return new(_connectionString);
+    }
 }

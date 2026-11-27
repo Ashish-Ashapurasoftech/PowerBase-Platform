@@ -41,8 +41,11 @@ public sealed class MetadataCache : IMetadataCache
     }
 
     private static readonly string[] TenantGroups =
-        [MetadataCacheGroups.Fields, MetadataCacheGroups.Tables, MetadataCacheGroups.Apps, MetadataCacheGroups.Relationships, MetadataCacheGroups.Access, MetadataCacheGroups.Ids];
-    private static readonly string[] GlobalGroups = [MetadataCacheGroups.UserPermissions, MetadataCacheGroups.Sessions];
+        [MetadataCacheGroups.Fields, MetadataCacheGroups.Tables, MetadataCacheGroups.Apps, MetadataCacheGroups.Relationships, MetadataCacheGroups.Access, MetadataCacheGroups.Ids,
+         MetadataCacheGroups.Forms, MetadataCacheGroups.Variables, MetadataCacheGroups.FieldTypes, MetadataCacheGroups.ConnectedTables];
+    private static readonly string[] GlobalGroups =
+        [MetadataCacheGroups.UserPermissions, MetadataCacheGroups.Sessions, MetadataCacheGroups.Users, MetadataCacheGroups.Tenants,
+         MetadataCacheGroups.UserTokens];
     private static readonly JsonSerializerOptions RedisJsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     private readonly IMemoryCache _cache;
@@ -76,6 +79,9 @@ public sealed class MetadataCache : IMetadataCache
     {
         MetadataCacheGroups.Fields, MetadataCacheGroups.Tables, MetadataCacheGroups.Apps, MetadataCacheGroups.Relationships, MetadataCacheGroups.Ids,
         MetadataCacheGroups.Access, MetadataCacheGroups.UserPermissions, MetadataCacheGroups.Sessions,
+        MetadataCacheGroups.Forms, MetadataCacheGroups.Variables,
+        MetadataCacheGroups.Users, MetadataCacheGroups.Tenants, MetadataCacheGroups.UserTokens, MetadataCacheGroups.FieldTypes,
+        MetadataCacheGroups.ConnectedTables,
     };
 
     public MetadataCache(IMemoryCache cache, IOptions<MetadataCacheOptions> options, ILogger<MetadataCache> logger, ICacheVersionStore? versions = null,
@@ -104,7 +110,8 @@ public sealed class MetadataCache : IMetadataCache
         if (!_options.Enabled)
         {
             CacheMetrics.Lookup(group, CacheMetrics.Source.Bypass);
-            return await factory();
+            CacheRequestStats.Bypass();
+            return await FromSqlAsync(factory);
         }
 
         // Other instances' writes first: a moved version drops the group here before it is read. Without readable versions a
@@ -112,7 +119,8 @@ public sealed class MetadataCache : IMetadataCache
         if (_versions is not null && !await SyncAsync(tenantId) && MetadataCacheGroups.IsSecurityRelevant(group))
         {
             CacheMetrics.Lookup(group, CacheMetrics.Source.Bypass);
-            return await factory();
+            CacheRequestStats.Bypass();
+            return await FromSqlAsync(factory);
         }
 
         var state = _groups.GetOrAdd((tenantId, group), _ => new GroupState());
@@ -121,6 +129,7 @@ public sealed class MetadataCache : IMetadataCache
         {
             _logger.LogDebug("Metadata cache L1 hit {Key}", cacheKey);
             CacheMetrics.Lookup(group, CacheMetrics.Source.L1);
+            CacheRequestStats.L1Hit();
             return hit;
         }
 
@@ -140,7 +149,8 @@ public sealed class MetadataCache : IMetadataCache
         if (quarantined)
         {
             CacheMetrics.Lookup(group, CacheMetrics.Source.Bypass);
-            value = await factory();   // not stored anyway: no point sharing the load
+            CacheRequestStats.Bypass();
+            value = await FromSqlAsync(factory);   // not stored anyway: no point sharing the load
         }
         else
         {
@@ -169,6 +179,14 @@ public sealed class MetadataCache : IMetadataCache
         return value;
     }
 
+    /// <summary>The factory (a SQL read), timed for the request's Server-Timing (<see cref="CacheRequestStats"/>).</summary>
+    private static async Task<T> FromSqlAsync<T>(Func<Task<T>> factory)
+    {
+        var start = System.Diagnostics.Stopwatch.GetTimestamp();
+        try { return await factory(); }
+        finally { CacheRequestStats.Sql(start); }
+    }
+
     /// <summary>L1 miss: the shared L2 first (when on and healthy), then SQL — whose answer is also put in L2 for the other instances.</summary>
     private async Task<object?> LoadAsync<T>(long tenantId, string group, long sharedVersion, string key, Func<Task<T>> factory) where T : class
     {
@@ -178,8 +196,13 @@ public sealed class MetadataCache : IMetadataCache
             try
             {
                 using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(Math.Max(10, _options.L2TimeoutMs)));
-                var bytes = await _l2!.GetAsync(l2Key, timeout.Token);
-                if (bytes is { Length: > 0 } && FromL2<T>(bytes) is { } fromL2)
+                var l2Start = System.Diagnostics.Stopwatch.GetTimestamp();
+                byte[]? bytes;
+                try { bytes = await _l2!.GetAsync(l2Key, timeout.Token); }
+                finally { CacheRequestStats.L2Read(l2Start); }
+                var fromL2 = bytes is { Length: > 0 } ? FromL2<T>(bytes) : null;
+                CacheRequestStats.L2Outcome(fromL2 is not null);
+                if (fromL2 is not null)
                 {
                     CacheMetrics.Lookup(group, CacheMetrics.Source.L2);
                     return fromL2;
@@ -198,7 +221,7 @@ public sealed class MetadataCache : IMetadataCache
         }
 
         CacheMetrics.Lookup(group, CacheMetrics.Source.Sql);
-        var value = await factory();
+        var value = await FromSqlAsync(factory);
         // Decided before the SQL read started: a version that moved less than the quarantine ago may announce a write still open, and
         // what SQL returned may be the old value — shared under the new version it would be served to every instance for hours.
         if (l2Key is not null && mayShare && value is not null)
@@ -322,20 +345,28 @@ public sealed class MetadataCache : IMetadataCache
     {
         var tv = _tenantVersions.GetOrAdd(tenantId, _ => new TenantVersions());
         var scope = CacheVersionScope.Current;
-        bool due;
+        // In a request: once per tenant, and every cache use of the request waits for that one read — also uses running in parallel
+        // (Task.WhenAll in a handler), which must not answer from versions older than the request.
         if (scope is not null)
-            due = scope.FirstUse(tenantId);
-        else
-            lock (tv)
-                due = DateTime.UtcNow.Ticks - tv.CheckedAtTicks >= TimeSpan.FromMilliseconds(Math.Max(0, _options.VersionCheckIntervalMs)).Ticks;
+            return await scope.SyncOnceAsync(tenantId, () => ReadVersionsAsync(tenantId, tv));
+
+        bool due;
+        lock (tv)
+            due = DateTime.UtcNow.Ticks - tv.CheckedAtTicks >= TimeSpan.FromMilliseconds(Math.Max(0, _options.VersionCheckIntervalMs)).Ticks;
         if (!due)
         {
             lock (tv) return tv.Available;
         }
+        return await ReadVersionsAsync(tenantId, tv);
+    }
 
+    private async Task<bool> ReadVersionsAsync(long tenantId, TenantVersions tv)
+    {
         // With L2 on, the ages too (one query either way): they say when a version has settled. Without them, "just moved".
+        var syncStart = System.Diagnostics.Stopwatch.GetTimestamp();
         IReadOnlyDictionary<string, CacheGroupVersion>? withAge = _l2 is null ? null : await _versions!.ReadWithAgeAsync(tenantId);
         var remote = withAge?.ToDictionary(r => r.Key, r => r.Value.Version, StringComparer.Ordinal) ?? await _versions!.ReadAsync(tenantId);
+        CacheRequestStats.Sync(syncStart);
         var moved = new List<string>();
         lock (tv)
         {

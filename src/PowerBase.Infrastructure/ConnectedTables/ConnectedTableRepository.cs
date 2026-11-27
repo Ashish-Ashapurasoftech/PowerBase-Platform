@@ -9,9 +9,17 @@ using PowerBase.Infrastructure.Repositories;
 
 namespace PowerBase.Infrastructure.ConnectedTables;
 
-public sealed class ConnectedTableRepository(ITenantConnectionFactory connections, IQueryContext context)
+public sealed class ConnectedTableRepository(ITenantConnectionFactory connections, IQueryContext context, IMetadataCache? cache = null)
     : TenantRepositoryBase(connections, context), IConnectedTableRepository
 {
+    /// <summary>A connected table id in the metadata cache (a value tuple does not round-trip through the Redis L2 as JSON).</summary>
+    private sealed record ConnectedTableIdRow(long Id, Guid PublicId);
+
+    /// <summary>Which tables are connected changes only when one is created or soft-deleted: those two writes drop the group first, on
+    /// every API instance (shared versions), so the read-only write filter never lets a write through on another instance.</summary>
+    private void ConnectedChanging(bool inTransaction = false) =>
+        cache?.Invalidate(QueryContext.TenantId, MetadataCacheGroups.ConnectedTables, inTransaction);
+
     private const string Columns = """
         Id, PublicId, AppId, AppTableId, ConnectionId, OwnerUserId, SourceTenantId, SourceAppPublicId, SourceTablePublicId, SourceTableName,
         IsCrossTenant, RefreshKeySourceFid, RefreshKeyIsAuto, UpdateMode, FilterEnabled, FilterJson, ScheduleJson, NextRunOn, TimeZone,
@@ -145,8 +153,17 @@ public sealed class ConnectedTableRepository(ITenantConnectionFactory connection
 
     public async Task<IReadOnlyList<(long Id, Guid PublicId)>> ListConnectedAppTablesAsync(CancellationToken ct = default)
     {
-        await using var conn = await ConnectionFactory.CreateAsync(ct);
-        return (await conn.QueryAsync<(long, Guid)>(new CommandDefinition(ListTableIdsSql, cancellationToken: ct))).AsList();
+        // Asked by the connected-table write filter on every record write.
+        async Task<IReadOnlyList<ConnectedTableIdRow>> Load()
+        {
+            await using var conn = await ConnectionFactory.CreateAsync(ct);
+            return (await conn.QueryAsync<(long Id, Guid PublicId)>(new CommandDefinition(ListTableIdsSql, cancellationToken: ct)))
+                .Select(r => new ConnectedTableIdRow(r.Id, r.PublicId)).ToList();
+        }
+        var rows = cache is null
+            ? await Load()
+            : await cache.GetOrAddAsync(QueryContext.TenantId, MetadataCacheGroups.ConnectedTables, "tables", Load);
+        return rows.Select(r => (r.Id, r.PublicId)).ToList();
     }
 
     public async Task<IReadOnlyList<int>> ListConnectedFidsAsync(Guid appTablePublicId, CancellationToken ct = default)
@@ -157,6 +174,7 @@ public sealed class ConnectedTableRepository(ITenantConnectionFactory connection
 
     public async Task<(long Id, Guid PublicId)> CreateAsync(ConnectedTable table, IReadOnlyList<ConnectedField> fields, CancellationToken ct = default)
     {
+        ConnectedChanging(inTransaction: true);
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         await conn.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
@@ -207,6 +225,7 @@ public sealed class ConnectedTableRepository(ITenantConnectionFactory connection
 
     public async Task SoftDeleteAsync(long id, string status, CancellationToken ct = default)
     {
+        ConnectedChanging();
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(SoftDeleteSql, new { id, status }, cancellationToken: ct));
     }

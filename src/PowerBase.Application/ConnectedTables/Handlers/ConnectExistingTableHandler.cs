@@ -159,7 +159,6 @@ public sealed class ConnectExistingTableHandler(
             CreatedBy = context.UserId,
         };
         (entity.Id, entity.PublicId) = await connectedTables.CreateAsync(entity, mappings, ct);
-        ConnectedTableCache.Invalidate(context.TenantId);
         await control.UpsertLinkAsync(new ConnectedLink
         {
             ConsumerTenantId = context.TenantId,

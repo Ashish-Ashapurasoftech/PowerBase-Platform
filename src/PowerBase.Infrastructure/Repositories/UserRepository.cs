@@ -74,8 +74,43 @@ public class UserRepository : ControlRepositoryBase, IUserRepository
         WHERE Id = @userId AND IsDeleted = 0
         """;
 
-    public UserRepository(IControlConnectionFactory connectionFactory, IQueryContext queryContext)
-        : base(connectionFactory, queryContext) { }
+    private const string GetSignInIdentitySql = """
+        SELECT u.Id, u.PublicId, u.Email, u.Name, u.FirstName, u.LastName, u.SystemRoleId, sr.Code AS SystemRoleCode,
+               u.IsEmailVerified, u.IsActive, u.IsDeleted
+        FROM core.[User] u
+        LEFT JOIN core.SystemRole sr ON sr.Id = u.SystemRoleId
+        WHERE u.Id = @id
+          AND u.IsDeleted = 0
+        """;
+
+    private readonly IMetadataCache _cache;
+
+    public UserRepository(IControlConnectionFactory connectionFactory, IQueryContext queryContext, IMetadataCache cache)
+        : base(connectionFactory, queryContext)
+    {
+        _cache = cache;
+    }
+
+    /// <summary>Drops the cached sign-in identities and public ids. Called BEFORE every write to core.[User] that changes them
+    /// (here and in AdminRepository).</summary>
+    private void UsersChanging() => _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.Users);
+
+    public async Task<User?> GetSignInIdentityAsync(long id, CancellationToken ct = default)
+    {
+        // A missing user is not cached (null is never stored). The cached instance is shared: each caller gets a copy.
+        var cached = await _cache.GetOrAddAsync<User?>(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.Users, $"signin:{id}", async () =>
+        {
+            await using var connection = ConnectionFactory.Create();
+            return await connection.QuerySingleOrDefaultAsync<User>(
+                new CommandDefinition(GetSignInIdentitySql, new { id }, cancellationToken: ct));
+        });
+        return cached is null ? null : new User
+        {
+            Id = cached.Id, PublicId = cached.PublicId, Email = cached.Email, Name = cached.Name, FirstName = cached.FirstName,
+            LastName = cached.LastName, SystemRoleId = cached.SystemRoleId, SystemRoleCode = cached.SystemRoleCode,
+            IsEmailVerified = cached.IsEmailVerified, IsActive = cached.IsActive, IsDeleted = cached.IsDeleted,
+        };
+    }
 
     public async Task<User?> GetByEmailAsync(string email, CancellationToken ct = default)
     {
@@ -102,6 +137,8 @@ public class UserRepository : ControlRepositoryBase, IUserRepository
 
     public async Task<long> CreateAsync(User user, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
+        // The MERGE can revive a deleted user (same id, new name / active flag).
+        _cache.Invalidate(MetadataCacheGroups.GlobalTenant, MetadataCacheGroups.Users, inTransaction: transaction is not null);
         var connection = transaction?.Connection ?? (IDbConnection)(await OpenNewConnectionAsync(ct));
         bool ownConnection = transaction is null;
         try
@@ -154,6 +191,13 @@ public class UserRepository : ControlRepositoryBase, IUserRepository
     {
         var idList = ids.Distinct().ToList();
         if (idList.Count == 0) return new Dictionary<long, Guid>();
+        if (idList.Count == 1)
+        {
+            // The current user's public id, asked on every app entry (GET /apps/{id}/permissions). A user's public id never changes;
+            // the entry goes with the sign-in identity, so a deleted user drops out with it.
+            var identity = await GetSignInIdentityAsync(idList[0], ct);
+            return identity is null ? new Dictionary<long, Guid>() : new Dictionary<long, Guid> { [identity.Id] = identity.PublicId };
+        }
         var parameters = new DynamicParameters();
         await using var connection = ConnectionFactory.Create();
         var rows = await connection.QueryAsync<(long Id, Guid PublicId)>(
@@ -166,6 +210,7 @@ public class UserRepository : ControlRepositoryBase, IUserRepository
     public async Task ActivateAsync(long userId, string firstName, string lastName, string hashedPassword, CancellationToken ct = default)
     {
         var name = $"{firstName} {lastName}".Trim();
+        UsersChanging();
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(
             new CommandDefinition(ActivateSql, new { userId, firstName, lastName, name, hashedPassword }, cancellationToken: ct));
@@ -174,6 +219,7 @@ public class UserRepository : ControlRepositoryBase, IUserRepository
     public async Task UpdateProfileAsync(long userId, string firstName, string lastName, CancellationToken ct = default)
     {
         var name = $"{firstName} {lastName}".Trim();
+        UsersChanging();
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateProfileSql, new { userId, firstName, lastName, name }, cancellationToken: ct));

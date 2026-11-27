@@ -23,9 +23,33 @@ public static class MetadataCacheGroups
     /// its next request. Cached under <see cref="GlobalTenant"/>.</summary>
     public const string Sessions = "sessions";
 
+    /// <summary>Forms, their layouts and form rules of a tenant (also read by grid edit). Dropped by form, layout, rule and field writes.</summary>
+    public const string Forms = "forms";
+
+    /// <summary>App variables of a tenant.</summary>
+    public const string Variables = "variables";
+
+    /// <summary>Which tables of a tenant are connected (read-only write filter). Dropped when a connected table is created or removed.</summary>
+    public const string ConnectedTables = "connected";
+
+    /// <summary>A user's sign-in identity (control database: active, deleted, system role, name, email — never the password hash),
+    /// and the immutable id → public id map. Cached under <see cref="GlobalTenant"/>.</summary>
+    public const string Users = "users";
+
+    /// <summary>Tenant rows (control database: status, plan, Code Pages switch). Cached under <see cref="GlobalTenant"/>.</summary>
+    public const string Tenants = "tenants";
+
+    /// <summary>API user tokens (pb_ut_…) by hash and their allowed apps (control database). Cached under <see cref="GlobalTenant"/>;
+    /// dropped by every token write except the last-used stamp.</summary>
+    public const string UserTokens = "usertokens";
+
+    /// <summary>The field type catalogue (core.FieldType in each tenant database): seeded reference data, changed only by migrations.
+    /// One entry per tenant; the TTL is the backstop.</summary>
+    public const string FieldTypes = "fieldtypes";
+
     /// <summary>Groups that decide what a user may do or see: never served from the cache unless their shared version was confirmed
     /// (fail closed — see <see cref="ICacheVersionStore"/>).</summary>
-    public static bool IsSecurityRelevant(string group) => group is Access or UserPermissions or Sessions;
+    public static bool IsSecurityRelevant(string group) => group is Access or UserPermissions or Sessions or Users or Tenants or UserTokens or ConnectedTables;
 
     /// <summary>The tenant id for entries that are not tenant-bound.</summary>
     public const long GlobalTenant = 0;

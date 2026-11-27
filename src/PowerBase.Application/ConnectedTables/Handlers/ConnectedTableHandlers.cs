@@ -161,7 +161,6 @@ public sealed class ConnectedTableHandlers(
                 CreatedBy = context.UserId,
             };
             (entity.Id, entity.PublicId) = await connectedTables.CreateAsync(entity, mappings, ct);
-            ConnectedTableCache.Invalidate(context.TenantId);
             await control.UpsertLinkAsync(LinkOf(entity, destination.Name, source.Table.Name, connection.RunAsUserId), ct);
             if (sourceKey is not null) await SetDestinationKeyAsync(destination, mappings, sourceKey, ct);
         }
@@ -411,7 +410,6 @@ public sealed class ConnectedTableHandlers(
         await permissions.RequireAdminAsync(table.AppId, ct);
         if (await runs.GetActiveForTableAsync(table.Id, ct) is { } active) await runs.RequestCancelAsync(active.Id, ct);
         await connectedTables.SoftDeleteAsync(table.Id, ConnectedTableStatuses.Removed, ct);
-        ConnectedTableCache.Invalidate(context.TenantId);
         await writer.ClearSyncRowsAsync(table.Id, ct);
         if (await control.GetLinkAsync(context.TenantId, table.PublicId, ct) is { } link)
             await control.SetLinkStatusAsync(link.Id, ConnectedLinkStatuses.Removed, ct);
