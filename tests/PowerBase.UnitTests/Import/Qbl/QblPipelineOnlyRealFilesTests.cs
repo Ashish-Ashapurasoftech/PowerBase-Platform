@@ -85,6 +85,42 @@ public class QblPipelineOnlyRealFilesTests(ITestOutputHelper output)
         foreach (var (name, reason) in notImported) output.WriteLine($"  NOT CONVERTIBLE {name}: {reason}");
     }
 
+    private static IEnumerable<PowerBase.Application.Import.Pbl.PblPipelineStep> Flatten(IEnumerable<PowerBase.Application.Import.Pbl.PblPipelineStep> steps) =>
+        steps.SelectMany(s => new[] { s }.Concat(Flatten(s.Children)));
+
+    /// <summary>Every Quickbase "Import with CSV" step of the real file becomes the PowerFlows Import with CSV step with every
+    /// option: table, Merge field, CSV URL, separator, quote, first-row flag, Header row, and each Header row column's field.
+    /// A Quickbase mapping whose column is no longer in the Header row is the only thing left out (Quickbase no longer uses it).</summary>
+    [Fact]
+    public void RealFile_EveryImportWithCsvStep_KeepsEveryQuickbaseOption()
+    {
+        if (!Available) return;
+        var content = File.ReadAllText(PIPELINE_FILE);
+        var binding = QblPipelineOnlyBinder.Bind(content, SnapshotApps());
+        var pipelines = QblPipelineConverter.ConvertAll(QblSerializer.Deserialize(binding.Content), binding.Content, skipStepsWithUnmatchedTable: true);
+        var (kept, _) = PipelineOnlyImportService.SplitByApp(pipelines, binding.Apps.Select(a => a.AppRef).ToList());
+
+        var all = QblPipelineConverter.ConvertAll(QblSerializer.Deserialize(content), content);
+        Flatten(all.SelectMany(p => p.Steps)).Should().NotContain(s => s.Subtype == "import-with-csv");
+        var everywhere = all.SelectMany(p => Flatten(p.Steps).Where(s => s.Subtype == "csv-import").Select(s => (Pipeline: p, Step: s))).ToList();
+        // 12 csv_import steps in the file; 3 run inside a Loop over an Outlook attachment search, a step PowerFlows does not have.
+        everywhere.Should().HaveCount(9);
+
+        var csv = kept.SelectMany(p => Flatten(p.Steps).Where(s => s.Subtype == "csv-import").Select(s => (Pipeline: p, Step: s))).ToList();
+        foreach (var (pipeline, step) in csv)
+        {
+            var issues = pipeline.Issues.Where(i => i.StepId == step.RefId["ref_".Length..]).ToList();
+            var map = (Dictionary<string, object?>)step.Config["columnMappings"]!;
+            output.WriteLine($"{pipeline.Name} / {step.RefId}: complete={step.IsComplete} mapped={map.Count} sep={step.Config["rowSeparator"]} skip={step.Config["skipFirstLine"]}");
+            foreach (var i in issues) output.WriteLine($"    {i.Code}: {i.Message}");
+            step.Config["mergeField"].Should().BeOfType<PowerBase.Application.Import.Pbl.PblPipelineFieldValue>();
+            step.Config.Should().ContainKeys("csvUrl", "headerRow", "tableLabel", "tableId", "rowSeparator", "rowQuoteChar", "skipFirstLine");
+            map.Values.Should().OnlyContain(v => v is PowerBase.Application.Import.Pbl.PblPipelineFieldValue);
+            issues.Should().OnlyContain(i => i.Code == "PIPELINE_CSV_COLUMN_NOT_IN_HEADER");
+        }
+        output.WriteLine($"csv steps in file={everywhere.Count} in imported pipelines={csv.Count}");
+    }
+
     [Fact]
     public void RealFile_SameResult_WhateverTheOrderOfTheApps()
     {

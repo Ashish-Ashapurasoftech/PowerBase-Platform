@@ -35,13 +35,19 @@ public partial class PipelineEngine
         async Task<CsvImportReceipt?> ReadReceiptAsync(int part) => messageId == Guid.Empty ? null
             : CsvImportReceipt.TryRead(await _idempotencyRepo.GetByExecutionKeyAsync(messageId, step.PublicId, ComputeSha256Hash(ReceiptPath(part)), null, ct));
         async Task<IReadOnlyList<CsvImportPart>> ReadPartsAsync(CsvImportRows rows) =>
-            await Task.FromResult(CsvImportFile.BuildParts(config, header, config.FieldsByColumn(header), rows.Rows));
+            await Task.FromResult(CsvImportFile.BuildParts(config, header, config.FieldsByColumn(header), rows.Rows, rows.Fields));
         async Task<CsvImportRows> ReadRowsAsync()
         {
             var source = EvaluateTokens(UploadFileStepContract.NormalizeFileSourceToken(config.CsvUrl!), payloadJson, executionPath, allSteps)?.Trim() ?? "";
             var prepared = CsvImportFile.Prepare(await FetchCsvTextAsync(source, services, ct), config);
             var fields = await CsvImportFieldsAsync(tableId, services, ct);
-            return prepared with { Rows = CsvImportFile.Clean(prepared.Rows, config.FieldsByColumn(header), fields), Fields = fields };
+            var kept = CsvImportFile.WithMappedValues(prepared.Rows, config.FieldsByColumn(header));
+            return prepared with
+            {
+                Rows = CsvImportFile.Clean(kept, config.FieldsByColumn(header), fields),
+                TotalRows = prepared.TotalRows - (prepared.Rows.Count - kept.Count),
+                Fields = fields
+            };
         }
 
         var first = await ReadReceiptAsync(0);
@@ -133,7 +139,8 @@ public partial class PipelineEngine
         {
             var table = await tableRepo.GetByPublicIdAsync(tableId, ct);
             return (await fieldRepo.ListByTableAsync(table.Id, ct)).Where(f => f.Fid is not null)
-                .GroupBy(f => f.Fid!.Value).ToDictionary(g => g.Key, g => new CsvImportFile.FieldInfo(g.First().TypeCode, g.First().Label ?? g.First().Name, g.First().IsUnique));
+                .GroupBy(f => f.Fid!.Value).ToDictionary(g => g.Key, g => new CsvImportFile.FieldInfo(g.First().TypeCode, g.First().Label ?? g.First().Name, g.First().IsUnique,
+                    PowerBase.Application.Imports.ImportTypeCompatibility.IsRecordId(g.First())));
         }
         catch (NotFoundException)
         {

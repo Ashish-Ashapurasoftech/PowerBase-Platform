@@ -142,9 +142,40 @@ public class CsvImportStepTests
     {
         var config = Config("""{ "mergeField": "fid_3", "columnMappings": [ { "column": "RID", "field": "fid_3" }, { "column": "Text", "field": "fid_7" } ] }""");
         string[] header = ["RID", "Text"];
-        var parts = CsvImportFile.BuildParts(config, header, config.FieldsByColumn(header), [["2", "u"], ["", "n"]]);
+        var parts = CsvImportFile.BuildParts(config, header, config.FieldsByColumn(header), [["2", "u"], ["", "n"]], RecordIdFields);
         parts[0].Import.MergeKeyFid.Should().Be(3);
         parts[1].Import.Mappings.Select(m => m.DestFid).Should().Equal(7);
+    }
+
+    /// <summary>The Record ID# is found from the table's fields (the built-in field), never by a fixed field id: here it is fid 101 and
+    /// fid 3 is an ordinary unique field.</summary>
+    [Fact]
+    public void RecordId_IsReadFromTheFields_NotAssumedToBeFid3()
+    {
+        var fields = new Dictionary<int, CsvImportFile.FieldInfo>
+        {
+            [101] = new("Number", "Record ID#", false, IsRecordId: true), [3] = new("Text", "Code", true), [7] = new("Text", "Text", false)
+        };
+        CsvImportFile.RecordIdFid(fields).Should().Be(101);
+        CsvImportFile.RecordIdFid(new Dictionary<int, CsvImportFile.FieldInfo>()).Should().BeNull();
+
+        // Merge on the real Record ID# (101) with no column for it: every row is added.
+        var onRecordId = Config();
+        onRecordId.MergeField = "fid_101";
+        var ok = () => CsvImportFile.CheckBeforeImport(onRecordId, new Dictionary<int, int> { [0] = 7 }, [["a"]], fields);
+        ok.Should().NotThrow();
+        // Merge on fid 3, which here is not the Record ID#: not mapped, so the Quickbase error.
+        var onCode = Config();
+        onCode.MergeField = "fid_3";
+        var fails = () => CsvImportFile.CheckBeforeImport(onCode, new Dictionary<int, int> { [0] = 7 }, [["a"]], fields);
+        fails.Should().Throw<PipelineNonRetryableException>().WithMessage("Invalid input; The merge field is missing from your import data.; Error Code: 2*");
+        // fid 3 is unique here, so its duplicates are checked (the Record ID# column never is).
+        var dup = () => CsvImportFile.CheckBeforeImport(onCode, new Dictionary<int, int> { [0] = 3, [1] = 7 }, [["C1", "a"], ["C1", "b"]], fields);
+        dup.Should().Throw<PipelineNonRetryableException>().WithMessage("*Field name: Code*");
+        // Rows without a Record ID# are added without the Record ID# column (101); fid 3 stays mapped.
+        var parts = CsvImportFile.BuildParts(onRecordId, ["RID", "Code"], new Dictionary<int, int> { [0] = 101, [1] = 3 }, [["5", "C1"], ["", "C2"]], fields);
+        parts[0].Import.MergeKeyFid.Should().Be(101);
+        parts[1].Import.Mappings.Select(m => m.DestFid).Should().Equal(3);
     }
 
     [Fact]
@@ -179,6 +210,10 @@ public class CsvImportStepTests
         CsvImportFile.CleanValue(value, type).Should().Be(expected);
 
     private static readonly Dictionary<int, CsvImportFile.FieldInfo> KeyFields = new() { [6] = new("Text", "Key", true), [7] = new("Text", "Text", false) };
+    private static readonly Dictionary<int, CsvImportFile.FieldInfo> RecordIdFields = new()
+    {
+        [3] = new("Number", "Record ID#", false, IsRecordId: true), [6] = new("Text", "Key", true), [7] = new("Text", "Text", false)
+    };
 
     [Fact]
     public void CheckBeforeImport_DuplicateUniqueValues_FailsBeforeImporting()
@@ -197,6 +232,28 @@ public class CsvImportStepTests
         config.MergeField = "fid_6";
         var act = () => CsvImportFile.CheckBeforeImport(config, new Dictionary<int, int> { [0] = 7 }, [["a"]], KeyFields);
         act.Should().Throw<PipelineNonRetryableException>().WithMessage("Invalid input; The merge field is missing from your import data.; Error Code: 2*");
+    }
+
+    /// <summary>Quickbase, 2026-11-27 (pipeline 6038216900722688): merge field Record ID#, no column mapped to it → success, every row added.</summary>
+    [Fact]
+    public void CheckBeforeImport_MergeOnRecordIdNotMapped_ImportsEveryRowAsNew()
+    {
+        var config = Config();
+        config.MergeField = "fid_3";
+        var act = () => CsvImportFile.CheckBeforeImport(config, new Dictionary<int, int> { [0] = 6 }, [["John"], ["Jack"]], RecordIdFields);
+        act.Should().NotThrow();
+        var parts = CsvImportFile.BuildParts(config, ["First", "Last"], new Dictionary<int, int> { [0] = 6 }, [["John", "Doe"], ["Jack", "M"]], RecordIdFields);
+        parts.Should().ContainSingle().Which.Import.MergeKeyFid.Should().BeNull();
+        parts[0].Rows.Should().Be(2);
+    }
+
+    /// <summary>Quickbase, 2026-11-27: of 6 CSV rows the one whose mapped column (First) was empty was not imported (processed 5, added 5).</summary>
+    [Fact]
+    public void WithMappedValues_RowWithEveryMappedColumnEmpty_IsLeftOut()
+    {
+        var rows = new List<string[]> { new[] { "John", "Doe" }, new[] { "", "Blankman" }, new[] { "  ", "x" }, new[] { "Joan", "" } };
+        CsvImportFile.WithMappedValues(rows, new Dictionary<int, int> { [0] = 6 }).Select(r => r[0]).Should().Equal("John", "Joan");
+        CsvImportFile.WithMappedValues(rows, new Dictionary<int, int> { [0] = 6, [1] = 7 }).Should().HaveCount(4);
     }
 
     private static ImportRunStatusResponse Status(string status, long read, long inserted, long updated = 0, long unchanged = 0, long errored = 0) =>

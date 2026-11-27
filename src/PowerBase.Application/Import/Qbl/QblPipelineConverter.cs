@@ -725,7 +725,7 @@ public static class QblPipelineConverter
         {
             var first = _pipeline.Steps.FirstOrDefault();
             if (first is null || first.Type == "trigger" || first.Subtype is "search-records" or "look-up-record" or "copy-records" or "prepare-bulk-upsert"
-                    or "pause" or "import-with-csv" or "handle-errors" or "send-email-outlook" or "make-request"
+                    or "pause" or "import-with-csv" or "csv-import" or "handle-errors" or "send-email-outlook" or "make-request"
                     // As in Quickbase, these actions can start a PowerFlow run by hand or on a schedule.
                     or "create-record" or "update-record" or "delete-record" or "upload-file" or "call-another-pipeline")
                 return;
@@ -795,7 +795,7 @@ public static class QblPipelineConverter
                 case "stop": break;
                 case "handle-errors": context.HandleErrors(); break;
                 case "upload-file": context.UploadFile(); break;
-                case "import-with-csv": context.ImportWithCsv(); break;
+                case "csv-import": context.CsvImport(); break;
                 case "send-email-outlook": context.SendEmail(); break;
                 case "pipeline-called": context.PipelineCalled(); break;
                 case "call-another-pipeline": context.CallAnotherPipeline(); break;
@@ -2530,33 +2530,75 @@ public static class QblPipelineConverter
                     Incomplete("PIPELINE_INPUT_MISSING", "The file attachment field to upload into is not in the file; choose it before turning the PowerFlow on.");
             }
 
-            public void ImportWithCsv()
+            /// <summary>Quickbase "Import with CSV" (bulk_record_set/csv_import) → the PowerFlows step of the same name (csv-import),
+            /// option by option: table, Merge field, CSV URL, Row separator, Row quote char, "Is the first row a list of field names?",
+            /// Header row and one "Field to map to column" per Header row column. Quickbase keys each column mapping by the column's
+            /// name in snake_case ("Client #" → qb_field_for_client, "DoB" → qb_field_for_do_b, a repeated key gets "_0"); PowerFlows
+            /// keys it by the column name itself, as its editor does.</summary>
+            public void CsvImport()
             {
                 Connection();
-                AppAndTable(withApp: true, TableKeys);
-                _usedMeta.Add("Csv_Url");
-                if (source.Meta.TryGetValue("Csv_Url", out var url))
-                    Config["csvFile"] = Text(url, "CSV URL");
+                AppAndTable(withApp: true, "tableLabel", "tableId");
+
+                object? Setting(string key)
+                {
+                    if (source.Meta.TryGetValue(key, out var meta)) { _usedMeta.Add(key); return meta; }
+                    if (Inputs.TryGetValue(key, out var input)) { _usedInputs.Add(key); return input; }
+                    return null;
+                }
+
+                if (source.DataSources.ContainsKey("merge_field"))
+                {
+                    if (SingleField("merge_field") is { } merge) Config["mergeField"] = merge;
+                }
+                else
+                    Incomplete("PIPELINE_INPUT_MISSING", "The Merge field is not in the file; choose it before turning the PowerFlow on.");
+
+                if (Setting("Csv_Url") is { } url && (url.ToString() ?? "").Trim().Length > 0)
+                    Config["csvUrl"] = Text(url, "CSV URL");
                 else
                     Incomplete("PIPELINE_INPUT_MISSING", "The CSV URL is not in the file; set it before turning the PowerFlow on.");
 
-                // PowerFlows reads the CSV through an import template (columns, header row, quote character); Quickbase keeps
-                // these on the step, so they are listed for the template instead of being dropped silently.
-                var columns = source.DataSources.Keys.Where(k => k.StartsWith("qb_field_for_", StringComparison.Ordinal)).ToList();
-                foreach (var column in columns) _usedSources.Add(column);
-                var settings = new[] { "Header_Row", "Row_Quote_Char" }.Where(source.Meta.ContainsKey).ToList();
-                foreach (var setting in settings) _usedMeta.Add(setting);
-                var described = columns.Select(c => $"column '{c["qb_field_for_".Length..]}' → {DescribeField(c)}")
-                    .Concat(settings.Select(s => $"{s.Replace('_', ' ')} '{source.Meta[s]}'"));
-                Incomplete("PIPELINE_IMPORT_TEMPLATE_MISSING",
-                    "PowerFlows imports CSV through an import template, which is not in the file. Choose or create one before turning the PowerFlow on"
-                    + (columns.Count + settings.Count > 0 ? $" (Quickbase settings: {string.Join("; ", described)})." : "."));
-            }
+                var separatorText = Setting("Row_Separator")?.ToString();
+                var separator = separatorText switch { ";" => ';', "\t" or "\\t" => '\t', _ => ',' };
+                Config["rowSeparator"] = separator switch { ';' => ";", '\t' => "\\t", _ => "," };
+                if (separatorText is { Length: > 0 } && separatorText is not ("," or ";" or "\t" or "\\t"))
+                    Incomplete("PIPELINE_INPUT_INVALID", $"Row separator '{separatorText}' is not one of Comma, Semicolon or Tab; Comma was set.");
 
-            private string DescribeField(string sourceName)
-            {
-                var fields = FieldList(sourceName);
-                return fields.Count == 1 && fields[0] is PblPipelineFieldValue field ? $"'{field.Label}'" : "(field not found)";
+                var quoteText = Setting("Row_Quote_Char")?.ToString();
+                Config["rowQuoteChar"] = quoteText is "'" or "|" ? quoteText : "\"";
+                if (quoteText is { Length: > 0 } && quoteText is not ("\"" or "'" or "|"))
+                    Incomplete("PIPELINE_INPUT_INVALID", $"Row quote char '{quoteText}' is not one of Double quote, Single quote or Pipe; Double quote was set.");
+
+                Config["skipFirstLine"] = IsTrue(Setting("Skip_First_Line"));
+
+                var headerRaw = Setting("Header_Row");
+                var headerText = headerRaw?.ToString() ?? "";
+                if (headerText.Trim().Length > 0)
+                    Config["headerRow"] = Text(headerRaw, "Header row");
+                else
+                    Incomplete("PIPELINE_INPUT_MISSING", "The Header row is not in the file; set it before turning the PowerFlow on.");
+
+                var mappings = new Dictionary<string, object?>(StringComparer.Ordinal);
+                var pending = source.DataSources.Keys.Where(k => k.StartsWith("qb_field_for_", StringComparison.Ordinal)).ToHashSet(StringComparer.Ordinal);
+                foreach (var (column, qbKey) in QblPipelineConverterKeys.CsvColumnKeys(headerText, separator))
+                {
+                    var name = "qb_field_for_" + qbKey;
+                    var found = pending.Contains(name) ? name
+                        : pending.FirstOrDefault(k => k["qb_field_for_".Length..].Replace("_", "", StringComparison.Ordinal) == qbKey.Replace("_", "", StringComparison.Ordinal));
+                    if (found is null) continue;
+                    pending.Remove(found);
+                    if (SingleField(found) is { } field) mappings[column] = field;
+                }
+                Config["columnMappings"] = mappings;
+                // Quickbase keeps the mapping of a column removed from the Header row, but no longer shows or uses it.
+                foreach (var stale in pending)
+                {
+                    _usedSources.Add(stale);
+                    reader.Note(source, "PIPELINE_CSV_COLUMN_NOT_IN_HEADER",
+                        $"Mapping '{stale["qb_field_for_".Length..]}' belongs to no column of the Header row; Quickbase does not use it, so it was left out.",
+                        changesExecution: false);
+                }
             }
 
             private static readonly (string Input, string Key)[] EmailInputs =
@@ -2647,5 +2689,31 @@ public static class QblPipelineConverter
         private FieldIndex Index => index;
 
         private QblFieldInfo? Field(string app, string table, string field) => index.Field(app, table, field);
+    }
+}
+
+/// <summary>Quickbase mapping keys of Import with CSV columns.</summary>
+public static class QblPipelineConverterKeys
+{
+    /// <summary>Each named Header row column with (1) the key PowerFlows maps it by (the name; a repeated name gets "_0",
+    /// "_1") and (2) the key Quickbase gives it: snake_case of the name (camelCase split); a repeated key gets "_0".</summary>
+    public static List<(string Column, string QbKey)> CsvColumnKeys(string headerRow, char separator)
+    {
+        var result = new List<(string, string)>();
+        var pbSeen = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var qbSeen = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var name in headerRow.Split(separator).Select(n => n.Trim()))
+        {
+            var pbCount = pbSeen.GetValueOrDefault(name);
+            pbSeen[name] = pbCount + 1;
+            if (name.Length == 0 || name.Contains("{{", StringComparison.Ordinal)) continue;
+            var column = pbCount == 0 ? name : $"{name}_{pbCount - 1}";
+            var snake = Regex.Replace(Regex.Replace(name, "([a-z0-9])([A-Z])", "$1_$2"), "([A-Z]+)([A-Z][a-z])", "$1_$2");
+            var key = Regex.Replace(new string(snake.ToLowerInvariant().Select(c => char.IsLetterOrDigit(c) ? c : '_').ToArray()), "_+", "_").Trim('_');
+            var qbCount = qbSeen.GetValueOrDefault(key);
+            qbSeen[key] = qbCount + 1;
+            result.Add((column, qbCount == 0 ? key : $"{key}_{qbCount - 1}"));
+        }
+        return result;
     }
 }

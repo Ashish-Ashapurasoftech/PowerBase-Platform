@@ -282,19 +282,25 @@ public static class CsvImportFile
     }
 
     /// <summary>A mapped field as the checks before the import need it.</summary>
-    public sealed record FieldInfo(string TypeCode, string Label, bool IsUnique);
+    public sealed record FieldInfo(string TypeCode, string Label, bool IsUnique, bool IsRecordId = false);
+
+    /// <summary>The field id of the table's Record ID# (the built-in field the table numbers its records with), read from the field list, not assumed.</summary>
+    public static int? RecordIdFid(IReadOnlyDictionary<int, FieldInfo>? fields) =>
+        fields?.Where(p => p.Value.IsRecordId).Select(p => (int?)p.Key).FirstOrDefault();
 
     /// <summary>The checks Quickbase makes before it imports anything (nothing is imported when one fails): the merge field must be one of the
     /// mapped columns, and no unique field may hold the same value twice in the CSV.</summary>
     public static void CheckBeforeImport(CsvImportDefinition config, IReadOnlyDictionary<int, int> fieldsByColumn, IReadOnlyList<string[]> rows,
         IReadOnlyDictionary<int, FieldInfo> fields)
     {
-        if (!fieldsByColumn.Values.Contains(config.MergeFid))
+        // Quickbase (verified 2026-11-27): with Record ID# as the merge field and no column mapped to it, every row is added as a new record.
+        var recordIdFid = RecordIdFid(fields);
+        if (config.MergeFid != recordIdFid && !fieldsByColumn.Values.Contains(config.MergeFid))
             throw CsvImportCounts.None.Fail("Invalid input; The merge field is missing from your import data.; Error Code: 2");
         var problems = new List<string>();
         foreach (var (column, fid) in fieldsByColumn.OrderBy(p => p.Key))
         {
-            if (fid == 3) continue;
+            if (fid == recordIdFid) continue;
             var known = fields.TryGetValue(fid, out var field);
             if (!(fid == config.MergeFid || (known && field!.IsUnique))) continue;
             var duplicates = rows.Where(r => column < r.Length && !string.IsNullOrWhiteSpace(r[column]))
@@ -307,7 +313,12 @@ public static class CsvImportFile
                 + "Your import data has duplicate values for the following unique fields\n\n" + string.Join("\n", problems) + "; Error Code: 51");
     }
 
-    private static readonly string[] TrueWords = ["true", "yes", "y", "1", "checked", "on"];
+    /// <summary>Quickbase (verified 2026-11-27) leaves out a row whose mapped columns are all empty: it is not imported and not counted as processed.</summary>
+    public static IReadOnlyList<string[]> WithMappedValues(IReadOnlyList<string[]> rows, IReadOnlyDictionary<int, int> fieldsByColumn) =>
+        fieldsByColumn.Count == 0 ? rows
+            : rows.Where(r => fieldsByColumn.Keys.Any(c => c < r.Length && !string.IsNullOrWhiteSpace(r[c]))).ToList();
+
+    private static readonly string[] TrueWords =["true", "yes", "y", "1", "checked", "on"];
     private static readonly string[] DateFormats = ["yyyy-MM-dd", "yyyy/MM/dd", "MM-dd-yyyy", "M-d-yyyy", "MM/dd/yyyy", "M/d/yyyy", "MM-dd-yy", "M/d/yy", "dd-MM-yyyy", "d-M-yyyy", "dd/MM/yyyy", "d/M/yyyy"];
 
     /// <summary>Values as Quickbase stores them instead of rejecting the row: a number keeps its digits ("$1,234.50" is 1234.5, "1e3" is 1000) and is
@@ -365,9 +376,10 @@ public static class CsvImportFile
     /// <summary>The imports that bring the rows in, in order. When a column goes into the merge field, rows with a value there are matched on it (update
     /// a matching record, add one otherwise) and rows where it is blank are added, as Quickbase does; with no column in the merge field every row is added.</summary>
     public static IReadOnlyList<CsvImportPart> BuildParts(CsvImportDefinition config, IReadOnlyList<string> header, IReadOnlyDictionary<int, int> fieldsByColumn,
-        IReadOnlyList<string[]> rows)
+        IReadOnlyList<string[]> rows, IReadOnlyDictionary<int, FieldInfo>? fields = null)
     {
         var mergeFid = config.MergeFid;
+        var recordIdFid = RecordIdFid(fields);
         var mappings = new List<(int Column, int Fid)>();
         foreach (var (column, fid) in fieldsByColumn.OrderBy(p => p.Key))
             if (mappings.All(m => m.Fid != fid)) mappings.Add((column, fid)); // a field takes the first column mapped into it
@@ -380,7 +392,7 @@ public static class CsvImportFile
         var parts = new List<CsvImportPart>();
         if (keyed.Count > 0) parts.Add(Part(header, mappings, keyed, mergeFid));
         // The Record ID# is never written: rows without one are added with the other columns.
-        if (unkeyed.Count > 0) parts.Add(Part(header, mergeFid == 3 ? mappings.Where(m => m.Fid != 3).ToList() : mappings, unkeyed, null));
+        if (unkeyed.Count > 0) parts.Add(Part(header, mergeFid == recordIdFid ? mappings.Where(m => m.Fid != recordIdFid).ToList() : mappings, unkeyed, null));
         return parts.Where(p => p.Import.Mappings.Count > 0).ToList();
     }
 
