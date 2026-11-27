@@ -13,7 +13,8 @@ namespace PowerBase.Infrastructure.Services;
 /// </summary>
 public sealed class SqlCacheVersionStore : ICacheVersionStore
 {
-    private const string ReadSql = "SELECT Grp, V FROM meta.CacheVersion";
+    // AgeMs on the database clock (the same clock for every instance), so "changed at least N seconds ago" never depends on a server's time.
+    private const string ReadSql = "SELECT Grp, V, DATEDIFF_BIG(MILLISECOND, ChangedOn, SYSUTCDATETIME()) AS AgeMs FROM meta.CacheVersion";
 
     private const string BumpSql = """
         UPDATE meta.CacheVersion SET V = V + 1, ChangedOn = SYSUTCDATETIME() WHERE Grp = @grp;
@@ -41,13 +42,16 @@ public sealed class SqlCacheVersionStore : ICacheVersionStore
         _logger = logger;
     }
 
-    public async Task<IReadOnlyDictionary<string, long>?> ReadAsync(long tenantId, CancellationToken ct = default)
+    public async Task<IReadOnlyDictionary<string, long>?> ReadAsync(long tenantId, CancellationToken ct = default) =>
+        (await ReadWithAgeAsync(tenantId, ct))?.ToDictionary(r => r.Key, r => r.Value.Version, StringComparer.Ordinal);
+
+    public async Task<IReadOnlyDictionary<string, CacheGroupVersion>?> ReadWithAgeAsync(long tenantId, CancellationToken ct = default)
     {
         try
         {
             await using var connection = await OpenAsync(tenantId, ct);
-            var rows = await connection.QueryAsync<(string Grp, long V)>(new CommandDefinition(ReadSql, cancellationToken: ct));
-            return rows.ToDictionary(r => r.Grp, r => r.V, StringComparer.Ordinal);
+            var rows = await connection.QueryAsync<(string Grp, long V, long AgeMs)>(new CommandDefinition(ReadSql, cancellationToken: ct));
+            return rows.ToDictionary(r => r.Grp, r => new CacheGroupVersion(r.V, Math.Max(0, r.AgeMs)), StringComparer.Ordinal);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

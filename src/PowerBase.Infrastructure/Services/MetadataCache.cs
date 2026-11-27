@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -29,6 +30,9 @@ public sealed class MetadataCache : IMetadataCache
     private sealed class TenantVersions
     {
         public readonly Dictionary<string, long> Seen = new(StringComparer.Ordinal);
+        /// <summary>When the version in <see cref="Seen"/> is older than the transaction quarantine (local clock), so the write it
+        /// announced has committed: only from then on may a value read from SQL be shared through L2 under that version.</summary>
+        public readonly Dictionary<string, long> SettledAtTicks = new(StringComparer.Ordinal);
         public long CheckedAtTicks;
         public bool Available;
         public bool EverRead;
@@ -48,9 +52,23 @@ public sealed class MetadataCache : IMetadataCache
     /// <summary>Loads in flight by cache key: concurrent misses of one key share one factory call (no stampede at morning start-up).</summary>
     private readonly ConcurrentDictionary<string, Lazy<Task<object?>>> _inflight = new(StringComparer.Ordinal);
 
-    public MetadataCache(IMemoryCache cache, IOptions<MetadataCacheOptions> options, ILogger<MetadataCache> logger, ICacheVersionStore? versions = null)
+    /// <summary>Optional L2 (Azure Managed Redis): shared between instances so a new or restarted instance does not reload every
+    /// definition from SQL. Only non-security groups, keyed by the group's shared SQL version (a moved version = a different key, so a
+    /// stale entry is never read). Never trusted for permissions: those stay L1 + SQL.</summary>
+    private readonly IDistributedCache? _l2;
+    private long _l2DownUntilTicks;
+    /// <summary>Groups whose version bump failed here: their L2 entries (keyed by the unmoved version) may hold the old value, so this
+    /// instance does not use L2 for them for a whole TTL. Other instances behave as without L2 (they too see the change only at TTL).</summary>
+    private readonly ConcurrentDictionary<(long Tenant, string Group), long> _l2BlockedUntilTicks = new();
+    private static readonly System.Text.Json.JsonSerializerOptions L2Json = new(System.Text.Json.JsonSerializerDefaults.General);
+    private static readonly HashSet<string> L2Groups = new(StringComparer.Ordinal)
+        { MetadataCacheGroups.Fields, MetadataCacheGroups.Tables, MetadataCacheGroups.Apps, MetadataCacheGroups.Ids };
+
+    public MetadataCache(IMemoryCache cache, IOptions<MetadataCacheOptions> options, ILogger<MetadataCache> logger, ICacheVersionStore? versions = null,
+        IDistributedCache? l2 = null)
     {
         _options = options.Value;
+        _l2 = _options.SharedVersions && versions is not null ? l2 : null;   // L2 keys need the shared versions
         // Bounded memory: its own cache with a size limit (entries of 1 unit each). Not the shared IMemoryCache, whose other users set
         // no entry sizes (a size-limited cache refuses those).
         _cache = _options.SizeLimitEntries > 0
@@ -92,7 +110,7 @@ public sealed class MetadataCache : IMetadataCache
             value = await factory();   // not stored anyway: no point sharing the load
         else
         {
-            var load = _inflight.GetOrAdd(cacheKey, _ => new Lazy<Task<object?>>(async () => await factory()));
+            var load = _inflight.GetOrAdd(cacheKey, _ => new Lazy<Task<object?>>(async () => await LoadAsync(tenantId, group, key, factory)));
             try { value = (T?)await load.Value; }
             finally { _inflight.TryRemove(new KeyValuePair<string, Lazy<Task<object?>>>(cacheKey, load)); }
         }
@@ -114,12 +132,86 @@ public sealed class MetadataCache : IMetadataCache
         return value;
     }
 
+    /// <summary>L1 miss: the shared L2 first (when on and healthy), then SQL — whose answer is also put in L2 for the other instances.</summary>
+    private async Task<object?> LoadAsync<T>(long tenantId, string group, string key, Func<Task<T>> factory) where T : class
+    {
+        var (l2Key, mayShare) = L2Key(tenantId, group, key);
+        if (l2Key is not null)
+        {
+            try
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(Math.Max(10, _options.L2TimeoutMs)));
+                var bytes = await _l2!.GetAsync(l2Key, timeout.Token);
+                if (bytes is { Length: > 0 } && System.Text.Json.JsonSerializer.Deserialize<T>(bytes, L2Json) is { } fromL2)
+                    return fromL2;
+            }
+            catch (Exception ex)
+            {
+                L2Down(ex);
+                l2Key = null;
+            }
+        }
+
+        var value = await factory();
+        // Decided before the SQL read started: a version that moved less than the quarantine ago may announce a write still open, and
+        // what SQL returned may be the old value — shared under the new version it would be served to every instance for hours.
+        if (l2Key is not null && mayShare && value is not null)
+        {
+            var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(value, L2Json);
+            // Not awaited by the request: L2 is a shared speed-up, never on the critical path.
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                    await _l2!.SetAsync(l2Key, bytes, new DistributedCacheEntryOptions
+                        { AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(Math.Max(1, _options.TtlHours)) }, timeout.Token);
+                }
+                catch (Exception ex) { L2Down(ex); }
+            });
+        }
+        return value;
+    }
+
+    /// <summary>
+    /// The L2 key, or null when L2 must not be used: off, down, a security group, the group's shared version unknown, or its bump failed
+    /// here. <c>MayShare</c>: a value read from SQL now may be written under that key (the version has settled, see
+    /// <see cref="TenantVersions.SettledAtTicks"/>). Reading is always allowed: no value is ever written for an unsettled version.
+    /// </summary>
+    private (string? Key, bool MayShare) L2Key(long tenantId, string group, string key)
+    {
+        var now = DateTime.UtcNow.Ticks;
+        if (_l2 is null || !L2Groups.Contains(group) || now < Interlocked.Read(ref _l2DownUntilTicks)) return (null, false);
+        if (_l2BlockedUntilTicks.TryGetValue((tenantId, group), out var blockedUntil) && now < blockedUntil) return (null, false);
+        if (!_tenantVersions.TryGetValue(tenantId, out var tv)) return (null, false);
+        long version;
+        bool settled;
+        lock (tv)
+        {
+            if (!tv.Available) return (null, false);
+            version = tv.Seen.TryGetValue(group, out var v) ? v : 0;
+            settled = !tv.SettledAtTicks.TryGetValue(group, out var at) || now >= at;
+        }
+        return (L2KeyFor(_options.L2KeyPrefix, tenantId, group, version, key), settled);
+    }
+
+    /// <summary>The only place an L2 key is built: tenant first, then group and its shared version (doc 23 §4).</summary>
+    internal static string L2KeyFor(string prefix, long tenantId, string group, long version, string key) =>
+        $"{prefix}:t{tenantId}:{group}:v{version}:{key}";
+
+    private void L2Down(Exception ex)
+    {
+        Interlocked.Exchange(ref _l2DownUntilTicks, (DateTime.UtcNow + TimeSpan.FromSeconds(30)).Ticks);
+        _logger.LogWarning(ex, "Metadata L2 cache (Redis) unavailable; using SQL for 30 s");
+    }
+
     public void Invalidate(long tenantId, string group, bool inTransaction = false)
     {
         if (!_options.Enabled) return;
         InvalidateLocal(tenantId, group, inTransaction);
         // Every other instance: the shared version moves now (before the write), so they stop caching the group on their next request.
-        _versions?.Bump(tenantId, group);
+        if (_versions is not null && !_versions.Bump(tenantId, group) && _l2 is not null)
+            _l2BlockedUntilTicks[(tenantId, group)] = (DateTime.UtcNow + TimeSpan.FromHours(Math.Max(1, _options.TtlHours))).Ticks;
     }
 
     public void FlushTenant(long tenantId)
@@ -161,22 +253,34 @@ public sealed class MetadataCache : IMetadataCache
             lock (tv) return tv.Available;
         }
 
-        var remote = await _versions!.ReadAsync(tenantId);
+        // With L2 on, the ages too (one query either way): they say when a version has settled. Without them, "just moved".
+        IReadOnlyDictionary<string, CacheGroupVersion>? withAge = _l2 is null ? null : await _versions!.ReadWithAgeAsync(tenantId);
+        var remote = withAge?.ToDictionary(r => r.Key, r => r.Value.Version, StringComparer.Ordinal) ?? await _versions!.ReadAsync(tenantId);
         var moved = new List<string>();
         lock (tv)
         {
-            tv.CheckedAtTicks = DateTime.UtcNow.Ticks;
+            var nowTicks = DateTime.UtcNow.Ticks;
+            tv.CheckedAtTicks = nowTicks;
             if (remote is null)
             {
                 tv.Available = false;
                 return false;
             }
+            var quarantineTicks = TimeSpan.FromSeconds(Math.Max(_options.TransactionQuarantineSeconds, _options.WriteQuarantineSeconds)).Ticks;
             var groups = remote.Keys.Union(tv.Seen.Keys).ToList();
             foreach (var group in groups)
             {
                 var now = remote.TryGetValue(group, out var v) ? v : 0;
+                var known = tv.Seen.TryGetValue(group, out var before);
                 // First read of this tenant: nothing is cached for it yet (every cache use syncs first), so nothing moved.
-                if (tv.EverRead && (tv.Seen.TryGetValue(group, out var before) ? before : 0) != now) moved.Add(group);
+                if (tv.EverRead && (known ? before : 0) != now) moved.Add(group);
+                if (!known || before != now)
+                {
+                    // A group never bumped (no row) has nothing in flight. Otherwise: settled once its age passes the quarantine; an
+                    // unknown age counts as "moved just now".
+                    var ageTicks = withAge is not null && withAge.TryGetValue(group, out var gv) ? TimeSpan.FromMilliseconds(gv.AgeMs).Ticks : 0;
+                    tv.SettledAtTicks[group] = remote.ContainsKey(group) ? nowTicks + Math.Max(0, quarantineTicks - ageTicks) : 0;
+                }
                 tv.Seen[group] = now;
             }
             // Versions were unreadable until now: groups cached meanwhile (non-security ones may be) could be stale — drop them all once.

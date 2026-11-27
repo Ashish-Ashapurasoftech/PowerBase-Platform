@@ -75,6 +75,14 @@ public class SqlCacheVersionStoreTests
 
             await using var check = new SqlConnection(cs);
             (await check.ExecuteScalarAsync<long>("SELECT V FROM meta.CacheVersion WHERE Grp = 'access'")).Should().Be(1);
+
+            // The age the shared L2 waits on (database clock): just bumped → young; moved back 40 s → older than the 30 s quarantine.
+            var store = new SqlCacheVersionStore(new Control(cs), new Tenants(cs), NullLogger<SqlCacheVersionStore>.Instance);
+            var young = (await store.ReadWithAgeAsync(Tenant))!["access"];
+            young.Version.Should().Be(1);
+            young.AgeMs.Should().BeLessThan(10_000);
+            await check.ExecuteAsync("UPDATE meta.CacheVersion SET ChangedOn = DATEADD(SECOND, -40, SYSUTCDATETIME()) WHERE Grp = 'access'");
+            (await store.ReadWithAgeAsync(Tenant))!["access"].AgeMs.Should().BeGreaterThanOrEqualTo(40_000);
         }
         finally
         {
