@@ -209,6 +209,10 @@ builder.Services.AddSingleton<PowerBase.Infrastructure.Services.HeavyReadGoverno
 // Optional L2 for the metadata cache (Azure Managed Redis, docs 23/34): MetadataCache:Redis:Host (Entra ID) or :ConnectionString. Off
 // when neither is set. SQL versions stay the authority; the environment name is in every key, so environments never share entries.
 PowerBase.Infrastructure.Services.MetadataRedisSetup.AddMetadataRedis(builder.Services, builder.Configuration, builder.Environment.EnvironmentName);
+// Report result cache (Summary / Chart answers, unencrypted apps, ≤ 60 s): ResultCache:Enabled, and only with Redis configured.
+builder.Services.AddSingleton(builder.Configuration.GetSection(PowerBase.Infrastructure.Services.ResultCacheOptions.SectionName)
+    .Get<PowerBase.Infrastructure.Services.ResultCacheOptions>() ?? new PowerBase.Infrastructure.Services.ResultCacheOptions());
+builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IReportResultCache, PowerBase.Infrastructure.Services.ReportResultCache>();
 // ARC-01: the shared versions (meta.CacheVersion) that carry every cache invalidation to every API instance.
 builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.ICacheVersionStore, PowerBase.Infrastructure.Services.SqlCacheVersionStore>();
 builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.IMetadataCache, PowerBase.Infrastructure.Services.MetadataCache>();

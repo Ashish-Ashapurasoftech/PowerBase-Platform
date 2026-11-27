@@ -62,6 +62,9 @@ public class PagedReportRunResult
     /// every group, plus each pivot row's totals on this page. SummaryTotals then holds the bottom-right grand totals.
     /// Null otherwise.</summary>
     public CrosstabSummaryResult? CrosstabSummary { get; init; }
+    /// <summary>Doc 23 §5: this answer may be shared through the report result cache — a Summary / Chart report of an unencrypted app,
+    /// not a masked preview. Never sent to the client (the response DTO does not carry it).</summary>
+    public bool MayCacheResult { get; set; }
 }
 
 /// <summary>See <see cref="PagedReportRunResult.CrosstabSummary"/>. Values are the same (already resolved) values the
@@ -331,9 +334,12 @@ public class RunReportQueryHandler
         {
             // Summary and chart reports are heavy reads that may be a second behind: they may use the read replica (when it is on).
             using var replicaScope = Common.ReadReplicaScope.Begin(Common.ReadReplicaLane.Interactive);
-            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, effectiveRuntimeFilters, filterTree, isMaskedPreview, ct,
+            var summary = await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, effectiveRuntimeFilters, filterTree, isMaskedPreview, ct,
                 pageGroups: query.PageSummary && report.ReportType == "Summary",
                 sortKey: query.SummarySortKey, sortDesc: query.SummarySortDesc);
+            // Encrypted app values are never cached anywhere (doc 23 §5), nor is a masked builder preview.
+            summary.MayCacheResult = !isAppEncrypted && !isMaskedPreview;
+            return summary;
         }
 
         _skipCount = query.SkipCount;

@@ -236,6 +236,27 @@ public sealed class MetadataCache : IMetadataCache
             _l2BlockedUntilTicks[(tenantId, group)] = (DateTime.UtcNow + TimeSpan.FromHours(Math.Max(1, _options.TtlHours))).Ticks;
     }
 
+    public async Task<string?> VersionStampAsync(long tenantId)
+    {
+        if (!_options.Enabled || _versions is null) return null;
+        if (!await SyncAsync(tenantId) || !await SyncAsync(MetadataCacheGroups.GlobalTenant)) return null;
+        var now = DateTime.UtcNow.Ticks;
+        string? Part(long t)
+        {
+            if (!_tenantVersions.TryGetValue(t, out var tv)) return null;
+            lock (tv)
+            {
+                if (!tv.Available) return null;
+                // A version younger than the quarantine (age unknown counts as "just moved") may announce a write still open.
+                if (tv.SettledAtTicks.Values.Any(at => now < at)) return null;
+                return string.Join(",", tv.Seen.OrderBy(g => g.Key, StringComparer.Ordinal).Select(g => $"{g.Key}={g.Value}"));
+            }
+        }
+        var tenant = Part(tenantId);
+        var global = Part(MetadataCacheGroups.GlobalTenant);
+        return tenant is null || global is null ? null : $"{tenant}|{global}";
+    }
+
     public void FlushTenant(long tenantId)
     {
         var groups = tenantId == MetadataCacheGroups.GlobalTenant ? GlobalGroups : TenantGroups;

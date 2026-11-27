@@ -514,9 +514,43 @@ public class ReportsController : ControllerBase
     {
         var runtimeFilters = ParseDynamicFilters(dynamicFilters);
         // pageSummary: a Summary report returns just this page of groups (opt-in, see RunReportQuery.PageSummary).
-        var result = await _runHandler.HandleAsync(
+        return await RunWithResultCacheAsync(
             new RunReportQuery(publicId, page, pageSize, runtimeFilters, quickSearch, searchFieldIds, exactMatch, PageSummary: pageSummary), ct);
-        return Ok(new ApiResponse<ReportRunResponse>(ToRunResponse(result)));
+    }
+
+    /// <summary>
+    /// Runs the report, through the shared result cache when it is on (doc 23 §5 / doc 34): a Summary / Chart answer of an unencrypted
+    /// app, asked again by the same user with nothing changed (no data write in the tenant database, no metadata or permission change),
+    /// is sent back as the exact bytes sent the first time, for at most 60 s. Membership is checked by the attribute before this; the
+    /// key holds the user and every permission version, so another user or a changed permission never gets this answer.
+    /// </summary>
+    private async Task<IActionResult> RunWithResultCacheAsync(RunReportQuery query, CancellationToken ct)
+    {
+        var cache = HttpContext?.RequestServices.GetService(typeof(IReportResultCache)) as IReportResultCache;
+        var lookup = cache is null ? ReportResultLookup.None : await cache.LookupAsync(query.ReportPublicId, ResultQuestion(query), ct);
+        if (lookup.Body is not null) return new FileContentResult(lookup.Body, "application/json; charset=utf-8");
+
+        var result = await _runHandler.HandleAsync(query, ct);
+        var response = new ApiResponse<ReportRunResponse>(ToRunResponse(result));
+        if (cache is not null && lookup.Key is not null)
+        {
+            if (result.MayCacheResult)
+            {
+                // The same serializer settings MVC writes the response with, so a cached answer is byte-for-byte what it sent.
+                var json = (HttpContext!.RequestServices.GetService(typeof(Microsoft.Extensions.Options.IOptions<Microsoft.AspNetCore.Mvc.JsonOptions>))
+                    as Microsoft.Extensions.Options.IOptions<Microsoft.AspNetCore.Mvc.JsonOptions>)?.Value.JsonSerializerOptions;
+                if (json is not null) cache.Store(lookup, System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(response, json));
+            }
+            else cache.MarkNotCacheable(query.ReportPublicId);
+        }
+        return Ok(response);
+    }
+
+    /// <summary>Every run parameter of the question, written out (JSON skips the runtime-filter tuples' fields).</summary>
+    public static string ResultQuestion(RunReportQuery query)
+    {
+        var filters = query.RuntimeFilters is null ? "" : string.Join(";", query.RuntimeFilters.Select(f => $"{f.FieldId}|{f.Value}|{f.SubField}"));
+        return string.Concat(filters, "\u0001", System.Text.Json.JsonSerializer.Serialize(query with { RuntimeFilters = null }));
     }
 
     /// <summary>
@@ -533,7 +567,7 @@ public class ReportsController : ControllerBase
     public async Task<IActionResult> RunPost(Guid publicId, [FromBody] RunReportRequest request, CancellationToken ct = default)
     {
         var runtimeFilters = ParseDynamicFilters(request.DynamicFilters);
-        var result = await _runHandler.HandleAsync(new RunReportQuery(
+        return await RunWithResultCacheAsync(new RunReportQuery(
             publicId,
             request.Page,
             request.PageSize,
@@ -552,7 +586,6 @@ public class ReportsController : ControllerBase
             request.SummarySortKey,
             request.SummarySortDesc,
             request.SkipCount), ct);
-        return Ok(new ApiResponse<ReportRunResponse>(ToRunResponse(result)));
     }
 
     /// <summary>

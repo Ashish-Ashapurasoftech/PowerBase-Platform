@@ -42,6 +42,11 @@ public class MetadataCacheOptions
     {
         /// <summary>StackExchange.Redis connection string (local development: "localhost:6379"; Azure: host:10000, key from Key Vault, ssl=True). Empty = no L2.</summary>
         public string? ConnectionString { get; set; }
+        /// <summary>Azure Managed Redis "host:port" (e.g. "pb-cache.westus2.redis.azure.net:10000"): Entra ID with the app's managed identity,
+        /// TLS, no access key. Wins over ConnectionString.</summary>
+        public string? Host { get; set; }
+        /// <summary>Client id of a user-assigned managed identity for Host; empty = the system-assigned one.</summary>
+        public string? ManagedIdentityClientId { get; set; }
         /// <summary>Prefix inside Redis. Default "powerbase:{environment}:", so environments sharing one Redis never meet.</summary>
         public string? InstanceName { get; set; }
     }
