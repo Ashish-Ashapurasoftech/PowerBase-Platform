@@ -57,4 +57,10 @@ public interface IAppTableRepository
     Task IncrementRecordCountByAsync(long id, int count, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
     Task DecrementRecordCountAsync(long id, CancellationToken ct = default);
     Task DecrementRecordCountByAsync(long id, int count, CancellationToken ct = default);
+    /// <summary>Every live table (in a live app) whose stored Quickbase table id is <paramref name="qbTableId"/> — usually one,
+    /// more when the same Quickbase app was imported more than once.</summary>
+    Task<IReadOnlyList<QbSourceTableMatch>> ListByQbTableIdAsync(string qbTableId, CancellationToken ct = default);
 }
+
+/// <summary>A PowerBase table found by its Quickbase table id, with the app it belongs to.</summary>
+public sealed record QbSourceTableMatch(long TableId, Guid TablePublicId, string TableName, long AppId, Guid AppPublicId, string AppName);

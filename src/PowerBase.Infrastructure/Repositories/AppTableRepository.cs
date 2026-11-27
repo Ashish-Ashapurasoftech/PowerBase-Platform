@@ -531,4 +531,19 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         await connection.ExecuteAsync(
             new CommandDefinition(DecrementRecordCountBySql, new { id, count }, cancellationToken: ct));
     }
+
+    public async Task<IReadOnlyList<QbSourceTableMatch>> ListByQbTableIdAsync(string qbTableId, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(qbTableId)) return [];
+        const string sql = """
+            SELECT t.Id AS TableId, t.PublicId AS TablePublicId, t.Name AS TableName, a.Id AS AppId, a.PublicId AS AppPublicId, a.Name AS AppName
+            FROM meta.AppTable t
+            JOIN meta.App a ON a.Id = t.AppId
+            WHERE t.QBTableID = @qbTableId AND t.IsDeleted = 0 AND a.IsDeleted = 0
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<QbSourceTableMatch>(
+            new CommandDefinition(sql, new { qbTableId = new DbString { Value = qbTableId.Trim(), IsAnsi = false, Length = 20 } }, cancellationToken: ct));
+        return rows.ToList();
+    }
 }

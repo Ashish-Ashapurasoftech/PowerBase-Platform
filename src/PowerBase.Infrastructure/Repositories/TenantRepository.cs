@@ -72,9 +72,9 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
         """;
 
     private const string InsertTenantSql = """
-        INSERT INTO meta.Tenant (PublicId, Name, Slug, PlanCode, Status, ProvisioningState, IsDeleted, CreatedOn, CreatedBy)
+        INSERT INTO meta.Tenant (PublicId, Name, Slug, PlanCode, Status, ProvisioningState, CodePagesEnabled, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id
-        VALUES (@publicId, @name, @slug, 'Free', 'Active', 'Provisioning', 0, SYSUTCDATETIME(), 0)
+        VALUES (@publicId, @name, @slug, 'Free', 'Active', 'Provisioning', 1, 0, SYSUTCDATETIME(), 0)
         """;
 
     private const string UpdateProvisioningSql = """

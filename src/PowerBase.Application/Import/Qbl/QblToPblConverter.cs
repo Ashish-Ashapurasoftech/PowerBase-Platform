@@ -2624,6 +2624,7 @@ public static class QblToPblConverter
             TableName = table.Name,
             SourceAppName = dataSourceRef.Replace("$DataSource_", "").Replace('_', ' ').Trim(),
             SourceTableName = ResolveScalar(recordSet, "Name") ?? recordSetRef,
+            SourceQbTableId = NullIfBlank(ResolveScalar(recordSet, "ExternalSetId"))?.Trim(),
             UpdateMode = data.GetValueOrDefault("UpdateMode")?.ToString() ?? "Destructive",
         };
 

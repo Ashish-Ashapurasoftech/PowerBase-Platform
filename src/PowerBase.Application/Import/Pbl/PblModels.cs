@@ -80,6 +80,10 @@ public sealed class PblConnectedTable
     public string SourceAppName { get; set; } = string.Empty;
     public string SourceTableName { get; set; } = string.Empty;
 
+    /// <summary>The source table's Quickbase table id (the record set's <c>ExternalSetId</c>, e.g. <c>bteqnet5d</c>). Matched against
+    /// <c>AppTable.QBTableID</c> before any name, because the data source's name often differs from the source app's name.</summary>
+    public string? SourceQbTableId { get; set; }
+
     /// <summary>"Destructive" (match the source exactly) or anything else (keep everything and add new).</summary>
     public string UpdateMode { get; set; } = "Destructive";
 

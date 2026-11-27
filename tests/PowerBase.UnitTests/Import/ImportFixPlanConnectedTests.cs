@@ -62,6 +62,8 @@ public class ImportFixPlanConnectedTests
                 Type: QB::ConnectedRecordSet
                 Properties:
                   Name: Clients
+                  ExternalSetIsInSolution: true
+                  ExternalSetId: bteqnet5d
                 Columns:
                   $ConnectedColumn_Name:
                     Type: QB::ConnectedColumn::Text
@@ -84,6 +86,7 @@ public class ImportFixPlanConnectedTests
         connected.TableName.Should().Be("Clients");
         connected.SourceAppName.Should().Be("CARES Database");
         connected.SourceTableName.Should().Be("Clients");
+        connected.SourceQbTableId.Should().Be("bteqnet5d");
         connected.UpdateMode.Should().Be("Destructive");
         connected.CronTab.Should().Be("19 11,12,13 * * *");
         connected.Fields.Should().ContainSingle().Which.Should().Match<PowerBase.Application.Import.Pbl.PblConnectedField>(f => f.FieldName == "Name" && f.SourceFid == 7);
@@ -192,5 +195,133 @@ public class ImportFixPlanConnectedTests
 
         report.Skipped.Should().ContainSingle().Which.Reason.Should().Contain("more than one application");
         await pendingRepo.DidNotReceiveWithAnyArgs().UpsertAsync(default!, default);
+    }
+
+    // ---- Matching the source by its Quickbase table id (client feedback 25 Nov: data source names differ from app names) ----
+
+    private static (PblDocument Document, ImportReport Report, App DestApp, AppTable DestTable, IAppRepository AppRepo, IAppTableRepository TableRepo) IdScenario(
+        string sourceAppName, string? qbTableId, params App[] otherApps)
+    {
+        var document = new PblDocument();
+        document.ConnectedTables.Add(new PblConnectedTable
+        {
+            TableRef = "$T", TableName = "Clients", SourceAppName = sourceAppName, SourceTableName = "Clients", SourceQbTableId = qbTableId,
+            Fields = [new PblConnectedField { FieldName = "Name", SourceFid = 7 }],
+        });
+        var report = new ImportReport { AppName = "Dest App", AppPublicId = Guid.NewGuid() };
+        var destApp = new App { Id = 1, PublicId = report.AppPublicId, Name = "Dest App" };
+        var appRepo = AppRepoWith([destApp, .. otherApps]);
+        appRepo.GetIdByPublicIdAsync(destApp.PublicId, Arg.Any<CancellationToken>()).Returns(Task.FromResult(destApp.Id));
+        var destTable = new AppTable { Id = 10, PublicId = Guid.NewGuid(), AppId = destApp.Id, Name = "Clients" };
+        var tableRepo = Substitute.For<IAppTableRepository>();
+        tableRepo.ListByAppAsync(destApp.Id, Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<AppTable>>([destTable]));
+        return (document, report, destApp, destTable, appRepo, tableRepo);
+    }
+
+    private static IExistingTableConnector Connector()
+    {
+        var connector = Substitute.For<IExistingTableConnector>();
+        connector.ConnectAsync(Arg.Any<ConnectExistingTableCommand>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(new ConnectExistingTableResult(Guid.NewGuid(), 1, [])));
+        return connector;
+    }
+
+    [Fact]
+    public async Task Applier_DataSourceNameDiffersFromAppName_ConnectsByQuickbaseTableId()
+    {
+        // The real case: the data source is "CARES Database" but the app was imported as "CARES Databases".
+        var sourceApp = new App { Id = 2, PublicId = Guid.NewGuid(), Name = "CARES Databases" };
+        var s = IdScenario("CARES Database", "bteqnet5d", sourceApp);
+        var sourceTablePublicId = Guid.NewGuid();
+        s.TableRepo.ListByQbTableIdAsync("bteqnet5d", Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<QbSourceTableMatch>>(
+            [new QbSourceTableMatch(20, sourceTablePublicId, "Clients", sourceApp.Id, sourceApp.PublicId, sourceApp.Name)]));
+        var connector = Connector();
+        var pendingRepo = Substitute.For<IConnectedPendingImportRepository>();
+
+        await new PblConnectedTablesApplier(connector, s.AppRepo, s.TableRepo, pendingRepo).ApplyAsync([(s.Document, s.Report)], CancellationToken.None);
+
+        s.Report.Skipped.Should().BeEmpty();
+        await connector.Received(1).ConnectAsync(Arg.Is<ConnectExistingTableCommand>(
+            c => c.DestinationTablePublicId == s.DestTable.PublicId && c.SourceAppPublicId == sourceApp.PublicId && c.SourceTablePublicId == sourceTablePublicId),
+            Arg.Any<CancellationToken>());
+        await pendingRepo.DidNotReceiveWithAnyArgs().UpsertAsync(default!, default);
+    }
+
+    [Fact]
+    public async Task Applier_SameQuickbaseAppImportedTwice_UsesTheCopyFromThisImport()
+    {
+        var oldCopy = new App { Id = 2, PublicId = Guid.NewGuid(), Name = "CARES Database" };
+        var newCopy = new App { Id = 3, PublicId = Guid.NewGuid(), Name = "CARES Database1" };
+        var s = IdScenario("CARES Database", "bteqnet5d", oldCopy, newCopy);
+        var newTable = Guid.NewGuid();
+        s.TableRepo.ListByQbTableIdAsync("bteqnet5d", Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<QbSourceTableMatch>>(
+        [
+            new QbSourceTableMatch(20, Guid.NewGuid(), "Clients", oldCopy.Id, oldCopy.PublicId, oldCopy.Name),
+            new QbSourceTableMatch(30, newTable, "Clients", newCopy.Id, newCopy.PublicId, newCopy.Name),
+        ]));
+        var newCopyReport = new ImportReport { AppName = newCopy.Name, AppPublicId = newCopy.PublicId };
+        s.AppRepo.GetIdByPublicIdAsync(newCopy.PublicId, Arg.Any<CancellationToken>()).Returns(Task.FromResult(newCopy.Id));
+        var connector = Connector();
+
+        await new PblConnectedTablesApplier(connector, s.AppRepo, s.TableRepo, Substitute.For<IConnectedPendingImportRepository>())
+            .ApplyAsync([(s.Document, s.Report), (new PblDocument(), newCopyReport)], CancellationToken.None);
+
+        await connector.Received(1).ConnectAsync(Arg.Is<ConnectExistingTableCommand>(c => c.SourceAppPublicId == newCopy.PublicId && c.SourceTablePublicId == newTable),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Applier_SeveralCopiesOutsideThisImport_NarrowedByAppName()
+    {
+        var copyA = new App { Id = 2, PublicId = Guid.NewGuid(), Name = "CARES Database" };
+        var copyB = new App { Id = 3, PublicId = Guid.NewGuid(), Name = "CARES Database Test" };
+        var s = IdScenario("CARES Database", "bteqnet5d", copyA, copyB);
+        var tableA = Guid.NewGuid();
+        s.TableRepo.ListByQbTableIdAsync("bteqnet5d", Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<QbSourceTableMatch>>(
+        [
+            new QbSourceTableMatch(20, tableA, "Clients", copyA.Id, copyA.PublicId, copyA.Name),
+            new QbSourceTableMatch(30, Guid.NewGuid(), "Clients", copyB.Id, copyB.PublicId, copyB.Name),
+        ]));
+        var connector = Connector();
+
+        await new PblConnectedTablesApplier(connector, s.AppRepo, s.TableRepo, Substitute.For<IConnectedPendingImportRepository>()).ApplyAsync([(s.Document, s.Report)], CancellationToken.None);
+
+        await connector.Received(1).ConnectAsync(Arg.Is<ConnectExistingTableCommand>(c => c.SourceTablePublicId == tableA), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Applier_SeveralCopiesNoWayToChoose_NeverGuesses()
+    {
+        var copyA = new App { Id = 2, PublicId = Guid.NewGuid(), Name = "Copy A" };
+        var copyB = new App { Id = 3, PublicId = Guid.NewGuid(), Name = "Copy B" };
+        var s = IdScenario("CARES Database", "bteqnet5d", copyA, copyB);
+        s.TableRepo.ListByQbTableIdAsync("bteqnet5d", Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<QbSourceTableMatch>>(
+        [
+            new QbSourceTableMatch(20, Guid.NewGuid(), "Clients", copyA.Id, copyA.PublicId, copyA.Name),
+            new QbSourceTableMatch(30, Guid.NewGuid(), "Clients", copyB.Id, copyB.PublicId, copyB.Name),
+        ]));
+        var connector = Connector();
+
+        await new PblConnectedTablesApplier(connector, s.AppRepo, s.TableRepo, Substitute.For<IConnectedPendingImportRepository>()).ApplyAsync([(s.Document, s.Report)], CancellationToken.None);
+
+        s.Report.Skipped.Should().ContainSingle().Which.Reason.Should().Contain("more than one application").And.Contain("Copy A").And.Contain("Copy B");
+        await connector.DidNotReceiveWithAnyArgs().ConnectAsync(default!, default);
+    }
+
+    [Fact]
+    public async Task Applier_NoTableCarriesTheId_FallsBackToNames()
+    {
+        // QBTableID not filled (no token access, or migration 098 missing): the name match still works.
+        var sourceApp = new App { Id = 2, PublicId = Guid.NewGuid(), Name = "CARES Database" };
+        var s = IdScenario("CARES Database", "bteqnet5d", sourceApp);
+        s.TableRepo.ListByQbTableIdAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns<Task<IReadOnlyList<QbSourceTableMatch>>>(_ => throw new InvalidOperationException("Invalid column name 'QBTableID'."));
+        s.AppRepo.GetIdByPublicIdAsync(sourceApp.PublicId, Arg.Any<CancellationToken>()).Returns(Task.FromResult(sourceApp.Id));
+        var sourceTable = new AppTable { Id = 20, PublicId = Guid.NewGuid(), AppId = sourceApp.Id, Name = "Clients" };
+        s.TableRepo.ListByAppAsync(sourceApp.Id, Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<AppTable>>([sourceTable]));
+        var connector = Connector();
+
+        await new PblConnectedTablesApplier(connector, s.AppRepo, s.TableRepo, Substitute.For<IConnectedPendingImportRepository>()).ApplyAsync([(s.Document, s.Report)], CancellationToken.None);
+
+        await connector.Received(1).ConnectAsync(Arg.Is<ConnectExistingTableCommand>(c => c.SourceTablePublicId == sourceTable.PublicId), Arg.Any<CancellationToken>());
     }
 }

@@ -139,6 +139,42 @@ public class PendingConnectedTableResolverTests
     }
 
     [Fact]
+    public async Task SourceFoundByQuickbaseTableId_ConnectsEvenThoughNoAppHasTheDataSourceName()
+    {
+        var payload = new PblConnectedTable
+        {
+            TableRef = "$T", TableName = "Clients", SourceAppName = "Voyage Database", SourceTableName = "Clients", SourceQbTableId = "bteqnet5d",
+            Fields = [new PblConnectedField { FieldName = "Name", SourceFid = 7 }],
+        };
+        var pending = PendingRow(appTableId: 10, "Voyage Database", "Clients", payload);
+        var pendingRepo = Substitute.For<IConnectedPendingImportRepository>();
+        pendingRepo.ListPendingAsync(Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<ConnectedPendingImportConnection>>([pending]));
+
+        var sourceApp = new App { Id = 2, PublicId = Guid.NewGuid(), Name = "VDB Databases" };
+        var appRepo = Substitute.For<IAppRepository>();
+        appRepo.ListAllAsync(Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<App>>([sourceApp]));
+
+        var destinationTable = new AppTable { Id = 10, PublicId = Guid.NewGuid(), AppId = 1, Name = "Clients" };
+        var sourceTablePublicId = Guid.NewGuid();
+        var tableRepo = Substitute.For<IAppTableRepository>();
+        tableRepo.GetByIdAsync(10, Arg.Any<CancellationToken>()).Returns(Task.FromResult(destinationTable));
+        tableRepo.ListByQbTableIdAsync("bteqnet5d", Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<QbSourceTableMatch>>(
+            [new QbSourceTableMatch(20, sourceTablePublicId, "Clients", sourceApp.Id, sourceApp.PublicId, sourceApp.Name)]));
+
+        var connectedPublicId = Guid.NewGuid();
+        var connector = Substitute.For<IExistingTableConnector>();
+        connector.ConnectAsync(Arg.Any<ConnectExistingTableCommand>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(new ConnectExistingTableResult(connectedPublicId, 1, [])));
+
+        await new PendingConnectedTableResolver(pendingRepo, connector, appRepo, tableRepo).ResolveAllAsync(CancellationToken.None);
+
+        await connector.Received(1).ConnectAsync(Arg.Is<ConnectExistingTableCommand>(
+            c => c.DestinationTablePublicId == destinationTable.PublicId && c.SourceAppPublicId == sourceApp.PublicId && c.SourceTablePublicId == sourceTablePublicId),
+            Arg.Any<CancellationToken>());
+        await pendingRepo.Received(1).MarkResolvedAsync(pending.Id, connectedPublicId, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task OneRowFailing_DoesNotStopTheOthersFromResolving()
     {
         var payloadA = new PblConnectedTable { TableRef = "$A", TableName = "A", SourceAppName = "Missing App", SourceTableName = "X" };

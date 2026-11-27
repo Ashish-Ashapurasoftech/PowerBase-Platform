@@ -43,32 +43,33 @@ public class PendingConnectedTableResolver(
         {
             try
             {
-                var match = PblConnectedTablesApplier.ResolveSourceApp(item.SourceAppName, appsByName);
-                if (match.Outcome == PblConnectedTablesApplier.AppMatchOutcome.Ambiguous)
+                var connected = JsonSerializer.Deserialize<PblConnectedTable>(item.PayloadJson)
+                    ?? throw new InvalidOperationException("The saved connected-table definition could not be read.");
+                // The row's own columns are what was saved; the payload carries the Quickbase table id (rows saved before it existed have none).
+                connected.SourceAppName = item.SourceAppName;
+                connected.SourceTableName = item.SourceTableName;
+
+                var source = await PblConnectedTablesApplier.LocateSourceAsync(connected, item.AppTableId, tableRepo, appsByName, TablesOf, null, ct);
+                if (source.Outcome == PblConnectedTablesApplier.SourceOutcome.Ambiguous)
                 {
-                    await pendingRepo.RecordAttemptAsync(item.Id,
-                        $"More than one application is named '{item.SourceAppName}' ({match.Count} matches); connect it to its source by hand.", ct);
+                    var message = source.Message.Length > 0 ? char.ToUpperInvariant(source.Message[0]) + source.Message[1..] : source.Message;
+                    await pendingRepo.RecordAttemptAsync(item.Id, $"{message}; connect it to its source by hand.", ct);
                     continue;
                 }
-                if (match.Outcome == PblConnectedTablesApplier.AppMatchOutcome.NotFound)
+                if (source.Outcome == PblConnectedTablesApplier.SourceOutcome.AppNotFound)
                 {
                     await pendingRepo.RecordAttemptAsync(item.Id, $"'{item.SourceAppName}' has not been imported yet.", ct);
                     continue;
                 }
-
-                var sourceTables = await TablesOf(match.PublicId);
-                if (!sourceTables.TryGetValue(PblConnectedTablesApplier.Normalize(item.SourceTableName), out var sourceTable))
+                if (source.Outcome == PblConnectedTablesApplier.SourceOutcome.TableNotFound)
                 {
-                    await pendingRepo.RecordAttemptAsync(item.Id, $"'{item.SourceTableName}' was not found in '{match.Name}' yet.", ct);
+                    await pendingRepo.RecordAttemptAsync(item.Id, $"'{item.SourceTableName}' was not found in '{source.AppName}' yet.", ct);
                     continue;
                 }
 
                 var destination = await tableRepo.GetByIdAsync(item.AppTableId, ct);
-                var connected = JsonSerializer.Deserialize<PblConnectedTable>(item.PayloadJson)
-                    ?? throw new InvalidOperationException("The saved connected-table definition could not be read.");
-
                 var result = await connectHandler.ConnectAsync(
-                    PblConnectedTablesApplier.BuildCommand(destination.PublicId, match.PublicId, sourceTable.PublicId, connected), ct);
+                    PblConnectedTablesApplier.BuildCommand(destination.PublicId, source.AppPublicId, source.TablePublicId, connected), ct);
 
                 await pendingRepo.MarkResolvedAsync(item.Id, result.ConnectedTablePublicId, ct);
             }

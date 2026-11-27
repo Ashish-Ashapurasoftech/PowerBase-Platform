@@ -44,6 +44,9 @@ public class PblConnectedTablesApplier(
             return map;
         }
 
+        // Apps created by this import: when a Quickbase app was imported more than once, its copy from this import is the source.
+        var batchApps = imported.Select(i => i.Report.AppPublicId).ToHashSet();
+
         foreach (var (document, report) in imported)
         {
             foreach (var connected in document.ConnectedTables ?? [])
@@ -57,13 +60,13 @@ public class PblConnectedTablesApplier(
                     var ownTables = await TablesOf(report.AppPublicId);
                     var hasDestination = ownTables.TryGetValue(Normalize(connected.TableName), out var destination);
 
-                    var match = ResolveSourceApp(connected.SourceAppName, appsByName);
-                    if (match.Outcome == AppMatchOutcome.Ambiguous)
+                    var source = await LocateSourceAsync(connected, destination?.Id ?? 0, tableRepo, appsByName, TablesOf, batchApps, ct);
+                    if (source.Outcome == SourceOutcome.Ambiguous)
                     {
-                        Note($"Connected table: more than one application is named '{connected.SourceAppName}' ({match.Count} matches); connect it to its source by hand.");
+                        Note($"Connected table: {source.Message}; connect it to its source by hand.");
                         continue;
                     }
-                    if (match.Outcome == AppMatchOutcome.NotFound)
+                    if (source.Outcome == SourceOutcome.AppNotFound)
                     {
                         var reason = $"Connected table: its records come from '{connected.SourceTableName}' in '{connected.SourceAppName}', which does not exist yet. " +
                                      "The table was imported as an ordinary table; it will connect automatically once that application is imported.";
@@ -75,17 +78,16 @@ public class PblConnectedTablesApplier(
                     if (!hasDestination)
                         continue; // the table itself was excluded from this import; nothing to connect
 
-                    var sourceTables = await TablesOf(match.PublicId);
-                    if (!sourceTables.TryGetValue(Normalize(connected.SourceTableName), out var sourceTable))
+                    if (source.Outcome == SourceOutcome.TableNotFound)
                     {
-                        var reason = $"Connected table: '{connected.SourceTableName}' was not found in '{match.Name}' yet. " +
+                        var reason = $"Connected table: '{connected.SourceTableName}' was not found in '{source.AppName}' yet. " +
                                      "The table was imported as an ordinary table; it will connect automatically once that table exists.";
                         Note(reason);
                         await SavePendingAsync(destination!, connected, reason, ct);
                         continue;
                     }
 
-                    var result = await connectHandler.ConnectAsync(BuildCommand(destination!.PublicId, match.PublicId, sourceTable.PublicId, connected), ct);
+                    var result = await connectHandler.ConnectAsync(BuildCommand(destination!.PublicId, source.AppPublicId, source.TablePublicId, connected), ct);
 
                     foreach (var note in result.Notes) Note($"Connected table: {note}");
                 }
@@ -154,6 +156,63 @@ public class PblConnectedTablesApplier(
             return new AppMatch(AppMatchOutcome.Ambiguous, 0, Guid.Empty, "", matches.Count);
         var (id, publicId, name) = matches[0];
         return new AppMatch(AppMatchOutcome.Found, id, publicId, name, 1);
+    }
+
+    public enum SourceOutcome { Found, AppNotFound, TableNotFound, Ambiguous }
+
+    /// <summary>Where a connected table's records come from. <see cref="Message"/> explains an ambiguous result.</summary>
+    public readonly record struct SourceLocation(SourceOutcome Outcome, Guid AppPublicId, string AppName, Guid TablePublicId, string Message);
+
+    /// <summary>
+    /// Finds a connected table's source table. First by its Quickbase table id (<see cref="PblConnectedTable.SourceQbTableId"/>
+    /// = <c>AppTable.QBTableID</c>), which is exact whatever the apps are called; then, when no table carries that id, by the
+    /// data source's name and the source table's name (the older, less reliable way). Several tables with the same Quickbase id
+    /// (the app was imported more than once) are narrowed to the copy in <paramref name="preferredApps"/>, then to the copy
+    /// whose app name matches the data source; still more than one is <see cref="SourceOutcome.Ambiguous"/>, never guessed.
+    /// Shared by <see cref="PendingConnectedTableResolver"/> so a deferred connection is completed the same way.
+    /// </summary>
+    public static async Task<SourceLocation> LocateSourceAsync(
+        PblConnectedTable connected, long destinationTableId, IAppTableRepository tableRepo,
+        IReadOnlyDictionary<string, List<(long Id, Guid PublicId, string Name)>> appsByName,
+        Func<Guid, Task<Dictionary<string, Domain.Entities.AppTable>>> tablesOf,
+        IReadOnlySet<Guid>? preferredApps, CancellationToken ct)
+    {
+        if (!string.IsNullOrWhiteSpace(connected.SourceQbTableId))
+        {
+            IReadOnlyList<QbSourceTableMatch> byId;
+            try { byId = await tableRepo.ListByQbTableIdAsync(connected.SourceQbTableId, ct) ?? []; }
+            catch (Exception ex) when (ex is not OperationCanceledException) { byId = []; } // e.g. QBTableID not migrated yet: use names
+
+            var candidates = byId.Where(m => m.TableId != destinationTableId).ToList();
+            if (candidates.Count > 1 && preferredApps is { Count: > 0 })
+            {
+                var inBatch = candidates.Where(m => preferredApps.Contains(m.AppPublicId)).ToList();
+                if (inBatch.Count > 0) candidates = inBatch;
+            }
+            if (candidates.Count > 1)
+            {
+                var sameName = candidates.Where(m => Normalize(m.AppName) == Normalize(connected.SourceAppName)).ToList();
+                if (sameName.Count > 0) candidates = sameName;
+            }
+            if (candidates.Count == 1)
+                return new SourceLocation(SourceOutcome.Found, candidates[0].AppPublicId, candidates[0].AppName, candidates[0].TablePublicId, "");
+            if (candidates.Count > 1)
+                return new SourceLocation(SourceOutcome.Ambiguous, Guid.Empty, "", Guid.Empty,
+                    $"its source table '{connected.SourceTableName}' (Quickbase id {connected.SourceQbTableId}) exists in more than one application " +
+                    $"({string.Join(", ", candidates.Select(c => $"'{c.AppName}'").Distinct())})");
+        }
+
+        var match = ResolveSourceApp(connected.SourceAppName, appsByName);
+        if (match.Outcome == AppMatchOutcome.Ambiguous)
+            return new SourceLocation(SourceOutcome.Ambiguous, Guid.Empty, "", Guid.Empty,
+                $"more than one application is named '{connected.SourceAppName}' ({match.Count} matches)");
+        if (match.Outcome == AppMatchOutcome.NotFound)
+            return new SourceLocation(SourceOutcome.AppNotFound, Guid.Empty, "", Guid.Empty, "");
+
+        var sourceTables = await tablesOf(match.PublicId);
+        return sourceTables.TryGetValue(Normalize(connected.SourceTableName), out var sourceTable)
+            ? new SourceLocation(SourceOutcome.Found, match.PublicId, match.Name, sourceTable.PublicId, "")
+            : new SourceLocation(SourceOutcome.TableNotFound, match.PublicId, match.Name, Guid.Empty, "");
     }
 
     /// <summary>Public so <see cref="PendingConnectedTableResolver"/> builds the same command when it completes a deferred connection.</summary>
