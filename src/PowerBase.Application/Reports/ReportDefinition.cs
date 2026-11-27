@@ -165,6 +165,10 @@ public class ReportOptions
     /// above the toolbar. A long description is clamped with a Show more/Show less toggle there —
     /// this flag only controls whether the block appears at all. Defaults to false (opt-in).</summary>
     public bool ShowDescriptionOnReportPage { get; set; }
+    /// <summary>How the report page tints its rows (a Table report): JSON <c>{"mode":"none|choice|column","fieldId":n,"colors":{"Choice":"#rrggbb"}}</c>.
+    /// "choice" colours a row by its single-choice field's value; "column" takes the colour from a report column's value. null / "none" = no colouring.
+    /// Kept as text so the shape can grow without a schema change; <see cref="ReportRowColors"/> checks it on save.</summary>
+    public string? RowColorJson { get; set; }
 }
 
 // ── Filter tree ──────────────────────────────────────────────────────────────

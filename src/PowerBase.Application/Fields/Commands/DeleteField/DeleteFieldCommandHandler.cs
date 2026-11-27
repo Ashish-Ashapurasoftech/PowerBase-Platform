@@ -141,6 +141,11 @@ public class DeleteFieldCommandHandler
         if (normalAffected == 0)
             throw new NotFoundException("Field", command.FieldPublicId);
 
+        // Only active PowerFlows block a delete; a disabled one that still uses this field is let through, so mark its steps as not validated:
+        // enabling that PowerFlow is refused until they are fixed, instead of switching on a flow that points at a field that is gone.
+        if (field.Fid.HasValue)
+            await _pipelineRepo.InvalidateStepsReferencingFieldAsync(field.Fid.Value, null, ct);
+
         // A deleted reference proxy hands its role to the relationship's next lookup (or clears it).
         await ReferenceProxyRules.ReassignIfRemovedAsync(table.Id, [field.Id], _relRepo, _fieldRepo, ct);
 

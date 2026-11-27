@@ -1422,14 +1422,17 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         WHERE PublicId IN @ids AND IsActive = 1 AND IsDeleted = 0
         """;
 
-    // Steps of every active pipeline that has at least one step mentioning the table's id. A field of the table can only be
+    // Steps of every ACTIVE pipeline that has at least one step mentioning the table's id. A field of the table can only be
     // used by a pipeline that names the table somewhere (directly, or via a step/trigger the {{...}} token reads from).
+    // A disabled (inactive) PowerFlow is left out on purpose: it does not run, so it must not block deleting a field or table
+    // (flows imported from Quickbase arrive disabled). Re-enabling it is refused while a step is marked invalid - see
+    // InvalidateStepsReferencingFieldAsync / InvalidateStepsUsingTableAsync, which the delete handlers call.
     private const string GetStepsOfPipelinesUsingTableSql = """
         SELECT p.PublicId AS PipelinePublicId, p.Name AS PipelineName, s.RefId, s.Label, s.Type, s.Subtype, s.ConfigJson,
                CAST(1 AS BIT) AS IsMatch
         FROM meta.PipelineStep s
         JOIN meta.Pipeline p ON s.PipelineId = p.Id
-        WHERE p.IsDeleted = 0 AND s.IsDeleted = 0
+        WHERE p.IsDeleted = 0 AND p.IsActive = 1 AND s.IsDeleted = 0
           AND p.Id IN (
               SELECT m.PipelineId FROM meta.PipelineStep m
               WHERE m.IsDeleted = 0 AND m.ConfigJson LIKE '%' + @tableText + '%')
@@ -1463,14 +1466,15 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         return await controlConn.ExecuteScalarAsync<int>(new CommandDefinition(sql, parameters, cancellationToken: ct));
     }
 
-    /// <summary>PowerFlow steps (any kind: trigger, search, create/update, copy records…) whose configuration names the table at all.</summary>
+    /// <summary>Steps of ACTIVE PowerFlows (any kind: trigger, search, create/update, copy records…) whose configuration names the table at all.
+    /// A disabled PowerFlow does not run, so it is not counted.</summary>
     public async Task<IReadOnlyList<(string PipelineName, string StepLabel)>> GetActivePipelineStepsUsingTableAsync(Guid tablePublicId, CancellationToken ct = default)
     {
         const string sql = """
             SELECT p.Name AS PipelineName, s.Label AS StepLabel
             FROM meta.PipelineStep s
             JOIN meta.Pipeline p ON s.PipelineId = p.Id
-            WHERE p.IsDeleted = 0 AND s.IsDeleted = 0
+            WHERE p.IsDeleted = 0 AND p.IsActive = 1 AND s.IsDeleted = 0
               AND s.ConfigJson LIKE '%' + @tableText + '%'
             ORDER BY p.Name, s.DisplayOrder
             """;
@@ -1478,6 +1482,21 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         var rows = await connection.QueryAsync<(string PipelineName, string StepLabel)>(
             new CommandDefinition(sql, new { tableText = tablePublicId.ToString() }, cancellationToken: ct));
         return rows.AsList();
+    }
+
+    /// <summary>Marks every step whose configuration names the table as not validated, so a disabled PowerFlow that used a deleted table cannot
+    /// be switched on again until its steps are fixed (enabling is refused while a step is not validated).</summary>
+    public async Task InvalidateStepsUsingTableAsync(Guid tablePublicId, CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE meta.PipelineStep
+            SET IsValidated = 0,
+                ModifiedOn = SYSUTCDATETIME()
+            WHERE IsDeleted = 0
+              AND ConfigJson LIKE '%' + @tableText + '%'
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(sql, new { tableText = tablePublicId.ToString() }, cancellationToken: ct));
     }
 
     /// <summary>One query for all of a table's fields (used by table delete): which of <paramref name="fids"/> each PowerFlow step uses.</summary>

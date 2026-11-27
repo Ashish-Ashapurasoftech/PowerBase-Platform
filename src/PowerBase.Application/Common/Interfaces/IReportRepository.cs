@@ -21,7 +21,9 @@ public interface IReportRepository
     /// call once the report is confirmed to belong to the table being written.</summary>
     Task<IReadOnlyList<PowerBase.Domain.Entities.FormRule>> GetAppliedGridEditRulesAsync(Guid reportPublicId, CancellationToken ct = default);
     Task<long> GetAppIdByPublicIdAsync(Guid reportPublicId, CancellationToken ct = default);
-    Task<IReadOnlyList<Report>> ListByAppAsync(long appId, CancellationToken ct = default);
+    /// <summary>The app's reports the caller may see. <paramref name="includeHidden"/> also lists Hidden reports (unlisted everywhere else); the
+    /// dashboard designer asks for them, since a Hidden report is a normal source for a dashboard widget. Off by default.</summary>
+    Task<IReadOnlyList<Report>> ListByAppAsync(long appId, CancellationToken ct = default, bool includeHidden = false);
     Task<IReadOnlyList<Report>> ListAllByAppAsync(long appId, CancellationToken ct = default);
     Task<IReadOnlyList<Report>> ListByTableAsync(Guid tablePublicId, CancellationToken ct = default);
     /// <summary>Every report row of a table — deleted ones too — oldest first (Quickbase-compatible query numbers stay stable).</summary>

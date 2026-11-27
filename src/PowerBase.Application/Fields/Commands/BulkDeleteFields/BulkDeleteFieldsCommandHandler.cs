@@ -159,6 +159,11 @@ public class BulkDeleteFieldsCommandHandler
 
         var normalDeletedCount = await _fieldRepo.BulkDeleteAsync(command.FieldPublicIds, table.Id, ct);
 
+        // Only active PowerFlows block a delete; a disabled one that still uses a deleted field is let through, so mark its steps as not
+        // validated - enabling that PowerFlow is refused until they are fixed (same as the forced path above).
+        foreach (var field in fieldsToDelete.Where(f => f.Fid.HasValue))
+            await _pipelineRepo.InvalidateStepsReferencingFieldAsync(field.Fid!.Value, null, ct);
+
         // A deleted reference proxy hands its role to the relationship's next lookup (or clears it).
         await ReferenceProxyRules.ReassignIfRemovedAsync(table.Id, deletedFieldIds, _relRepo, _fieldRepo, ct);
 
