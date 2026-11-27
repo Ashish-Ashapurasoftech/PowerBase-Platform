@@ -26,7 +26,7 @@ public class CacheMetricsTests
     {
         // A group of its own, so other tests running at the same time do not move these counts.
         var group = "metrics-" + Guid.NewGuid().ToString("N")[..6];
-        var cache = new MetadataCache(new MemoryCache(new MemoryCacheOptions()), Options.Create(new MetadataCacheOptions()),
+        var cache = new MetadataCache(new MemoryCache(new MemoryCacheOptions()), Options.Create(new MetadataCacheOptions { UseInMemoryCache = true }),
             NullLogger<MetadataCache>.Instance);
 
         await cache.GetOrAddAsync(1, group, "k", () => Task.FromResult("v"));

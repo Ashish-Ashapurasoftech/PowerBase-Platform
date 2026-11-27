@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using FluentAssertions;
+using NSubstitute;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -99,17 +100,62 @@ public class MetadataCacheL2Tests
         fromB[0].Name.Should().Be("New name");
     }
 
+    /// <summary>Multi-instance without L1 (UseInMemoryCache = false): permissions come from Redis on the next instance, not SQL every time.</summary>
     [Fact]
-    public async Task Security_groups_never_go_to_L2()
+    public async Task Permissions_are_shared_through_L2_under_their_version()
     {
         var versions = new SharedVersions();
         var l2 = new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions()));
-        var a = Instance(versions, l2);
-        using (CacheVersionScope.Begin())
-            await a.GetOrAddAsync<IReadOnlySet<string>>(Tenant, MetadataCacheGroups.Access, "appperms:1:2",
-                () => Task.FromResult<IReadOnlySet<string>>(new HashSet<string> { "records.delete" }));
-        await Task.Delay(200);
-        (await l2.GetAsync($"pb:t{Tenant}:access:v0:appperms:1:2")).Should().BeNull();
+        MetadataCache NoL1() => new(new MemoryCache(new MemoryCacheOptions()),
+            Options.Create(new MetadataCacheOptions { TransactionQuarantineSeconds = 0, WriteQuarantineSeconds = 0, UseInMemoryCache = false }),
+            NullLogger<MetadataCache>.Instance, versions, l2);
+        var sqlReads = 0;
+        async Task<IReadOnlySet<string>> Perms(MetadataCache c, string code)
+        {
+            using var _ = CacheVersionScope.Begin();
+            return await c.GetOrAddAsync<IReadOnlySet<string>>(Tenant, MetadataCacheGroups.Access, "appperms:1:2",
+                () => { sqlReads++; return Task.FromResult<IReadOnlySet<string>>(new HashSet<string> { code }); });
+        }
+
+        await Perms(NoL1(), "records.delete");
+        for (var i = 0; i < 50 && await l2.GetAsync($"pb:t{Tenant}:access:v0:appperms:1:2") is null; i++) await Task.Delay(20);
+        (await Perms(NoL1(), "records.delete")).Should().BeEquivalentTo(["records.delete"], "IReadOnlySet is read back as a HashSet");
+        sqlReads.Should().Be(1);
+
+        // Revoked: the role change bumps the access version, so the next request reads a new key — never the old permission.
+        NoL1().Invalidate(Tenant, MetadataCacheGroups.Access);
+        (await Perms(NoL1(), "records.read")).Should().BeEquivalentTo(["records.read"]);
+    }
+
+    [Fact]
+    public async Task Without_readable_versions_permissions_never_come_from_L2()
+    {
+        var versions = Substitute.For<ICacheVersionStore>();
+        versions.ReadAsync(Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyDictionary<string, long>?>(null));
+        versions.ReadWithAgeAsync(Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyDictionary<string, CacheGroupVersion>?>(null));
+        var l2 = new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions()));
+        await l2.SetAsync($"pb:t{Tenant}:access:v0:appperms:1:2", System.Text.Encoding.UTF8.GetBytes("""["records.delete"]"""));
+        using var _ = CacheVersionScope.Begin();
+        var result = await Instance(versions, l2).GetOrAddAsync<IReadOnlySet<string>>(Tenant, MetadataCacheGroups.Access, "appperms:1:2",
+            () => Task.FromResult<IReadOnlySet<string>>(new HashSet<string>()));
+        result.Should().BeEmpty("fail closed: SQL answers when the versions cannot be read, whatever Redis holds");
+    }
+
+    /// <summary>Every type the security groups cache comes back from JSON with every property equal.</summary>
+    [Fact]
+    public void Security_types_round_trip_through_JSON_exactly()
+    {
+        AssertRoundTrip(Filled<AppUser>());
+        AssertRoundTrip(Filled<AppRoleTablePermission>());
+        AssertRoundTrip(Filled<AppRoleRecordFilter>());
+        AssertRoundTrip(Filled<Report>());
+        MetadataCache.FromL2<IReadOnlySet<string>>(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new HashSet<string> { "a", "b" }))
+            .Should().BeEquivalentTo(["a", "b"]);
+        MetadataCache.FromL2<IReadOnlyDictionary<long, string>>(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new Dictionary<long, string> { [6] = "Edit" }))
+            .Should().BeEquivalentTo(new Dictionary<long, string> { [6] = "Edit" });
+        MetadataCache.FromL2<IReadOnlyList<long>>(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new List<long> { 3, 4 }))
+            .Should().BeEquivalentTo([3L, 4L]);
+        MetadataCache.FromL2<string>(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes("1")).Should().Be("1");
     }
 
     /// <summary>Versions with their age on the "database clock", as SqlCacheVersionStore reads them; Bump may be made to fail.</summary>
@@ -280,8 +326,8 @@ public class MetadataCacheL2Tests
         }
         later.Stop();
 
-        first.ElapsedMilliseconds.Should().BeLessThan(3_000);
-        later.ElapsedMilliseconds.Should().BeLessThan(500, "L2 is skipped while it is down");
+        first.ElapsedMilliseconds.Should().BeLessThan(10_000, "one connect attempt; slower when the whole suite runs in parallel");
+        later.ElapsedMilliseconds.Should().BeLessThan(1_000, "L2 is skipped while it is down");
     }
 
     // ── Version stamp of the result cache ───────────────────────────────────

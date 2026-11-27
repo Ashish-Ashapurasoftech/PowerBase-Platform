@@ -8,7 +8,6 @@ using Microsoft.Extensions.Primitives;
 using PowerBase.Application.Common.Caching;
 using PowerBase.Application.Common.Configurations;
 using PowerBase.Application.Common.Interfaces;
-using StackExchange.Redis;
 
 namespace PowerBase.Infrastructure.Services;
 
@@ -19,7 +18,7 @@ namespace PowerBase.Infrastructure.Services;
 /// reach every API instance (ARC-01). Security groups (<see cref="MetadataCacheGroups.IsSecurityRelevant"/>) are never served
 /// from cache when shared versions cannot be read.
 /// </summary>
-public sealed class MetadataCache : IMetadataCache, IDisposable
+public sealed class MetadataCache : IMetadataCache
 {
     private sealed class GroupState
     {
@@ -52,7 +51,6 @@ public sealed class MetadataCache : IMetadataCache, IDisposable
     private readonly ICacheVersionStore? _versions;
     private readonly CacheProviderKind _provider;
     private readonly string? _distributedConn;
-    private readonly Lazy<ConnectionMultiplexer?> _redis;
     private readonly ConcurrentDictionary<(long Tenant, string Group), GroupState> _groups = new();
     private readonly ConcurrentDictionary<long, TenantVersions> _tenantVersions = new();
 
@@ -68,8 +66,17 @@ public sealed class MetadataCache : IMetadataCache, IDisposable
     /// instance does not use L2 for them for a whole TTL. Other instances behave as without L2 (they too see the change only at TTL).</summary>
     private readonly ConcurrentDictionary<(long Tenant, string Group), long> _l2BlockedUntilTicks = new();
     private static readonly System.Text.Json.JsonSerializerOptions L2Json = new(System.Text.Json.JsonSerializerDefaults.General);
+    /// <summary>
+    /// Every group may use L2, the security groups too (multi-instance with MetadataCache:UseInMemoryCache = false would otherwise read
+    /// permissions from SQL on every request). Safe for them because a security group is only ever read from any cache after this
+    /// request read its shared versions from SQL (fail closed when they cannot be read, see GetOrAddAsync), the key carries that version,
+    /// a value is shared only once its version has settled, and a failed bump blocks L2 for the group here.
+    /// </summary>
     private static readonly HashSet<string> L2Groups = new(StringComparer.Ordinal)
-        { MetadataCacheGroups.Fields, MetadataCacheGroups.Tables, MetadataCacheGroups.Apps, MetadataCacheGroups.Relationships, MetadataCacheGroups.Ids };
+    {
+        MetadataCacheGroups.Fields, MetadataCacheGroups.Tables, MetadataCacheGroups.Apps, MetadataCacheGroups.Relationships, MetadataCacheGroups.Ids,
+        MetadataCacheGroups.Access, MetadataCacheGroups.UserPermissions, MetadataCacheGroups.Sessions,
+    };
 
     public MetadataCache(IMemoryCache cache, IOptions<MetadataCacheOptions> options, ILogger<MetadataCache> logger, ICacheVersionStore? versions = null,
         IDistributedCache? l2 = null)
@@ -85,7 +92,6 @@ public sealed class MetadataCache : IMetadataCache, IDisposable
         _versions = _options.SharedVersions ? versions : null;
         _provider = _options.ResolveProvider();
         _distributedConn = _options.ResolveDistributedConnectionString();
-        _redis = new Lazy<ConnectionMultiplexer?>(ConnectDistributed, LazyThreadSafetyMode.ExecutionAndPublication);
     }
 
     public CacheProviderKind ActiveProvider =>
@@ -173,23 +179,22 @@ public sealed class MetadataCache : IMetadataCache, IDisposable
             {
                 using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(Math.Max(10, _options.L2TimeoutMs)));
                 var bytes = await _l2!.GetAsync(l2Key, timeout.Token);
-                if (bytes is { Length: > 0 } && System.Text.Json.JsonSerializer.Deserialize<T>(bytes, L2Json) is { } fromL2)
+                if (bytes is { Length: > 0 } && FromL2<T>(bytes) is { } fromL2)
                 {
                     CacheMetrics.Lookup(group, CacheMetrics.Source.L2);
                     return fromL2;
                 }
+            }
+            catch (Exception ex) when (ex is System.Text.Json.JsonException or NotSupportedException)
+            {
+                // An entry this type cannot be read back from (written by another build): a miss, not a Redis outage.
+                _logger.LogDebug(ex, "Metadata L2 entry {Key} could not be read; using SQL", l2Key);
             }
             catch (Exception ex)
             {
                 L2Down(ex);
                 l2Key = null;
             }
-        }
-        else if (_l2 is null && ActiveProvider != CacheProviderKind.InMemory && !MetadataCacheGroups.IsSecurityRelevant(group)
-            && await TryGetDistributedAsync<T>(tenantId, group, sharedVersion, key) is { } muxHit)
-        {
-            CacheMetrics.Lookup(group, CacheMetrics.Source.L2);
-            return muxHit;
         }
 
         CacheMetrics.Lookup(group, CacheMetrics.Source.Sql);
@@ -212,11 +217,17 @@ public sealed class MetadataCache : IMetadataCache, IDisposable
                 catch (Exception ex) { L2Down(ex); }
             });
         }
-        else if (_l2 is null && value is not null && ActiveProvider != CacheProviderKind.InMemory && !MetadataCacheGroups.IsSecurityRelevant(group))
-        {
-            await TrySetDistributedAsync(tenantId, group, sharedVersion, key, value);
-        }
         return value;
+    }
+
+    /// <summary>Reads an L2 entry back. Interfaces System.Text.Json cannot build (IReadOnlySet&lt;T&gt;: permission codes) are read as their
+    /// concrete type.</summary>
+    internal static T? FromL2<T>(byte[] bytes) where T : class
+    {
+        var t = typeof(T);
+        if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(IReadOnlySet<>))
+            return (T?)System.Text.Json.JsonSerializer.Deserialize(bytes, typeof(HashSet<>).MakeGenericType(t.GetGenericArguments()), L2Json);
+        return System.Text.Json.JsonSerializer.Deserialize<T>(bytes, L2Json);
     }
 
     /// <summary>
@@ -370,70 +381,5 @@ public sealed class MetadataCache : IMetadataCache, IDisposable
             InvalidateLocal(tenantId, group, inTransaction: true);
         }
         return true;
-    }
-
-    private ConnectionMultiplexer? ConnectDistributed()
-    {
-        if (string.IsNullOrWhiteSpace(_distributedConn)) return null;
-        try
-        {
-            var config = ConfigurationOptions.Parse(_distributedConn);
-            config.AbortOnConnectFail = false;
-            config.ConnectTimeout = Math.Max(200, _options.DistributedConnectTimeoutMs);
-            config.SyncTimeout = Math.Max(200, _options.DistributedOperationTimeoutMs);
-            config.AsyncTimeout = Math.Max(200, _options.DistributedOperationTimeoutMs);
-            if (_provider == CacheProviderKind.AzureCache && !_distributedConn.Contains("ssl=", StringComparison.OrdinalIgnoreCase))
-                config.Ssl = true;
-            return ConnectionMultiplexer.Connect(config);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Could not connect to {Provider} metadata cache; falling back to L1 InMemory cache", _provider);
-            return null;
-        }
-    }
-
-    private string DistributedKey(long tenantId, string group, long sharedVersion, string key) =>
-        $"{_options.KeyPrefix}{tenantId}:{group}:v{sharedVersion}:{key}";
-
-    private async Task<T?> TryGetDistributedAsync<T>(long tenantId, string group, long sharedVersion, string key) where T : class
-    {
-        try
-        {
-            var mux = _redis.Value;
-            if (mux is null || !mux.IsConnected) return null;
-            var raw = await mux.GetDatabase().StringGetAsync(DistributedKey(tenantId, group, sharedVersion, key));
-            if (raw.IsNullOrEmpty) return null;
-            return JsonSerializer.Deserialize<T>(raw.ToString(), RedisJsonOptions);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Distributed cache read skipped for {Group}/{Key}", group, key);
-            return null;
-        }
-    }
-
-    private async Task TrySetDistributedAsync<T>(long tenantId, string group, long sharedVersion, string key, T value) where T : class
-    {
-        try
-        {
-            var mux = _redis.Value;
-            if (mux is null || !mux.IsConnected) return;
-            var json = JsonSerializer.Serialize(value, RedisJsonOptions);
-            await mux.GetDatabase().StringSetAsync(
-                DistributedKey(tenantId, group, sharedVersion, key),
-                json,
-                TimeSpan.FromHours(Math.Max(1, _options.TtlHours)));
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Distributed cache write skipped for {Group}/{Key}", group, key);
-        }
-    }
-
-    public void Dispose()
-    {
-        if (_redis.IsValueCreated)
-            _redis.Value?.Dispose();
     }
 }

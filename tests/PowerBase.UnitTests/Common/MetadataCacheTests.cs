@@ -12,7 +12,7 @@ public class MetadataCacheTests
 {
     private static MetadataCache Create(bool enabled = true, int quarantineSeconds = 0) =>
         new(new MemoryCache(new MemoryCacheOptions()),
-            Options.Create(new MetadataCacheOptions { Enabled = enabled, WriteQuarantineSeconds = quarantineSeconds, TransactionQuarantineSeconds = quarantineSeconds }),
+            Options.Create(new MetadataCacheOptions { UseInMemoryCache = true, Enabled = enabled, WriteQuarantineSeconds = quarantineSeconds, TransactionQuarantineSeconds = quarantineSeconds }),
             NullLogger<MetadataCache>.Instance);
 
     [Fact]
@@ -140,9 +140,9 @@ public class MetadataCacheTests
     [Fact]
     public async Task Distributed_provider_without_connection_string_falls_back_to_in_memory()
     {
-        using var cache = new MetadataCache(
+        var cache = new MetadataCache(
             new MemoryCache(new MemoryCacheOptions()),
-            Options.Create(new MetadataCacheOptions { Provider = "AzureCache", WriteQuarantineSeconds = 0, TransactionQuarantineSeconds = 0 }),
+            Options.Create(new MetadataCacheOptions { UseInMemoryCache = true, Provider = "AzureCache", WriteQuarantineSeconds = 0, TransactionQuarantineSeconds = 0 }),
             NullLogger<MetadataCache>.Instance);
         cache.ActiveProvider.Should().Be(CacheProviderKind.InMemory);
 
@@ -156,7 +156,7 @@ public class MetadataCacheTests
     [Fact]
     public async Task Disabling_UseInMemoryCache_skips_local_memory_cache_for_multi_instance_deployments()
     {
-        using var cache = new MetadataCache(
+        var cache = new MetadataCache(
             new MemoryCache(new MemoryCacheOptions()),
             Options.Create(new MetadataCacheOptions
             {

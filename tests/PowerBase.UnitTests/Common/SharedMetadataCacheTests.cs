@@ -44,7 +44,7 @@ public class SharedMetadataCacheTests
 
     private static MetadataCache Instance(SharedVersions versions, int quarantineSeconds = 30) =>
         new(new MemoryCache(new MemoryCacheOptions()),
-            Options.Create(new MetadataCacheOptions { TransactionQuarantineSeconds = quarantineSeconds, WriteQuarantineSeconds = quarantineSeconds }),
+            Options.Create(new MetadataCacheOptions { UseInMemoryCache = true, TransactionQuarantineSeconds = quarantineSeconds, WriteQuarantineSeconds = quarantineSeconds }),
             NullLogger<MetadataCache>.Instance, versions);
 
     /// <summary>One request on an instance: reads through the cache inside a request scope.</summary>

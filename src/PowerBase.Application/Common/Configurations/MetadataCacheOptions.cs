@@ -15,8 +15,8 @@ public class MetadataCacheOptions
     /// <summary>Kill switch: false makes every read go to the database, exactly as before the cache existed.</summary>
     public bool Enabled { get; set; } = true;
 
-    /// <summary>Whether process-local L1 memory caching is used. Set to false in multi-instance deployments that should read strictly from shared Redis / Azure Cache and SQL without per-instance L1 copies.</summary>
-    public bool UseInMemoryCache { get; set; } = true;
+    /// <summary>Whether process-local L1 memory caching is used. Off by default (decision 2026-11-27: no in-memory cache; Redis L2 + SQL only). Set to false in multi-instance deployments that should read strictly from shared Redis / Azure Cache and SQL without per-instance L1 copies.</summary>
+    public bool UseInMemoryCache { get; set; } = false;
 
     /// <summary>Cache backing store: "InMemory" (default, process-local), "Redis" (L1 memory + Redis L2), or "AzureCache" (L1 memory + Azure Cache for Redis over TLS).</summary>
     public string Provider { get; set; } = nameof(CacheProviderKind.InMemory);
