@@ -36,11 +36,29 @@ public static class QbXmlErrors
     /// <summary>Quickbase's answer for a dbid it cannot find (live realm: errcode 83, "User token is invalid").</summary>
     public static QbXmlException UnknownDbid() => new(INVALID_USER_TOKEN, "Invalid error code: 83", "User token is invalid");
 
+    public const int WRONG_DBID_TYPE = 14;
+
+    /// <summary>
+    /// A table call sent to an application id (live realm: errcode 14 "Missing DBID or DBID of wrong type"); any other id the
+    /// caller cannot use stays <see cref="UnknownDbid"/>.
+    /// </summary>
+    public static async Task<QbXmlException> NotATableAsync(Common.QbIdResolver ids, string dbid, CancellationToken ct)
+    {
+        try
+        {
+            await ids.AppAsync(dbid, "dbid", ct);
+            return new QbXmlException(WRONG_DBID_TYPE, "Missing DBID or DBID of wrong type",
+                "This operation is only supported on individual tables and not on the application itself. Please check the URL.");
+        }
+        catch (Exception e) when (e is not OperationCanceledException) { return UnknownDbid(); }
+    }
+
     public static int HttpStatus(int errcode) => errcode switch
     {
         NO_ERROR => 200,
         NO_SUCH_RECORD or NO_SUCH_FIELD or NO_SUCH_OPERATION or NO_SUCH_QUERY => 404,
         UNKNOWN_USER => 401,
+        INSUFFICIENT_PERMISSIONS => 403,                 // live realm: errcode 3 answers HTTP 403
         _ => 400,
     };
 
@@ -73,6 +91,8 @@ public sealed class QbXmlException : Exception
     public string Detail { get; }
     /// <summary>Elements Quickbase still returns with this error (API_EditRecord update conflict returns the &lt;rid&gt;).</summary>
     public IReadOnlyList<System.Xml.Linq.XElement> Extra { get; init; } = Array.Empty<System.Xml.Linq.XElement>();
+    /// <summary>HTTP status when it differs from the errcode's usual one (live realm).</summary>
+    public int? Status { get; init; }
 
     public QbXmlException(int code, string text, string detail = "") : base(text)
     {

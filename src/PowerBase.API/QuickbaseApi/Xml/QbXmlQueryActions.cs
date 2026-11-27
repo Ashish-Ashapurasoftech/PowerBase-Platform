@@ -64,6 +64,7 @@ public sealed class QbXmlQueryActions
             var o = raw.ToLowerInvariant();
             if (o.StartsWith("num-") && int.TryParse(o[4..], out var n) && n >= 0) num = n;
             else if (o.StartsWith("skip-") && int.TryParse(o[5..], out var k) && k >= 0) skip = k;
+            else if (o.StartsWith("skp-") && int.TryParse(o[4..], out var kp) && kp >= 0) skip = kp;   // Quickbase's documented spelling
             else if (o.StartsWith("sortorder-")) order = raw[10..].Replace("-", "").ToUpperInvariant();
             else if (o == "onlynew") onlyNew = true;
             else if (o == "nosort") noSort = true;
@@ -93,10 +94,10 @@ public sealed class QbXmlQueryActions
     {
         Guid tableId;
         try { tableId = await _ids.TableAsync(dbid, "dbid", ct); }
-        catch (QbApiException) { throw QbXmlErrors.UnknownDbid(); }
+        catch (QbApiException) { throw await QbXmlErrors.NotATableAsync(_ids, dbid, ct); }
         AppTable table;
         try { table = await _tables.GetByPublicIdAsync(tableId, ct); }
-        catch (Domain.Exceptions.NotFoundException) { throw QbXmlErrors.UnknownDbid(); }
+        catch (Domain.Exceptions.NotFoundException) { throw await QbXmlErrors.NotATableAsync(_ids, dbid, ct); }
         await _access.RequireMembershipByTablePublicIdAsync(tableId, ct);
         return (table, await _fields.ListByTableAsync(table.Id, ct));
     }
@@ -189,7 +190,13 @@ public sealed class QbXmlQueryActions
             columns = live.Where(f => !QbFieldShape.IsSystem(f)).Select(f => (long)f.Fid!.Value).Distinct().OrderBy(f => f)
                 .Concat(live.Where(QbFieldShape.IsSystem).Select(f => (long)f.Fid!.Value).Distinct().OrderBy(f => f)).ToList();
         else if (!string.IsNullOrWhiteSpace(clistRaw))
+        {
             columns = ParseFidList(clistRaw).Where(known.Contains).Distinct().ToList();
+            // Live realm: a clist naming no field of the table (e.g. field names instead of ids) is refused.
+            if (columns.Count == 0)
+                throw new QbXmlException(QbXmlErrors.INSUFFICIENT_PERMISSIONS, "Insufficient permissions",
+                    "The report is unavailable, because none of the fields used as columns can be shown.<br/><br/>Try customizing the report.");
+        }
         else if (report?.Query.Fields is { Count: > 0 } rf)
             columns = rf.Where(known.Contains).ToList();
         else
@@ -221,6 +228,8 @@ public sealed class QbXmlQueryActions
 
         var where = report is not null ? report.Query.Filter : req.Get("query");
         if (string.IsNullOrWhiteSpace(where)) where = null;
+        // Live realm: a query holding no condition at all (e.g. "{bad}", no field.operator) is ignored — every record matches.
+        if (where is not null && System.Text.RegularExpressions.Regex.IsMatch(where, @"^\s*\{[^.{}]*\}\s*$")) where = null;
         // Quickbase answers a query it cannot read with no records instead of an error (live realm).
         // A report marked "only new or changed records" (Quickbase's List Changes; ours: sorted on Date Modified newest first —
         // see Qyopts) gives an API caller no records (live realm: qid=2 → none).

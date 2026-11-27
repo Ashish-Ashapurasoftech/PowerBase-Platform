@@ -49,14 +49,14 @@ public sealed class QbXmlImportActions
         // dbid: table Guid or numeric table id.
         Guid id;
         try { id = await _ids.TableAsync(dbid, "dbid", ct); }
-        catch (QbApiException) { throw QbXmlErrors.UnknownDbid(); }
+        catch (QbApiException) { throw await QbXmlErrors.NotATableAsync(_ids, dbid, ct); }
         try
         {
             var table = await _tables.GetByPublicIdAsync(id, ct);
             await _access.RequireMembershipByTablePublicIdAsync(id, ct);
             return table;
         }
-        catch (PowerBase.Domain.Exceptions.NotFoundException) { throw QbXmlErrors.UnknownDbid(); }
+        catch (PowerBase.Domain.Exceptions.NotFoundException) { throw await QbXmlErrors.NotATableAsync(_ids, dbid, ct); }
     }
 
     // ---------------------------------------------------------------- API_ImportFromCSV
@@ -98,7 +98,7 @@ public sealed class QbXmlImportActions
             skipFirst = true;
         }
         foreach (var fid in columns.Where(c => c != 0))
-            if (fields.All(f => f.Fid != fid)) throw new QbXmlException(QbXmlErrors.NO_SUCH_FIELD, "No such field", $"Field {fid} does not exist");
+            if (fields.All(f => f.Fid != fid)) throw new QbXmlException(QbXmlErrors.NO_SUCH_FIELD, "No such field", $"Sorry, there is no field in this application table with the field id \"{fid}\".");
 
         var mergeFid = int.TryParse(req.Get("mergeFieldId"), out var m) ? m : (int?)null;
         if (mergeFid is { } mf && !columns.Contains(mf))

@@ -27,7 +27,13 @@ public sealed class QbFieldsController : ControllerBase
     [ProducesResponseType(typeof(QbErrorBody), StatusCodes.Status404NotFound)]
     public async Task<IActionResult> GetFields([FromQuery] string? tableId, [FromQuery] string? includeFieldPerms, CancellationToken ct)
     {
-        var id = await _ids.TableAsync(tableId, "tableId", ct);
+        Guid id;
+        try { id = await _ids.TableAsync(tableId, "tableId", ct); }
+        catch (QbApiException) when (QbIdResolver.Classify(tableId, out _, out _) == QbIdResolver.IdKind.QuickbaseId)
+        {
+            // Live realm: getFields for a dbid the caller has no table for answers 401 "User token is invalid".
+            throw new QbApiException(401, "Access denied", "User token is invalid");
+        }
         var withPerms = QbQueryParams.ParseBool(includeFieldPerms, "includeFieldPerms") ?? false;
         return Ok(await _schema.GetFieldsAsync(id, withPerms, ct));
     }

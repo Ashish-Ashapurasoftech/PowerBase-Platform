@@ -59,7 +59,7 @@ public sealed class QbXmlRecordActions
         _get = get;
     }
 
-    private sealed record TableContext(AppTable Table, IReadOnlyList<AppField> Fields, TimeZoneInfo Zone)
+    private sealed record TableContext(AppTable Table, IReadOnlyList<AppField> Fields, TimeZoneInfo Zone, bool DayFirst = false)
     {
         public Guid PublicId => Table.PublicId;
     }
@@ -69,12 +69,12 @@ public sealed class QbXmlRecordActions
         // dbid: table Guid or numeric table id.
         Guid tableId;
         try { tableId = await _ids.TableAsync(dbid, "dbid", ct); }
-        catch (QbApiException) { throw QbXmlErrors.UnknownDbid(); }
+        catch (QbApiException) { throw await QbXmlErrors.NotATableAsync(_ids, dbid, ct); }
         AppTable table;
         try { table = await _tables.GetByPublicIdAsync(tableId, ct); }
-        catch (PowerBase.Domain.Exceptions.NotFoundException) { throw QbXmlErrors.UnknownDbid(); }
+        catch (PowerBase.Domain.Exceptions.NotFoundException) { throw await QbXmlErrors.NotATableAsync(_ids, dbid, ct); }
         await _access.RequireMembershipByTablePublicIdAsync(tableId, ct);
-        return new TableContext(table, await _fields.ListByTableAsync(table.Id, ct), await ZoneAsync(table, ct));
+        return new TableContext(table, await _fields.ListByTableAsync(table.Id, ct), await ZoneAsync(table, ct), await DayFirstAsync(table, ct));
     }
 
     /// <summary>The app's time zone: wall-clock date-times in XML calls are read in it, as Quickbase does.</summary>
@@ -87,6 +87,16 @@ public sealed class QbXmlRecordActions
     }
 
     private readonly Dictionary<long, TimeZoneInfo> _zones = new();
+    private readonly Dictionary<long, bool> _dayFirst = new();
+
+    /// <summary>The app's date format starts with the day (DD-MM-YYYY / DD-MM-YY): Quickbase then reads "03-01-2026" as 3 January.</summary>
+    private async Task<bool> DayFirstAsync(AppTable table, CancellationToken ct)
+    {
+        if (!_dayFirst.TryGetValue(table.AppId, out var dayFirst))
+            _dayFirst[table.AppId] = dayFirst = PowerBase.Domain.ValueObjects.AppFormattingSettings
+                .GetDateFormatString((await _apps.GetByIdAsync(table.AppId, ct)).Formatting).TrimStart().StartsWith("DD", StringComparison.OrdinalIgnoreCase);
+        return dayFirst;
+    }
 
     // ---------------------------------------------------------------- field matching / values
 
@@ -126,7 +136,7 @@ public sealed class QbXmlRecordActions
     }
 
     private async Task<object?> ConvertAsync(AppField field, string text, CancellationToken ct, bool msDuration = false,
-        TimeZoneInfo? zone = null, bool msInUtc = false)
+        TimeZoneInfo? zone = null, bool msInUtc = false, bool dayFirst = false)
     {
         var type = QbFieldPropertiesBuilder.TypeOf(field).FieldType;
         if (string.IsNullOrEmpty(text)) return type == "checkbox" ? false : null;
@@ -144,11 +154,10 @@ public sealed class QbXmlRecordActions
                 return text.Trim().ToLowerInvariant() is "1" or "yes" or "true" or "on";
             case "date":
                 // a date has no zone; text Quickbase cannot read is stored as empty (live realm: no error)
-                return ParseDate(text) is { } d ? d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) : null;
+                return ParseDate(text, dayFirst) is { } d ? d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) : null;
             case "timestamp":
-                // App time zone on save is turned off for now: date-times are always saved as UTC.
-                // return QbTimeZone.ParseToUtc(text, zone ?? TimeZoneInfo.Utc, msInUtc) is { } t
-                return QbTimeZone.ParseToUtc(text, TimeZoneInfo.Utc, msInUtc: true) is { } t
+                // Live realm: milliseconds and wall-clock text are read in the app's time zone unless msInUTC=1 (ISO 'T…Z' is UTC).
+                return QbTimeZone.ParseToUtc(text, zone ?? TimeZoneInfo.Utc, msInUtc) is { } t
                     ? t.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture) : null;
             case "timeofday":
                 // Quickbase XML reads "10:30 AM", "13:45", "1:05:09 pm" (live realm: 10:30 AM → 37800000 ms); stored as hh:mm:ss.
@@ -181,10 +190,13 @@ public sealed class QbXmlRecordActions
     }
 
     /// <summary>Quickbase XML dates: milliseconds since epoch (UTC) or MM-DD-YYYY; ISO is accepted too.</summary>
-    public static DateTime? ParseDate(string text)
+    public static DateTime? ParseDate(string text, bool dayFirst = false)
     {
         var s = text.Trim();
         if (long.TryParse(s, out var ms) && s.Length >= 9) return DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime;
+        // An app whose date format starts with the day reads DD-MM first; a text that cannot be a day-first date still falls back.
+        if (dayFirst && DateTime.TryParseExact(s, new[] { "dd-MM-yyyy", "d-M-yyyy", "dd/MM/yyyy", "d/M/yyyy", "dd-MM-yy", "d-M-yy" },
+                CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var df)) return df;
         if (DateTime.TryParseExact(s, new[] { "MM-dd-yyyy", "M-d-yyyy", "MM/dd/yyyy", "M/d/yyyy", "MM-dd-yyyy HH:mm", "MM-dd-yyyy hh:mm tt" },
                 CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var d)) return d;
         if (DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var iso)) return iso;
@@ -211,8 +223,22 @@ public sealed class QbXmlRecordActions
                 throw new QbXmlException(QbXmlErrors.CANNOT_CHANGE_FIELD, "You cannot change the value of this field",
                     $"The field named \"{(string.IsNullOrWhiteSpace(field.Label) ? field.Name : field.Label)}\" with field id {fid} cannot be modified");
             }
+            var label = string.IsNullOrWhiteSpace(field.Label) ? field.Name : field.Label;
+            var qbType = QbFieldPropertiesBuilder.TypeOf(field);
+            // Live realm: a lookup value is ignored; a formula / summary / report link cannot be written (errcode 34).
+            if (qbType.Mode == "lookup") continue;
+            if (qbType.Mode is "formula" or "summary" || qbType.FieldType == "dblink" || field.TypeCode.StartsWith("Formula", StringComparison.Ordinal))
+                throw new QbXmlException(QbXmlErrors.CANNOT_CHANGE_FIELD, "You cannot change the value of this field",
+                    $"The field named \"{label}\" with field id {fid} cannot be modified");
             if (!string.IsNullOrEmpty(xf.FileName)) { files.Add((field, xf)); continue; }
-            var converted = await ConvertAsync(field, xf.Value, ct, msDuration, t.Zone, msInUtc);
+            // Live realm: a rating takes only its choices 1-5 (and blank); text longer than the field's maximum is refused.
+            if (qbType.FieldType == "rating" && xf.Value.Trim().Length > 0
+                && !(decimal.TryParse(xf.Value.Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out var stars) && stars is >= 0 and <= 5 && stars == decimal.Truncate(stars)))
+                throw new QbXmlException(QbXmlErrors.INVALID_INPUT, "Invalid input", $"You must provide a valid choice for the field named \"{label}\" with field id {fid}. ");
+            if (qbType.FieldType is "text" or "text-multi-line" or "text-multiple-choice" && qbType.Mode == ""
+                && QbFieldPropertiesBuilder.BuildProperties(field).GetValueOrDefault("maxLength") is int max && max > 0 && xf.Value.Length > max)
+                throw new QbXmlException(QbXmlErrors.INVALID_INPUT, "Invalid input", $"Sorry, the data for the field named \"{label}\" with field id {fid} is too long.");
+            var converted = await ConvertAsync(field, xf.Value, ct, msDuration, t.Zone, msInUtc, t.DayFirst);
             // XML calls keep Quickbase's leniency: a value it cannot read is stored as empty instead of failing the call.
             try { values[fid] = QbRecordService.CheckValue(field, converted, lenient: true); }
             catch (QbApiException e) { throw new QbXmlException(QbXmlErrors.INVALID_INPUT, "Invalid input", e.Description); }
@@ -281,7 +307,16 @@ public sealed class QbXmlRecordActions
         if (req.Get("update_id") is { Length: > 0 } wanted && wanted.Trim() != currentUpdateId.ToString(CultureInfo.InvariantCulture))
             throw new QbXmlException(QbXmlErrors.UPDATE_CONFLICT, "Update conflict detected", "") { Extra = new[] { new System.Xml.Linq.XElement("rid", rid) } };
 
-        var (values, files) = await BuildValuesAsync(t, req, ct);
+        Dictionary<long, object?> values;
+        List<(AppField Field, QbXmlField Xml)> files;
+        try { (values, files) = await BuildValuesAsync(t, req, ct); }
+        catch (QbXmlException e) when (e.Code == QbXmlErrors.CANNOT_CHANGE_FIELD)
+        {
+            throw new QbXmlException(e.Code, e.Message, e.Detail)
+            {
+                Extra = new[] { new System.Xml.Linq.XElement("rid", rid), new System.Xml.Linq.XElement("num_fields_changed", 0), new System.Xml.Linq.XElement("update_id", "") },
+            };
+        }
         ValidateFiles(files); // a bad file must not leave the other fields half-saved
         var changed = 0;
         foreach (var (fid, value) in values)
@@ -297,7 +332,7 @@ public sealed class QbXmlRecordActions
     public async Task<(long Rid, long UpdateId, bool IsNew, bool Changed)> ImportRowAsync(AppTable table, IReadOnlyList<AppField> fields, int keyFid,
         string? keyValue, IReadOnlyList<QbXmlField> rowFields, bool msInUtc, CancellationToken ct)
     {
-        var t = new TableContext(table, fields, await ZoneAsync(table, ct));
+        var t = new TableContext(table, fields, await ZoneAsync(table, ct), await DayFirstAsync(table, ct));
         (long Rid, Guid PublicId)? existing = null;
         if (!string.IsNullOrWhiteSpace(keyValue))
         {
@@ -396,7 +431,8 @@ public sealed class QbXmlRecordActions
         var t = await LoadTableAsync(req.DbId, ct);
         var (_, publicId) = await FindRecordAsync(t, req, ct);
         // Only file fields matter here; other <field> elements (e.g. an e-mail shown in the official sample) are ignored.
-        var (_, files) = await BuildValuesAsync(t, req.Fields.Where(f => !string.IsNullOrEmpty(f.FileName)), true, ct);
+        var (_, files) = await BuildValuesAsync(t, req.Fields.Where(f => !string.IsNullOrEmpty(f.FileName)
+            && TryMatchField(t.Fields, f) is { } ff && ff.TypeCode.Equals("File", StringComparison.OrdinalIgnoreCase)), true, ct);
         if (files.Count == 0)
             throw new QbXmlException(QbXmlErrors.INVALID_INPUT, "Invalid input", "No fields supplied");
         var stored = await SaveFilesAsync(t, publicId, files, ct);

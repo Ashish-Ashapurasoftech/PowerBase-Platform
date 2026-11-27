@@ -22,6 +22,7 @@ public sealed partial class QbRecordService
     public const int DELETE_CHUNK = 500;
 
     private readonly IAppTableRepository _tables;
+    private readonly IServiceProvider? _services;
     private readonly IAppRepository _apps;
     private readonly IAppFieldRepository _fields;
     private readonly IRecordRepository _records;
@@ -41,8 +42,10 @@ public sealed partial class QbRecordService
     public QbRecordService(IAppRepository apps, IAppTableRepository tables, IAppFieldRepository fields, IRecordRepository records, IUserRepository users,
         IAppAccessService access, IRolePermissionEnforcer enforcer, CreateRecordCommandHandler create, UpdateRecordCommandHandler update,
         GetRecordQueryHandler get, BulkDeleteRecordsCommandHandler bulkDelete, QbUserValueResolver userValues,
-        IFileStorageService storage, IQueryContext identity, QbIdResolver ids, QbReferenceTypes referenceTypes)
+        IFileStorageService storage, IQueryContext identity, QbIdResolver ids, QbReferenceTypes referenceTypes,
+        IServiceProvider? services = null)
     {
+        _services = services;
         _referenceTypes = referenceTypes;
         _ids = ids;
         _storage = storage;
@@ -65,6 +68,12 @@ public sealed partial class QbRecordService
 
     public async Task<UpsertOutcome> UpsertAsync(QbUpsertRequest request, CancellationToken ct)
     {
+        // Live realm: every body problem is listed; two or more → "Multiple errors found" with details ('to' first).
+        var bodyErrors = new List<string>();
+        if (string.IsNullOrWhiteSpace(request.To) && request.To is null) bodyErrors.Add("Required key 'to' not found");
+        if (request.Data is null) bodyErrors.Add("Required key 'data' not found");
+        else if (request.Data.Count == 0) bodyErrors.Add("'data' must NOT have fewer than 1 items");
+        if (bodyErrors.Count > 1) throw new QbApiException(400, "Bad Request", "Multiple errors found") { Details = bodyErrors };
         if (request.Data is null) throw QbApiException.BadRequest("Required key 'data' not found");
         if (request.Data.Count == 0) throw QbApiException.BadRequest("'data' must NOT have fewer than 1 items");
         for (var r = 0; r < request.Data.Count; r++)
@@ -198,7 +207,7 @@ public sealed partial class QbRecordService
             var v = cell.GetProperty("value");
             if (v.ValueKind == JsonValueKind.Null && fid != QbIds.RECORD_ID_FID) continue; // Quickbase: "value": null leaves the field as it is
             if (fid != QbIds.RECORD_ID_FID && ReadOnlyKind(field) is { } kind)
-                throw QbApiException.BadRequest($"Can not change the value of the {kind} field with ID \"{fid}\".");
+                throw QbApiException.BadRequest($"Cannot change the value of the {kind} field with ID \"{fid}\".");
             values[fid] = CheckValue(field, await ToOurValueAsync(v, field, ct));
         }
         return values;
@@ -293,7 +302,9 @@ public sealed partial class QbRecordService
     /// </summary>
     public static object? CheckValue(AppField field, object? value, bool lenient = false)
     {
-        if (value is null || value is string { Length: 0 }) return value;
+        // Quickbase has one "blank": an empty text is stored as no value, so it sorts and filters like any other blank.
+        if (value is string { Length: 0 }) return null;
+        if (value is null) return value;
         var type = QbFieldPropertiesBuilder.TypeOf(field).FieldType;
         var mode = QbFieldPropertiesBuilder.TypeOf(field).Mode;
         if (mode is "formula" or "lookup" or "summary" or "virtual") return value; // read-only: reported by the caller
@@ -546,9 +557,9 @@ public sealed partial class QbRecordService
         if (keyFid == QbIds.RECORD_ID_FID)
         {
             if (!long.TryParse(Convert.ToString(keyValue, System.Globalization.CultureInfo.InvariantCulture), out var rid))
-                throw QbApiException.BadRequest($"Can not find record by ID \"{keyValue}\".");
+                throw QbApiException.BadRequest($"Cannot find record by ID \"{keyValue}\".");
             if (!await _records.ExistsAsync(table, rid, ct))
-                throw QbApiException.BadRequest($"Can not find record by ID \"{rid}\".");
+                throw QbApiException.BadRequest($"Cannot find record by ID \"{rid}\".");
             ids = new[] { rid };
         }
         else
@@ -682,7 +693,7 @@ public sealed partial class QbRecordService
     public static IReadOnlyCollection<string> NamedUserKeys(IEnumerable<long> fids, IReadOnlyDictionary<long, AppField> byFid,
         IReadOnlyDictionary<long, QbFieldType>? refTypes = null) =>
         fids.Where(f => byFid.TryGetValue(f, out var x) && !QbUserValueResolver.IsStoredUserField(x)
-                && QbFieldPropertiesBuilder.TypeOf(x, refTypes).FieldType is "user" or "multiuser")
+                && QbFieldPropertiesBuilder.TypeOf(x, refTypes).FieldType is "user" or "multiuser" or "file")
             .Select(f => f.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToList();
 
     private async Task<IDictionary<string, QbCell>> ReadFieldsAsync(Guid tableId, long rid, Guid publicId, IReadOnlyList<int> fids,

@@ -38,6 +38,25 @@ public static class QbWhereParser
             if (node.Group is { } g) { TypedValues(g, typeOf); continue; }
             if (node.Condition is not { } c || c.ValueFieldId is not null || !string.IsNullOrEmpty(c.SubField) || c.Value is null) continue;
             var type = typeOf(c.FieldId);
+            var raw = c.Value.Trim().Trim('\'');
+            // Live realm: a date / date-time compared with milliseconds since 1970 ({16.OAF.1773568800000}) is that instant.
+            if (type is "date" or "timestamp" && raw.Length >= 9 && raw.All(char.IsDigit) && long.TryParse(raw, out var ms))
+            {
+                var at = DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime;
+                c.Value = type == "date" ? at.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)
+                    : at.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture);
+                continue;
+            }
+            // Live realm: an unchecked box and a blank one are the same "0" ({19.EX.0} finds both; {19.XEX.1} too).
+            if (type == "checkbox" && ((c.Operator == "eq" && raw is "0" or "false" or "") || (c.Operator == "ne" && raw is "1" or "true")))
+            {
+                var either = new FilterGroup { Logic = "OR" };
+                either.Nodes.Add(new FilterNode { Condition = new FilterCondition { FieldId = c.FieldId, Operator = "eq", Value = c.Operator == "eq" ? c.Value : "0" } });
+                either.Nodes.Add(new FilterNode { Condition = new FilterCondition { FieldId = c.FieldId, Operator = "isEmpty" } });
+                node.Condition = null;
+                node.Group = either;
+                continue;
+            }
             if (type == "phone" && c.Operator is "eq" or "ne" or "contains" or "notContains" or "startsWith" or "notStartsWith" or "endsWith" or "notEndsWith")
                 c.Value = PhoneDigits(c.Value);
             else if (type == "multitext" && c.Value.Contains(';'))
