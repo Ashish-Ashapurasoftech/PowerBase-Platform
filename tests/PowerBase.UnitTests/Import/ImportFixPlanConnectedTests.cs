@@ -64,7 +64,15 @@ public class ImportFixPlanConnectedTests
                   Name: Clients
                   ExternalSetIsInSolution: true
                   ExternalSetId: bteqnet5d
+                  PrimaryKey:
+                    - !Ref
+                      ConnectedColumn: $ConnectedColumn_Client_ID
                 Columns:
+                  $ConnectedColumn_Client_ID:
+                    Type: QB::ConnectedColumn::Text
+                    Id: 6
+                    Properties:
+                      Name: Client ID
                   $ConnectedColumn_Name:
                     Type: QB::ConnectedColumn::Text
                     Id: 7
@@ -89,8 +97,18 @@ public class ImportFixPlanConnectedTests
         connected.SourceQbTableId.Should().Be("bteqnet5d");
         connected.UpdateMode.Should().Be("Destructive");
         connected.CronTab.Should().Be("19 11,12,13 * * *");
+        connected.RefreshKeySourceFid.Should().Be(6, "the record set's PrimaryKey (Client ID) is Quickbase's refresh key");
         connected.Fields.Should().ContainSingle().Which.Should().Match<PowerBase.Application.Import.Pbl.PblConnectedField>(f => f.FieldName == "Name" && f.SourceFid == 7);
         connected.FilterConditions.Should().ContainSingle().Which.Should().Match<PowerBase.Application.Import.Pbl.PblConnectedFilter>(f => f.SourceFid == 9 && f.Operator == "notContains" && f.Value == "Closed");
+    }
+
+    [Fact]
+    public void BuildCommand_CarriesTheRefreshKey()
+    {
+        var command = PblConnectedTablesApplier.BuildCommand(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
+            new PblConnectedTable { RefreshKeySourceFid = 6, Fields = [new PblConnectedField { FieldName = "Client ID", SourceFid = 6 }] });
+
+        command.RefreshKeySourceFid.Should().Be(6);
     }
 
     [Theory]

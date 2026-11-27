@@ -18,7 +18,7 @@ public sealed record ConnectExistingFieldMapping(string DestinationFieldName, in
 /// <summary>Turns a table that already exists (made by an app import) into a connected table of a table in another app of the same realm.</summary>
 public sealed record ConnectExistingTableCommand(
     Guid DestinationTablePublicId, Guid SourceAppPublicId, Guid SourceTablePublicId, IReadOnlyList<ConnectExistingFieldMapping> Fields,
-    string UpdateMode, ConnectedSchedule? Schedule, bool NotifyOnFailure, FilterGroup? Filter);
+    string UpdateMode, ConnectedSchedule? Schedule, bool NotifyOnFailure, FilterGroup? Filter, int? RefreshKeySourceFid = null);
 
 public sealed record ConnectExistingTableResult(Guid ConnectedTablePublicId, int FieldsConnected, IReadOnlyList<string> Notes);
 
@@ -102,8 +102,23 @@ public sealed class ConnectExistingTableHandler(
             });
         }
 
-        // The refresh key is the source's Record ID#; when the file did not map it to a field, add the module's usual extra field for it.
-        if (mappings.All(m => m.SourceFid != ConnectedSystemFids.RecordId))
+        // The refresh key: the file's PrimaryKey (Quickbase's refresh key, e.g. Client ID), else the source table's own key field,
+        // as long as it is a connected field that holds one plain value per record; otherwise the source's Record ID#.
+        bool Keyable(int? fid)
+        {
+            if (fid is not int f || f == ConnectedSystemFids.RecordId || mappings.All(m => m.SourceFid != f)) return false;
+            var field = source.FindVisible(f);
+            return field is not null && !field.IsSystem && ConnectedTableHandlers.KeyTypes.Contains(field.TypeCode);
+        }
+        var sourceKeyFid = source.Table.KeyFieldId is long keyFieldId ? source.VisibleFields.FirstOrDefault(f => f.Id == keyFieldId)?.Fid : null;
+        var refreshKeyFid = Keyable(command.RefreshKeySourceFid) ? command.RefreshKeySourceFid!.Value
+            : Keyable(sourceKeyFid) ? sourceKeyFid!.Value
+            : ConnectedSystemFids.RecordId;
+        if (command.RefreshKeySourceFid is int wanted && wanted != ConnectedSystemFids.RecordId && wanted != refreshKeyFid)
+            notes.Add($"The file's refresh key (source field {wanted}) is not a connected field that can be a key; {(refreshKeyFid == ConnectedSystemFids.RecordId ? "Record ID#" : $"source field {refreshKeyFid}")} is used instead.");
+
+        // A Record ID# key needs the source's Record ID# connected; when the file did not map it to a field, add the module's usual extra field for it.
+        if (refreshKeyFid == ConnectedSystemFids.RecordId && mappings.All(m => m.SourceFid != ConnectedSystemFids.RecordId))
         {
             var recordId = source.FindVisible(ConnectedSystemFids.RecordId);
             if (recordId is not null)
@@ -145,8 +160,8 @@ public sealed class ConnectExistingTableHandler(
             SourceTablePublicId = source.Table.PublicId,
             SourceTableName = source.Table.Name,
             IsCrossTenant = access.IsCrossTenant,
-            RefreshKeySourceFid = ConnectedSystemFids.RecordId,
-            RefreshKeyIsAuto = true,
+            RefreshKeySourceFid = refreshKeyFid,
+            RefreshKeyIsAuto = refreshKeyFid == ConnectedSystemFids.RecordId,
             UpdateMode = command.UpdateMode,
             FilterEnabled = filter is not null,
             FilterJson = filter is null ? null : System.Text.Json.JsonSerializer.Serialize(filter),

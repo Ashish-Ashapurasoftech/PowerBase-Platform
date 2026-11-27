@@ -87,6 +87,10 @@ public sealed class PblConnectedTable
     /// <summary>"Destructive" (match the source exactly) or anything else (keep everything and add new).</summary>
     public string UpdateMode { get; set; } = "Destructive";
 
+    /// <summary>The source field (FID) the record set names as its <c>PrimaryKey</c> — Quickbase's refresh key (e.g. Client ID).
+    /// Null when the file names none or more than one; the connector then falls back to the source table's key field.</summary>
+    public int? RefreshKeySourceFid { get; set; }
+
     /// <summary>Quickbase cron: minute hour day-of-month month day-of-week. Null = refreshed by hand.</summary>
     public string? CronTab { get; set; }
     public bool NotifyOnFailure { get; set; } = true;

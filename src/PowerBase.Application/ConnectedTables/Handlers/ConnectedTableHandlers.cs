@@ -98,7 +98,7 @@ public sealed class ConnectedTableHandlers(
     ILogger<ConnectedTableHandlers> logger)
 {
     /// <summary>Field types that make a sensible refresh key: one plain value per record.</summary>
-    private static readonly HashSet<string> KeyTypes = new(StringComparer.Ordinal)
+    internal static readonly HashSet<string> KeyTypes = new(StringComparer.Ordinal)
     {
         "Text", "Number", "Currency", "Percent", "Rating", "Email", "Phone", "Url", "Date", "DateTime", "SingleSelect", "Reference",
     };

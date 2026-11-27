@@ -2628,6 +2628,11 @@ public static class QblToPblConverter
             UpdateMode = data.GetValueOrDefault("UpdateMode")?.ToString() ?? "Destructive",
         };
 
+        // The record set's PrimaryKey is Quickbase's refresh key (Client ID, Program ID…). Only a single-column key can be carried.
+        if (recordSet.Properties.TryGetValue("PrimaryKey", out var primaryKey) && primaryKey is List<object?> keyParts && keyParts.Count == 1
+            && (keyParts[0] as QblRef)?["ConnectedColumn"] is { } keyColumnRef && columns.TryGetValue(keyColumnRef, out var keyColumn))
+            connected.RefreshKeySourceFid = keyColumn.SourceId;
+
         if (data.GetValueOrDefault("Schedule") is Dictionary<string, object?> schedule)
         {
             connected.CronTab = NullIfBlank(schedule.GetValueOrDefault("CronTab")?.ToString());

@@ -75,6 +75,8 @@ public static class ConnectedConversions
     public const string UserToEmail = "user_to_email";
     /// <summary>A reference stores the parent's source Record ID# as a number.</summary>
     public const string ReferenceToNumber = "reference_to_number";
+    /// <summary>A reference filling a text field: the text the reference shows (the parent's key value), as Quickbase copies it.</summary>
+    public const string ReferenceToKey = "reference_to_key";
     /// <summary>A value with no matching destination type stored as text.</summary>
     public const string ToText = "to_text";
 }

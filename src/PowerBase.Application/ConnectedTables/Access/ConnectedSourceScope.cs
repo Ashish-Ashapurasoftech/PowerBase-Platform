@@ -97,6 +97,67 @@ public sealed class ConnectedSourceScope : IAsyncDisposable
         return Get<IFormulaProjector>().Project(fields, rows, related, table);
     }
 
+    private readonly Dictionary<long, (AppTable Parent, AppField? Key, IReadOnlyList<AppField> ReadFields)?> _referenceTargets = [];
+
+    /// <summary>The text each parent record shows in <paramref name="reference"/> (the relationship's display key, else the parent
+    /// table's key, else its Record ID#), by parent Record ID#. Parents that no longer exist are left out.</summary>
+    public async Task<IReadOnlyDictionary<long, string?>> ReadReferenceKeysAsync(AppField reference, IReadOnlyCollection<long> parentIds, CancellationToken ct)
+    {
+        var result = new Dictionary<long, string?>();
+        if (parentIds.Count == 0) return result;
+
+        if (!_referenceTargets.TryGetValue(reference.Id, out var target))
+        {
+            target = null;
+            var settings = ReadReferenceSettings(reference.Settings);
+            if (settings?.ParentTableId is long parentTableId)
+            {
+                AppTable? parent = null;
+                try { parent = await Get<IAppTableRepository>().GetByIdAsync(parentTableId, ct); }
+                catch (NotFoundException) { }
+                if (parent is not null && !parent.IsDeleted)
+                {
+                    var relationship = settings.RelationshipId is long relId ? await Get<IRelationshipRepository>().GetByIdAsync(relId, ct) : null;
+                    var parentFields = await ListFieldsAsync(parent.Id, ct);
+                    var key = KeyFieldResolver.ResolveDisplayKey(relationship, parent, parentFields);
+                    var recordId = parentFields.FirstOrDefault(f => f.IsSystem && f.Fid == ConnectedSystemFids.RecordId);
+                    var readFields = new[] { recordId, key }.Where(f => f is not null).Select(f => f!).ToList();
+                    if (readFields.Count > 0) target = (parent, key, readFields);
+                }
+            }
+            _referenceTargets[reference.Id] = target;
+        }
+        if (target is not { } t) return result;
+
+        var records = Get<IRecordRepository>();
+        foreach (var batch in parentIds.Distinct().Chunk(1000))
+        {
+            var filter = new FilterGroup
+            {
+                Logic = "and",
+                Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = ConnectedSystemFids.RecordId, Operator = "in", Value = System.Text.Json.JsonSerializer.Serialize(batch) } }],
+            };
+            var rows = await records.ListAllMatchingAsync(t.Parent, t.ReadFields, filter, ct: ct);
+            foreach (var row in rows)
+            {
+                var id = Convert.ToInt64(row["Id"], CultureInfo.InvariantCulture);
+                if (t.Key is null) { result[id] = id.ToString(CultureInfo.InvariantCulture); continue; }
+                var column = KeyFieldResolver.ColumnName(t.Key);
+                var raw = row.TryGetValue(column, out var v) ? v : null;
+                var text = raw is null or DBNull ? null : KeyFieldResolver.FormatForSubmit(raw);
+                result[id] = string.IsNullOrEmpty(text) ? null : text;
+            }
+        }
+        return result;
+    }
+
+    private static PowerBase.Domain.FieldSettings.ReferenceSettings? ReadReferenceSettings(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try { return System.Text.Json.JsonSerializer.Deserialize<PowerBase.Domain.FieldSettings.ReferenceSettings>(json, new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true }); }
+        catch (System.Text.Json.JsonException) { return null; }
+    }
+
     public IReadOnlySet<long>? GetFormulaDependencies(IReadOnlyList<AppField> fields, IEnumerable<long> formulaFids) =>
         Get<IFormulaProjector>().GetFormulaDependencies(fields, formulaFids);
 

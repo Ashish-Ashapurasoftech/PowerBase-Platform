@@ -220,7 +220,7 @@ public class PblConnectedTablesApplier(
         new(destinationTablePublicId, sourceAppPublicId, sourceTablePublicId,
             connected.Fields.Where(f => f.SourceFid.HasValue).Select(f => new ConnectExistingFieldMapping(f.FieldName, f.SourceFid!.Value)).ToList(),
             string.Equals(connected.UpdateMode, "Destructive", StringComparison.OrdinalIgnoreCase) ? ConnectedUpdateModes.Mirror : ConnectedUpdateModes.Append,
-            ToSchedule(connected.CronTab), connected.NotifyOnFailure, ToFilter(connected));
+            ToSchedule(connected.CronTab), connected.NotifyOnFailure, ToFilter(connected), connected.RefreshKeySourceFid);
 
     /// <summary>Quickbase cron (minute hour day-of-month month day-of-week) → the module's schedule. A list of hours is an hourly window
     /// from the first to the last hour; the minute is chosen by the server.</summary>

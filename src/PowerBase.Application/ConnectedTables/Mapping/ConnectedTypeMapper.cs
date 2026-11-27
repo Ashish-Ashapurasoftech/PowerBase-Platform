@@ -112,6 +112,18 @@ public static class ConnectedTypeMapper
         return Family(plan.DestinationTypeCode) is { } a && a == Family(destinationType);
     }
 
+    /// <summary>The plan that fills a destination field of <paramref name="destinationType"/> from <paramref name="source"/>, or null when
+    /// it cannot. Besides the compatible types, a text field also takes a choice (its text) and a reference (the parent key it shows):
+    /// a Quickbase connected table stores both as text, so an imported connected table has Text fields where the source has these.</summary>
+    public static ConnectedFieldPlan? Fit(AppField source, ConnectedFieldPlan plan, string destinationType)
+    {
+        if (IsCompatible(plan, destinationType)) return plan;
+        if (!plan.Connectable || Family(destinationType) != "text") return null;
+        if (source.TypeCode == "Reference") return plan with { DestinationTypeCode = destinationType, Conversion = ConnectedConversions.ReferenceToKey, Settings = null };
+        if (plan.DestinationTypeCode == "SingleSelect") return plan with { DestinationTypeCode = destinationType, Conversion = ConnectedConversions.ToText, Settings = null };
+        return null;
+    }
+
     private static string? Family(string? type) => type switch
     {
         "Text" or "TextMultiLine" or "RichText" or "Email" or "Phone" or "Url" => "text",

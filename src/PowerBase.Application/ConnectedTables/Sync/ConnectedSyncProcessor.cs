@@ -177,8 +177,8 @@ public sealed class ConnectedSyncProcessor(
                 (problem, state) = ($"\"{mapping.SourceFieldName}\" is no longer available in the source (deleted, or hidden from the connected user). Its values were kept.", ConnectedFieldStates.SourceMissing);
             else if (sourceField.IsEncrypted && !access.AllowsEncryptedFields)
                 (problem, state) = ($"\"{mapping.SourceFieldName}\" is encrypted, and the source realm's approval does not allow copying encrypted fields.", ConnectedFieldStates.SourceMissing);
-            else if (!ConnectedTypeMapper.IsCompatible(plan = ConnectedTypeMapper.Plan(sourceField, access.IsCrossTenant), destinationField.TypeCode))
-                (problem, state) = ($"\"{mapping.SourceFieldName}\" changed type in the source and can no longer fill \"{destinationField.Label ?? destinationField.Name}\". Its values were kept.", ConnectedFieldStates.TypeConflict);
+            else if ((plan = ConnectedTypeMapper.Fit(sourceField, ConnectedTypeMapper.Plan(sourceField, access.IsCrossTenant), destinationField.TypeCode)) is null)
+                (problem, state) = ($"\"{mapping.SourceFieldName}\" is a {sourceField.TypeCode} field in the source, which can't fill \"{destinationField.Label ?? destinationField.Name}\" ({destinationField.TypeCode}). Its values were kept.", ConnectedFieldStates.TypeConflict);
 
             if (problem is not null)
             {
@@ -216,6 +216,11 @@ public sealed class ConnectedSyncProcessor(
 
         var computedActive = active.Any(a => PhysicalNaming.IsComputedTypeCode(a.Source.TypeCode));
         var readFields = BuildReadFields(source, active, keyField, recordIdField, dateModifiedField, baseFilter, computedActive);
+        // References filling a text field copy the parent key they show; a row with no parent shows the text kept in the
+        // reference's hidden "(original)" field instead, so that field is read too.
+        var referenceKeyFields = active.Where(a => a.Plan.Conversion == ConnectedConversions.ReferenceToKey)
+            .Select(a => (Active: a, Original: OriginalField(source, a.Source))).ToList();
+        readFields = Distinct(readFields, referenceKeyFields.Where(r => r.Original is not null).Select(r => r.Original!));
         var projectionFields = computedActive ? source.VisibleFields : null;
         var keyReadFields = Distinct([recordIdField, keyField], FilterLookupFields(source, baseFilter));
 
@@ -223,7 +228,8 @@ public sealed class ConnectedSyncProcessor(
         // Only scheduled refreshes take the incremental shortcut; a manual "Refresh data" always compares everything.
         var dateCreatedField = source.AllFields.FirstOrDefault(f => f.IsSystem && f.Fid == ConnectedSystemFids.DateCreated);
         var incremental = _options.IncrementalRefresh && run.TriggeredBy == ConnectedRunTriggers.Schedule
-            && !computedActive && dateModifiedField is not null && dateCreatedField is not null && !run.ConfirmMassDelete
+            // A parent key shown through a reference changes without the child record changing, like a lookup: compare everything.
+            && !computedActive && referenceKeyFields.Count == 0 && dateModifiedField is not null && dateCreatedField is not null && !run.ConfirmMassDelete
             && table.LastSourceWatermark is not null && table.WatermarkVersion == snapshot.FullRefreshVersion
             && table.IncrementalRunCount < Math.Max(1, _options.FullRefreshEvery);
         var runStartedUtc = DateTime.UtcNow;
@@ -276,6 +282,19 @@ public sealed class ConnectedSyncProcessor(
             if (needsEmails) await LoadEmailsAsync(rows, computed, active, emails, ct);
             string? EmailOf(long id) => emails.GetValueOrDefault(id);
 
+            var parentKeys = new Dictionary<long, IReadOnlyDictionary<long, string?>>();
+            foreach (var (reference, _) in referenceKeyFields)
+            {
+                var parentIds = rows.Select(r => ParentId(ConnectedValues.Read(reference.Source, r, null))).OfType<long>().ToList();
+                parentKeys[reference.Source.Id] = await access.Scope.ReadReferenceKeysAsync(reference.Source, parentIds, ct);
+            }
+            object? ReferenceText(ActiveField a, IReadOnlyDictionary<string, object?> row, object? raw)
+            {
+                if (ParentId(raw) is long parentId && parentKeys[a.Source.Id].TryGetValue(parentId, out var key) && key is not null) return key;
+                var original = referenceKeyFields.First(r => r.Active == a).Original;
+                return original is null ? null : ConnectedValues.Convert(ConnectedConversions.ToText, ConnectedValues.Read(original, row, null), EmailOf);
+            }
+
             var items = new List<Item>(rows.Count);
             var chunkKeys = new HashSet<string>(StringComparer.Ordinal);
             for (var i = 0; i < rows.Count; i++)
@@ -301,7 +320,8 @@ public sealed class ConnectedSyncProcessor(
                 foreach (var a in active)
                 {
                     var fid = (long)a.Destination.Fid!.Value;
-                    var value = ConnectedValues.Convert(a.Plan.Conversion, ConnectedValues.Read(a.Source, row, computedRow), EmailOf);
+                    var raw = ConnectedValues.Read(a.Source, row, computedRow);
+                    var value = a.Plan.Conversion == ConnectedConversions.ReferenceToKey ? ReferenceText(a, row, raw) : ConnectedValues.Convert(a.Plan.Conversion, raw, EmailOf);
                     values[fid] = value;
                     var c = ConnectedValues.Normalize(a.Destination.TypeCode, value);
                     canonical[fid] = c;
@@ -362,7 +382,7 @@ public sealed class ConnectedSyncProcessor(
         var status = partial || run.Skipped > 0 || run.Errored > 0 ? ConnectedRunStatuses.Partial : ConnectedRunStatuses.Success;
         await runs.CompleteAsync(run, status, status == ConnectedRunStatuses.Partial ? "Some fields or records could not be refreshed. See the issues." : null, ct);
         await connectedTables.RecordSuccessAsync(table.Id, DateTime.UtcNow,
-            computedActive ? null : runStartedUtc, computedActive ? null : snapshot.FullRefreshVersion, incremental, ct);
+            computedActive || referenceKeyFields.Count > 0 ? null : runStartedUtc, computedActive || referenceKeyFields.Count > 0 ? null : snapshot.FullRefreshVersion, incremental, ct);
 
         var liveNow = await writer.CountLiveRecordsAsync(destination, ct);
         await control.RecordLinkRunAsync(consumerTenantId, table.PublicId, liveNow, ct);
@@ -592,6 +612,21 @@ public sealed class ConnectedSyncProcessor(
         if (a is null || a.Nodes.Count == 0) return b is { Nodes.Count: > 0 } ? b : null;
         if (b is null || b.Nodes.Count == 0) return a;
         return new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = a }, new FilterNode { Group = b }] };
+    }
+
+    /// <summary>The parent Record ID# a reference value holds, or null.</summary>
+    private static long? ParentId(object? value) => ConnectedValues.UserIds(value).Select(id => (long?)id).FirstOrDefault();
+
+    /// <summary>A reference's hidden "(original)" field: the text rows kept when they had no parent record (see <see cref="ReferenceSettings.OriginalFid"/>).</summary>
+    private static AppField? OriginalField(ConnectedSourceTable source, AppField reference)
+    {
+        if (string.IsNullOrWhiteSpace(reference.Settings)) return null;
+        try
+        {
+            var settings = JsonSerializer.Deserialize<PowerBase.Domain.FieldSettings.ReferenceSettings>(reference.Settings, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            return settings?.OriginalFid is int fid ? source.AllFields.FirstOrDefault(f => f.Fid == fid && !f.IsDeleted) : null;
+        }
+        catch (JsonException) { return null; }
     }
 
     private static long RecordId(IReadOnlyDictionary<string, object?> row) => Convert.ToInt64(row["Id"], CultureInfo.InvariantCulture);

@@ -119,4 +119,43 @@ public class ConnectedTypeMapperTests
         ConnectedTypeMapper.IsCompatible(plan, "TextMultiLine").Should().BeTrue();
         ConnectedTypeMapper.IsCompatible(plan, "Number").Should().BeFalse();
     }
+
+    // An imported Quickbase connected table stores choices and references as Text (client feedback: Gender / Client ID showed "Type changed in source").
+    [Fact]
+    public void Fit_ChoiceIntoText_CopiesTheChoiceText()
+    {
+        var source = Field("SingleSelect");
+        var plan = ConnectedTypeMapper.Fit(source, ConnectedTypeMapper.Plan(source, crossTenant: false), "Text");
+
+        plan.Should().NotBeNull();
+        plan!.Conversion.Should().Be(ConnectedConversions.ToText);
+        plan.DestinationTypeCode.Should().Be("Text");
+    }
+
+    [Fact]
+    public void Fit_ReferenceIntoText_CopiesTheParentKey()
+    {
+        var source = Field("Reference");
+        var plan = ConnectedTypeMapper.Fit(source, ConnectedTypeMapper.Plan(source, crossTenant: false), "Text");
+
+        plan.Should().NotBeNull();
+        plan!.Conversion.Should().Be(ConnectedConversions.ReferenceToKey);
+    }
+
+    [Fact]
+    public void Fit_ReferenceIntoNumber_StillCopiesTheRecordId()
+    {
+        var source = Field("Reference");
+        ConnectedTypeMapper.Fit(source, ConnectedTypeMapper.Plan(source, crossTenant: false), "Number")!.Conversion.Should().Be(ConnectedConversions.ReferenceToNumber);
+    }
+
+    [Theory]
+    [InlineData("SingleSelect", "Number")]
+    [InlineData("Date", "Text")]
+    [InlineData("Boolean", "Text")]
+    public void Fit_OtherMismatches_StayAConflict(string sourceType, string destinationType)
+    {
+        var source = Field(sourceType);
+        ConnectedTypeMapper.Fit(source, ConnectedTypeMapper.Plan(source, crossTenant: false), destinationType).Should().BeNull();
+    }
 }
