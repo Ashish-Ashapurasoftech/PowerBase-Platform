@@ -170,7 +170,9 @@ if (!string.IsNullOrWhiteSpace(azureMonitorConnection) && !azureMonitorConnectio
         o.ConnectionString = azureMonitorConnection;
         // The background workers poll SQL every few seconds; sampling keeps that volume, and the ingestion bill, down.
         o.SamplingRatio = builder.Configuration.GetValue("ApplicationInsights:SamplingRatio", 0.25f);
-    });
+    })
+    // Cache hit/miss/bytes and report repeat counts (doc 34 §4): customMetrics in Application Insights.
+    .WithMetrics(m => m.AddMeter(PowerBase.Application.Common.Caching.CacheMetrics.MeterName));
 }
 
 

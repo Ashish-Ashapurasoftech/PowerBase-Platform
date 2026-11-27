@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using PowerBase.Application.Common.Caching;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Compute;
 using PowerBase.Application.Formulas;
@@ -229,6 +230,9 @@ public class RunReportQueryHandler
         var isAppEncrypted = app?.IsEncrypted ?? false;
         var access = accessTask.Result;
         var appPerms = appPermsTask.Result;
+        // Doc 23 §3, measure only: how often the very same question (user, report definition, every run parameter) comes again within 60 s.
+        // That rate decides whether a result cache is worth building; nothing is cached here.
+        CacheMetrics.ReportRun(report.ReportType ?? "Table", isAppEncrypted, ReportRepeatProbe.IsRepeat(QuestionHash(query, report)));
         // Only genuine report designers (create or update capability) qualify for masked builder
         // preview. ReportsRead is a viewer-level permission — those users have no design intent
         // and must be blocked entirely when they lack table data access, not shown masked rows.
@@ -1496,6 +1500,18 @@ public class RunReportQueryHandler
         }).ToList();
         var computed = _formulaProjector.Project(allFields, pageRows, Relationships.ReferenceOriginalFallback.Apply(allFields, pageRows, merged), table);
         return pageRows.Select((row, i) => (row, computed[i])).ToList();
+    }
+
+    /// <summary>A hash of everything that shapes a report's answer for this user: tenant, user, the saved definition and every run
+    /// parameter (runtime filters written out by hand: JSON skips tuple fields). For <see cref="ReportRepeatProbe"/> only.</summary>
+    public string QuestionHash(RunReportQuery query, Report report)
+    {
+        var filters = query.RuntimeFilters is null ? "" : string.Join(";", query.RuntimeFilters.Select(f => $"{f.FieldId}|{f.Value}|{f.SubField}"));
+        var text = string.Concat(_queryContext.TenantId.ToString(CultureInfo.InvariantCulture), "\u0001",
+            _queryContext.UserId.ToString(CultureInfo.InvariantCulture), "\u0001", report.Id.ToString(CultureInfo.InvariantCulture), "\u0001",
+            report.Definition ?? "", "\u0001", filters, "\u0001",
+            System.Text.Json.JsonSerializer.Serialize(query with { RuntimeFilters = null }));
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)));
     }
 
     private static List<string>? BuildSearchOrderBy(IReadOnlyList<SortSpec>? sortFields, IReadOnlyList<AppField> allFields)

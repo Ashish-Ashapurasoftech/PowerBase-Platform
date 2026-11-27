@@ -80,18 +80,28 @@ public sealed class MetadataCache : IMetadataCache
 
     public async Task<T> GetOrAddAsync<T>(long tenantId, string group, string key, Func<Task<T>> factory) where T : class
     {
-        if (!_options.Enabled) return await factory();
+        if (CacheMetrics.SummaryDue())
+            _logger.LogInformation("Cache metrics since start: {Metrics}", string.Join(", ", CacheMetrics.Snapshot().Select(m => $"{m.Key}={m.Value}")));
+        if (!_options.Enabled)
+        {
+            CacheMetrics.Lookup(group, CacheMetrics.Source.Bypass);
+            return await factory();
+        }
 
         // Other instances' writes first: a moved version drops the group here before it is read. Without readable versions a
         // security group is answered from SQL every time (fail closed); other groups keep the local behaviour.
         if (_versions is not null && !await SyncAsync(tenantId) && MetadataCacheGroups.IsSecurityRelevant(group))
+        {
+            CacheMetrics.Lookup(group, CacheMetrics.Source.Bypass);
             return await factory();
+        }
 
         var state = _groups.GetOrAdd((tenantId, group), _ => new GroupState());
         var cacheKey = $"mc:{tenantId}:{group}:{key}";
         if (_cache.TryGetValue(cacheKey, out T? hit) && hit is not null)
         {
             _logger.LogDebug("Metadata cache hit {Key}", cacheKey);
+            CacheMetrics.Lookup(group, CacheMetrics.Source.L1);
             return hit;
         }
 
@@ -107,10 +117,16 @@ public sealed class MetadataCache : IMetadataCache
 
         T? value;
         if (quarantined)
+        {
+            CacheMetrics.Lookup(group, CacheMetrics.Source.Bypass);
             value = await factory();   // not stored anyway: no point sharing the load
+        }
         else
         {
-            var load = _inflight.GetOrAdd(cacheKey, _ => new Lazy<Task<object?>>(async () => await LoadAsync(tenantId, group, key, factory)));
+            var mine = new Lazy<Task<object?>>(async () => await LoadAsync(tenantId, group, key, factory));
+            var load = _inflight.GetOrAdd(cacheKey, mine);
+            // The loading request counts where it was answered (L2 or SQL, inside LoadAsync); the others waited for it.
+            if (!ReferenceEquals(load, mine)) CacheMetrics.Lookup(group, CacheMetrics.Source.Shared);
             try { value = (T?)await load.Value; }
             finally { _inflight.TryRemove(new KeyValuePair<string, Lazy<Task<object?>>>(cacheKey, load)); }
         }
@@ -143,7 +159,10 @@ public sealed class MetadataCache : IMetadataCache
                 using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(Math.Max(10, _options.L2TimeoutMs)));
                 var bytes = await _l2!.GetAsync(l2Key, timeout.Token);
                 if (bytes is { Length: > 0 } && System.Text.Json.JsonSerializer.Deserialize<T>(bytes, L2Json) is { } fromL2)
+                {
+                    CacheMetrics.Lookup(group, CacheMetrics.Source.L2);
                     return fromL2;
+                }
             }
             catch (Exception ex)
             {
@@ -152,6 +171,7 @@ public sealed class MetadataCache : IMetadataCache
             }
         }
 
+        CacheMetrics.Lookup(group, CacheMetrics.Source.Sql);
         var value = await factory();
         // Decided before the SQL read started: a version that moved less than the quarantine ago may announce a write still open, and
         // what SQL returned may be the old value — shared under the new version it would be served to every instance for hours.
@@ -166,6 +186,7 @@ public sealed class MetadataCache : IMetadataCache
                     using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
                     await _l2!.SetAsync(l2Key, bytes, new DistributedCacheEntryOptions
                         { AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(Math.Max(1, _options.TtlHours)) }, timeout.Token);
+                    CacheMetrics.L2BytesWritten(group, bytes.Length);
                 }
                 catch (Exception ex) { L2Down(ex); }
             });
@@ -202,6 +223,7 @@ public sealed class MetadataCache : IMetadataCache
     private void L2Down(Exception ex)
     {
         Interlocked.Exchange(ref _l2DownUntilTicks, (DateTime.UtcNow + TimeSpan.FromSeconds(30)).Ticks);
+        CacheMetrics.L2Error();
         _logger.LogWarning(ex, "Metadata L2 cache (Redis) unavailable; using SQL for 30 s");
     }
 
